@@ -27,6 +27,18 @@ go.work.sum
 # env file
 .env
 
+# Build output
+/bin/
+/discovery-server
+/trove-probe
+
+# Local runtime data: TLS identity + analytics SQLite
+server.key
+server.crt
+*.db
+*.db-wal
+*.db-shm
+
 # Editor/IDE
 # .idea/
 # .vscode/
