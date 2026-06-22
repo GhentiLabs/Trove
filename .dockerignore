@@ -1,0 +1,12 @@
+# Keep VCS, local secrets, and build artifacts out of the Docker build context.
+.git
+.github
+.claude
+bin/
+certs/
+.env
+server.key
+server.crt
+*.db
+*.db-wal
+*.db-shm

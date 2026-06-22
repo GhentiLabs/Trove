@@ -1,0 +1,22 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - errorlint
+  exclusions:
+    rules:
+      # Test code routinely ignores Close errors in cleanup and reuses response
+      # bodies through helpers the linters cannot follow.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+formatters:
+  enable:
+    - gofmt

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
