@@ -1,4 +1,4 @@
-.PHONY: build test race vet lint fmt run tidy all
+.PHONY: build test race vet lint fmt run tidy deploy all
 
 DISCOVERY_BIN := bin/discovery-server
 DISCOVERY_PKG := ./discovery/cmd/discovery-server
@@ -28,3 +28,6 @@ run:
 
 tidy:
 	go mod tidy
+
+deploy:
+	bash discovery/deploy/deploy.sh

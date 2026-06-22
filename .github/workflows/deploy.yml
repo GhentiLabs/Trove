@@ -1,0 +1,43 @@
+# Manual deploy: build the amd64 image in CI and ship it to the GCE VM.
+# Deliberately workflow_dispatch only (no push-to-deploy) for a single instance.
+#
+# Required repo secret:
+#   GCP_SA_KEY  - JSON key for a service account that can scp/ssh to the VM
+#                 (roles/compute.instanceAdmin.v1 + roles/iam.serviceAccountUser,
+#                 and OS Login enabled, or metadata-based SSH access).
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: GCP project
+        default: trove-discovery
+      vm:
+        description: GCE instance name
+        default: free-tier-vm
+      zone:
+        description: GCE zone
+        default: us-central1-a
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          docker build --platform linux/amd64 --provenance=false \
+            -f discovery/deploy/Dockerfile -t trove-discovery-server:latest .
+          docker save trove-discovery-server:latest | gzip > /tmp/trove-img.tgz
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: |
+          gcloud config set project "${{ inputs.project }}"
+          gcloud compute scp /tmp/trove-img.tgz "${{ inputs.vm }}:~/trove-img.tgz" --zone "${{ inputs.zone }}" --quiet
+          gcloud compute scp discovery/deploy/docker-compose.yml "${{ inputs.vm }}:~/docker-compose.yml" --zone "${{ inputs.zone }}" --quiet
+          gcloud compute ssh "${{ inputs.vm }}" --zone "${{ inputs.zone }}" --quiet --command="\
+            sudo docker load -i ~/trove-img.tgz && \
+            sudo docker compose -p deploy -f ~/docker-compose.yml up -d --no-build && \
+            sudo docker image prune -f >/dev/null"
