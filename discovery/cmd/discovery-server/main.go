@@ -118,7 +118,7 @@ func run(log *slog.Logger) error {
 	public := &http.Server{
 		Addr:              cfg.PublicListenAddr,
 		Handler:           srv.Handler(),
-		TLSConfig:         identity.ServerTLSConfig(cert, cfg.RequireClientCert),
+		TLSConfig:         identity.ServerTLSConfig(cert),
 		ReadTimeout:       cfg.ReadTimeout,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -178,11 +178,17 @@ func serve(log *slog.Logger, name string, srv *http.Server, errCh chan<- error) 
 }
 
 func healthCheck(metricsAddr string) error {
-	_, port, err := net.SplitHostPort(metricsAddr)
+	host, port, err := net.SplitHostPort(metricsAddr)
 	if err != nil {
 		return err
 	}
-	resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	resp, err := http.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
 	if err != nil {
 		return err
 	}

@@ -25,9 +25,6 @@ func TestLoadDefaults(t *testing.T) {
 	if c.ServerKeyPath != "server.key" || c.ServerCertPath != "server.crt" {
 		t.Errorf("server key/cert = %q / %q", c.ServerKeyPath, c.ServerCertPath)
 	}
-	if !c.RequireClientCert {
-		t.Error("require client cert should default true")
-	}
 	if c.MaxSignalMsgBytes != 4096 {
 		t.Errorf("max signal bytes = %d", c.MaxSignalMsgBytes)
 	}

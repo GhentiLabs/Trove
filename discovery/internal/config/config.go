@@ -28,10 +28,9 @@ type Config struct {
 	MetricsListenAddr string
 	AdvertiseAddr     string
 
-	ServerKeyPath     string
-	ServerCertPath    string
-	RequireClientCert bool
-	HealthCheck       bool
+	ServerKeyPath  string
+	ServerCertPath string
+	HealthCheck    bool
 
 	TTLMin     time.Duration
 	TTLDefault time.Duration
@@ -71,7 +70,6 @@ func defaults() Config {
 		MetricsListenAddr:       "127.0.0.1:9090",
 		ServerKeyPath:           "server.key",
 		ServerCertPath:          "server.crt",
-		RequireClientCert:       true,
 		TTLMin:                  1 * time.Minute,
 		TTLDefault:              10 * time.Minute,
 		TTLMax:                  1 * time.Hour,
@@ -110,7 +108,6 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	c.AdvertiseAddr = e.str("TROVE_DISCOVERY_ADVERTISE_ADDR", c.AdvertiseAddr)
 	c.ServerKeyPath = e.str("TROVE_DISCOVERY_SERVER_KEY", c.ServerKeyPath)
 	c.ServerCertPath = e.str("TROVE_DISCOVERY_SERVER_CERT", c.ServerCertPath)
-	c.RequireClientCert = e.boolv("TROVE_DISCOVERY_REQUIRE_CLIENT_CERT", c.RequireClientCert)
 	c.TTLMin = e.dur("TROVE_DISCOVERY_TTL_MIN", c.TTLMin)
 	c.TTLDefault = e.dur("TROVE_DISCOVERY_TTL_DEFAULT", c.TTLDefault)
 	c.TTLMax = e.dur("TROVE_DISCOVERY_TTL_MAX", c.TTLMax)
@@ -162,7 +159,6 @@ func bindFlags(c *Config, args []string) error {
 	fs.StringVar(&c.AnalyticsDBPath, "analytics-db", c.AnalyticsDBPath, "analytics SQLite path")
 	fs.Int64Var(&c.AnalyticsDiskCapBytes, "analytics-disk-cap", c.AnalyticsDiskCapBytes, "analytics disk-usage cap in bytes")
 	fs.IntVar(&c.MaxWSConns, "max-ws-conns", c.MaxWSConns, "maximum concurrent signaling connections")
-	fs.BoolVar(&c.RequireClientCert, "require-client-cert", c.RequireClientCert, "require an mTLS client certificate")
 	fs.BoolVar(&c.HealthCheck, "healthcheck", c.HealthCheck, "probe the local metrics /healthz endpoint and exit")
 	return fs.Parse(args)
 }
@@ -255,19 +251,6 @@ func (e *envReader) i64(key string, def int64) int64 {
 		return def
 	}
 	return n
-}
-
-func (e *envReader) boolv(key string, def bool) bool {
-	v := e.getenv(key)
-	if v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		e.fail(key, err)
-		return def
-	}
-	return b
 }
 
 func (e *envReader) dur(key string, def time.Duration) time.Duration {

@@ -43,7 +43,7 @@ func (a Address) Validate() error {
 	if err != nil {
 		return fmt.Errorf("invalid ip %q", a.IP)
 	}
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
 		return fmt.Errorf("non-routable ip %q", a.IP)
 	}
 	if a.Port < 1 || a.Port > 65535 {

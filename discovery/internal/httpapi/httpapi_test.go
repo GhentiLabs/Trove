@@ -82,7 +82,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	ts := httptest.NewUnstartedServer(srv.Handler())
-	ts.TLS = identity.ServerTLSConfig(serverCert, true)
+	ts.TLS = identity.ServerTLSConfig(serverCert)
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
 

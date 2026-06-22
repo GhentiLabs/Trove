@@ -19,6 +19,8 @@ func TestAddressValidate(t *testing.T) {
 	invalid := []Address{
 		{IP: "not-an-ip", Port: 80, Type: AddressLAN},
 		{IP: "127.0.0.1", Port: 80, Type: AddressLAN},
+		{IP: "224.0.1.1", Port: 80, Type: AddressPublic},
+		{IP: "ff0e::1", Port: 80, Type: AddressPublic},
 		{IP: "1.2.3.4", Port: 0, Type: AddressLAN},
 		{IP: "1.2.3.4", Port: 70000, Type: AddressLAN},
 		{IP: "1.2.3.4", Port: 80, Type: "bogus"},

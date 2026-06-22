@@ -105,7 +105,7 @@ func TestPinnedDialAcceptsAndRejects(t *testing.T) {
 	}
 	serverPin := FingerprintCert(serverCert.Leaf)
 
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", ServerTLSConfig(serverCert, true))
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", ServerTLSConfig(serverCert))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +142,13 @@ func TestPinnedDialAcceptsAndRejects(t *testing.T) {
 		t.Fatalf("pinned dial with correct pin failed: %v", err)
 	}
 	conn.Close()
-	if got := <-peerCh; got != FingerprintCert(clientCert.Leaf) {
-		t.Fatalf("server derived client fingerprint %q, want %q", got, FingerprintCert(clientCert.Leaf))
+	select {
+	case got := <-peerCh:
+		if got != FingerprintCert(clientCert.Leaf) {
+			t.Fatalf("server derived client fingerprint %q, want %q", got, FingerprintCert(clientCert.Leaf))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for server to derive client fingerprint")
 	}
 
 	wrongPin := strings.Repeat("a", NodeIDLen)

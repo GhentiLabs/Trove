@@ -81,7 +81,6 @@ settings:
 | `TROVE_DISCOVERY_METRICS_ADDR` | `-metrics-addr` | `127.0.0.1:9090` | localhost-only metrics + health listener |
 | `TROVE_DISCOVERY_SERVER_KEY` | `-server-key` | `server.key` | persistent Ed25519 key (identity) |
 | `TROVE_DISCOVERY_SERVER_CERT` | `-server-cert` | `server.crt` | self-signed certificate |
-| `TROVE_DISCOVERY_REQUIRE_CLIENT_CERT` | `-require-client-cert` | `true` | demand an mTLS client cert |
 | `TROVE_DISCOVERY_ADVERTISE_ADDR` | `-advertise-addr` | (none) | public host or host:port for the `trove://` string |
 | `TROVE_DISCOVERY_TTL_MIN/DEFAULT/MAX` | `-ttl-*` | `1m`/`10m`/`1h` | announce TTL bounds (clamped) |
 | `TROVE_DISCOVERY_MAX_SIGNAL_BYTES` | — | `4096` | per signaling-message cap |

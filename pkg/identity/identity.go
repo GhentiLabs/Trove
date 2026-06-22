@@ -179,18 +179,14 @@ func matchingCert(pemData []byte, key ed25519.PrivateKey) (tls.Certificate, bool
 	return tls.Certificate{Certificate: [][]byte{block.Bytes}, PrivateKey: key, Leaf: cert}, true
 }
 
-// ServerTLSConfig builds the discovery server's TLS 1.3 config. With
-// requireClientCert it demands a client certificate but performs no CA
-// verification; the caller derives the client's node ID from the presented cert.
-func ServerTLSConfig(cert tls.Certificate, requireClientCert bool) *tls.Config {
-	auth := tls.NoClientCert
-	if requireClientCert {
-		auth = tls.RequireAnyClientCert
-	}
+// ServerTLSConfig builds the discovery server's TLS 1.3 config. It demands a
+// client certificate but performs no CA verification; the caller derives the
+// client's node ID from the presented cert.
+func ServerTLSConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
-		ClientAuth:   auth,
+		ClientAuth:   tls.RequireAnyClientCert,
 	}
 }
 
