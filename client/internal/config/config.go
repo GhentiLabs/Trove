@@ -101,32 +101,16 @@ func (s *Store) init(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, schema); err != nil {
 			return fmt.Errorf("config: schema: %w", err)
 		}
-		if err := checkMeta(ctx, tx, "schema_version", fmt.Sprint(SchemaVersion), s.validateVersion); err != nil {
+		if err := storage.CheckMeta(ctx, tx, "schema_version", fmt.Sprint(SchemaVersion), s.validateVersion); err != nil {
 			return err
 		}
-		return checkMeta(ctx, tx, "node_id", s.node, func(got string) error {
+		return storage.CheckMeta(ctx, tx, "node_id", s.node, func(got string) error {
 			if got != s.node {
 				return fmt.Errorf("%w: stored %q, this node %q", ErrNodeMismatch, got, s.node)
 			}
 			return nil
 		})
 	})
-}
-
-func checkMeta(ctx context.Context, tx *storage.Tx, key, want string, validate func(got string) error) error {
-	var got string
-	err := tx.QueryRow(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&got)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if _, err := tx.Exec(ctx, `INSERT INTO meta (key, value) VALUES (?, ?)`, key, want); err != nil {
-			return fmt.Errorf("config: set %s: %w", key, err)
-		}
-		return nil
-	case err != nil:
-		return fmt.Errorf("config: read %s: %w", key, err)
-	default:
-		return validate(got)
-	}
 }
 
 func (s *Store) validateVersion(got string) error {

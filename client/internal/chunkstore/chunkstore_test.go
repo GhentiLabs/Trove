@@ -40,13 +40,13 @@ func newStore(t *testing.T, target int64) (*Store, string) {
 	return s, dir
 }
 
-func refcount(t *testing.T, s *Store, id hasher.ChunkID) int {
+func lastSeen(t *testing.T, s *Store, id hasher.ChunkID) int64 {
 	t.Helper()
-	var n int
-	if err := s.db.QueryRow(context.Background(), `SELECT refcount FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&n); err != nil {
-		t.Fatalf("refcount: %v", err)
+	var ms int64
+	if err := s.db.QueryRow(context.Background(), `SELECT last_seen_ms FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&ms); err != nil {
+		t.Fatalf("last_seen: %v", err)
 	}
-	return n
+	return ms
 }
 
 func countChunks(t *testing.T, s *Store) int {
@@ -74,8 +74,8 @@ func TestPutGetDedup(t *testing.T) {
 	if id1 != id2 {
 		t.Fatal("same content produced different ids")
 	}
-	if rc := refcount(t, s, id1); rc != 2 {
-		t.Fatalf("refcount = %d, want 2", rc)
+	if lastSeen(t, s, id1) == 0 {
+		t.Fatal("last_seen not set after put")
 	}
 	if n := countChunks(t, s); n != 1 {
 		t.Fatalf("chunk count = %d, want 1 (deduped)", n)
@@ -142,8 +142,8 @@ func TestEncryptedRoundTripAndDedup(t *testing.T) {
 	if _, err := s.Put(ctx, fc, data); err != nil {
 		t.Fatalf("Put again: %v", err)
 	}
-	if rc := refcount(t, s, id); rc != 2 {
-		t.Fatalf("refcount = %d, want 2 (encrypted dedup)", rc)
+	if n := countChunks(t, s); n != 1 {
+		t.Fatalf("chunk count = %d, want 1 (encrypted dedup)", n)
 	}
 
 	got, err := s.Get(ctx, fc, id)
@@ -555,5 +555,180 @@ func TestDedupOnSmallEdit(t *testing.T) {
 	added := countChunks(t, s) - before
 	if added < 1 || added > 3 {
 		t.Fatalf("small edit added %d chunks, want 1..3", added)
+	}
+}
+
+func TestIterChunks(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 0)
+	want := map[hasher.ChunkID]bool{}
+	for i := range 5 {
+		id, err := s.Put(ctx, FolderContext{}, genData(1000, uint64(i)))
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		want[id] = true
+	}
+	seen := map[hasher.ChunkID]bool{}
+	for st, err := range s.IterChunks(ctx) {
+		if err != nil {
+			t.Fatalf("IterChunks: %v", err)
+		}
+		if st.LastSeen <= 0 {
+			t.Fatalf("chunk %s has no last_seen", st.ID)
+		}
+		seen[st.ID] = true
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("iterated %d chunks, want %d", len(seen), len(want))
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("chunk %s missing from iteration", id)
+		}
+	}
+}
+
+func TestDeleteChunks(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 0)
+	a, _ := s.Put(ctx, FolderContext{}, genData(1000, 1))
+	b, _ := s.Put(ctx, FolderContext{}, genData(1000, 2))
+
+	before := lastSeen(t, s, a) + 1
+	if n, err := s.DeleteChunks(ctx, []hasher.ChunkID{a}, before); err != nil || n != 1 {
+		t.Fatalf("DeleteChunks: n=%d err=%v, want 1, nil", n, err)
+	}
+	if _, err := s.Get(ctx, FolderContext{}, a); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("deleted chunk Get err = %v, want ErrChunkNotFound", err)
+	}
+	if _, err := s.Get(ctx, FolderContext{}, b); err != nil {
+		t.Fatalf("surviving chunk gone: %v", err)
+	}
+	// Idempotent: deleting again (and a missing id) is a no-op.
+	if n, err := s.DeleteChunks(ctx, []hasher.ChunkID{a}, before); err != nil || n != 0 {
+		t.Fatalf("re-delete: n=%d err=%v, want 0, nil", n, err)
+	}
+}
+
+func TestDeleteChunksRespectsLastSeenGuard(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 0)
+	id, err := s.Put(ctx, FolderContext{}, genData(1000, 1))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ls := lastSeen(t, s, id)
+
+	// beforeMs at or below last_seen: the guard spares the chunk.
+	if n, err := s.DeleteChunks(ctx, []hasher.ChunkID{id}, ls); err != nil || n != 0 {
+		t.Fatalf("guarded delete: n=%d err=%v, want 0, nil", n, err)
+	}
+	if ok, err := s.Has(ctx, id); err != nil || !ok {
+		t.Fatalf("chunk missing after guarded delete: ok=%v err=%v", ok, err)
+	}
+
+	// beforeMs above last_seen: the chunk is deleted.
+	if n, err := s.DeleteChunks(ctx, []hasher.ChunkID{id}, ls+1); err != nil || n != 1 {
+		t.Fatalf("delete past guard: n=%d err=%v, want 1, nil", n, err)
+	}
+	if ok, err := s.Has(ctx, id); err != nil || ok {
+		t.Fatalf("chunk present after delete: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReclaimBlobs(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 100) // tiny target so each put rolls to a new blob
+	a, _ := s.Put(ctx, FolderContext{}, genData(200, 1))
+	if _, err := s.Put(ctx, FolderContext{}, genData(200, 2)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// a lives in a rolled, now-closed blob. Delete it and reclaim.
+	if _, err := s.DeleteChunks(ctx, []hasher.ChunkID{a}, lastSeen(t, s, a)+1); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.ReclaimBlobs(ctx)
+	if err != nil {
+		t.Fatalf("ReclaimBlobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reclaimed %d blobs, want 1", n)
+	}
+	// The open blob (holding chunk b) must survive.
+	if got := countChunks(t, s); got != 1 {
+		t.Fatalf("chunk count after reclaim = %d, want 1", got)
+	}
+}
+
+func TestMigrateV1ToV2(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "idx.db")
+
+	db, err := storage.Open(storage.Options{Path: path, MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	const v1 = `
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE chunks (chunk_id BLOB PRIMARY KEY, backing INTEGER NOT NULL, blob_id INTEGER, blob_offset INTEGER, length INTEGER NOT NULL, codec INTEGER NOT NULL DEFAULT 0, encrypted INTEGER NOT NULL DEFAULT 0, plaintext_length INTEGER NOT NULL, refcount INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
+CREATE TABLE blobs (blob_id INTEGER PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL);
+CREATE TABLE chunk_locations (chunk_id BLOB NOT NULL, file_path TEXT NOT NULL, file_offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (chunk_id, file_path, file_offset)) WITHOUT ROWID;`
+	if _, err := db.Exec(ctx, v1); err != nil {
+		t.Fatalf("create v1: %v", err)
+	}
+	id := hasher.Sum([]byte("legacy chunk"))
+	if _, err := db.Exec(ctx,
+		`INSERT INTO chunks (chunk_id, backing, length, plaintext_length, refcount) VALUES (?, 1, 12, 12, 3)`, id.Bytes()); err != nil {
+		t.Fatalf("insert v1 chunk: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', '1')`); err != nil {
+		t.Fatalf("set v1 version: %v", err)
+	}
+	_ = db.Close()
+
+	db2, err := storage.Open(storage.Options{Path: path, MaxOpenConns: 4})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+	s, err := Open(Options{DB: db2, BlobDir: filepath.Join(dir, "blobs")})
+	if err != nil {
+		t.Fatalf("Open(migrate): %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var v string
+	if err := db2.QueryRow(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&v); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if v != "2" {
+		t.Fatalf("schema_version = %s, want 2", v)
+	}
+	if ls := lastSeen(t, s, id); ls <= 0 {
+		t.Fatalf("last_seen not backfilled: %d", ls)
+	}
+	var dummy int
+	if err := db2.QueryRow(ctx, `SELECT refcount FROM chunks LIMIT 1`).Scan(&dummy); err == nil {
+		t.Fatal("refcount column still present after migration")
+	}
+}
+
+func TestOpenRejectsFutureSchema(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 0)
+	if _, err := s.db.Exec(ctx, `UPDATE meta SET value='99' WHERE key='schema_version'`); err != nil {
+		t.Fatalf("bump version: %v", err)
+	}
+	_ = s.Close()
+
+	db, err := storage.Open(storage.Options{Path: s.db.Path(), MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := Open(Options{DB: db, BlobDir: filepath.Join(filepath.Dir(s.db.Path()), "blobs")}); !errors.Is(err, ErrSchemaTooNew) {
+		t.Fatalf("Open future schema err = %v, want ErrSchemaTooNew", err)
 	}
 }
