@@ -230,6 +230,28 @@ func TestIncrementalDeleteTombstones(t *testing.T) {
 	}
 }
 
+func TestScanAllFailsFastOnMissingRoot(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), "hello")
+	s, ms, _, _ := newScanner(t, root)
+	ctx := context.Background()
+	if err := s.Rescan(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// The root vanishes (transient mount loss, rename, etc). A rescan must error
+	// rather than scan nothing and tombstone every known file.
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rescan(ctx); err == nil {
+		t.Fatal("Rescan with a missing root should fail, not silently tombstone")
+	}
+	if rec := mustGet(t, ms, "a.txt"); rec.Deleted {
+		t.Fatal("a missing root mass-tombstoned the folder")
+	}
+}
+
 func TestRescanReconcilesOutOfBandChanges(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "keep.txt"), "keep")

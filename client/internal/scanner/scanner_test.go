@@ -7,6 +7,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
+	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/watcher"
 )
 
@@ -87,6 +89,33 @@ func TestControlLoopSnapshotsOnQuiesce(t *testing.T) {
 			t.Fatalf("want exactly one snapshot on quiesce, got %d", snapshots)
 		}
 	})
+}
+
+func TestRescanJitterDefaults(t *testing.T) {
+	base := Options{Root: "/r", Chunks: &chunkstore.Store{}, Model: &model.Store{}, Watcher: watcher.NewFake(), RescanInterval: time.Minute}
+
+	// Unset jitter randomizes by default within [interval, interval+default).
+	unset, err := New(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 50 {
+		d := unset.nextRescan()
+		if d < time.Minute || d >= time.Minute+DefaultRescanJitter {
+			t.Fatalf("default jitter out of range: %v", d)
+		}
+	}
+
+	// Negative jitter explicitly disables it: always exactly the interval.
+	off := base
+	off.RescanJitter = -1
+	disabled, err := New(off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := disabled.nextRescan(); d != time.Minute {
+		t.Fatalf("disabled jitter = %v, want exactly %v", d, time.Minute)
+	}
 }
 
 func TestControlLoopFiresPeriodicRescan(t *testing.T) {

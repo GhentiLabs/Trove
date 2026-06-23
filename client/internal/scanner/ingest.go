@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"iter"
@@ -26,8 +27,17 @@ type scanResult struct {
 
 // ScanAll walks the whole folder and ingests every changed path. It does not
 // detect deletions (that is the periodic rescan's job); it is the startup
-// reconcile and the basis for the full rescan.
+// reconcile and the basis for the full rescan. It fails fast if the root itself
+// is missing or not a directory — otherwise a transient root outage would scan
+// nothing and the rescan would tombstone the entire folder.
 func (s *Scanner) ScanAll(ctx context.Context) error {
+	fi, err := os.Stat(s.root)
+	if err != nil {
+		return fmt.Errorf("scanner: scan root: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("scanner: scan root %q is not a directory", s.root)
+	}
 	return s.ingest(ctx, s.walkPaths)
 }
 

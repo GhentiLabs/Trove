@@ -61,6 +61,13 @@ func TestFSNotifyWatchesNewSubdir(t *testing.T) {
 	waitEvent(t, w, p)
 }
 
+func TestNewFailsOnMissingRoot(t *testing.T) {
+	if w, err := New(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		_ = w.Close()
+		t.Fatal("New should fail when the root cannot be walked, not watch nothing")
+	}
+}
+
 func TestFSNotifyCloseStopsEvents(t *testing.T) {
 	root := t.TempDir()
 	w, err := New(root)

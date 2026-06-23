@@ -107,11 +107,16 @@ func (fw *fsWatcher) forwardErr(err error) {
 	}
 }
 
-// addTree adds a watch for dir and every directory beneath it.
+// addTree adds a watch for dir and every directory beneath it. A failure to walk
+// dir itself is fatal (the caller asked to watch it); unreadable subtrees beneath
+// are tolerated, since the periodic rescan backstops them.
 func addTree(w *fsnotify.Watcher, dir string) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // unreadable subtree; rescan backstops it
+			if path == dir {
+				return fmt.Errorf("watcher: walk %s: %w", dir, err)
+			}
+			return nil
 		}
 		if !d.IsDir() {
 			return nil

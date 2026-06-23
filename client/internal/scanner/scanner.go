@@ -113,12 +113,16 @@ func New(opts Options) (*Scanner, error) {
 		s.workers = DefaultWorkers
 	}
 	if s.nextRescan == nil {
-		interval, jitter := opts.RescanInterval, opts.RescanJitter
+		interval := opts.RescanInterval
 		if interval <= 0 {
 			interval = DefaultRescanInterval
 		}
-		if jitter < 0 {
-			jitter = DefaultRescanJitter
+		jitter := opts.RescanJitter
+		switch {
+		case jitter == 0:
+			jitter = DefaultRescanJitter // unset: randomize by default to avoid synchronized rescans
+		case jitter < 0:
+			jitter = 0 // negative: explicitly disable jitter
 		}
 		s.nextRescan = func() time.Duration {
 			if jitter == 0 {
