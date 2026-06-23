@@ -98,6 +98,26 @@ func (db *DB) WithTx(ctx context.Context, fn func(tx *Tx) error) (err error) {
 	return nil
 }
 
+// CheckMeta reads meta[key] within tx: if absent it inserts want, otherwise it
+// passes the stored value to validate. It is the shared get-or-bind pattern store
+// packages use for schema-version and identity rows in their meta(key, value)
+// tables.
+func CheckMeta(ctx context.Context, tx *Tx, key, want string, validate func(got string) error) error {
+	var got string
+	err := tx.QueryRow(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&got)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := tx.Exec(ctx, `INSERT INTO meta (key, value) VALUES (?, ?)`, key, want); err != nil {
+			return fmt.Errorf("storage: set %s: %w", key, err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("storage: read %s: %w", key, err)
+	default:
+		return validate(got)
+	}
+}
+
 // Tx is a transaction handle passed to a WithTx callback.
 type Tx struct {
 	tx *sql.Tx
