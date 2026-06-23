@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package trove.wire.v1;
+
+option go_package = "github.com/GhentiLabs/Trove/client/internal/wire/wirepb;wirepb";
+
+// Hello is the first frame each peer sends, before authorization. It rides in a
+// magic-prefixed envelope (see the framing layer), not under Header.
+message Hello {
+  string node_id = 1;
+  uint32 wire_format_version = 2;
+  string name = 3;
+  string client_name = 4;
+  string client_version = 5;
+}
+
+// Header precedes every post-Hello message body on the control stream. It carries
+// the body's type so a peer can route without parsing it, and the codec used to
+// compress the body so it can be decompressed without parsing it.
+message Header {
+  uint32 type = 1;
+  uint32 compression = 2;
+}
+
+// FolderType is the reserved direction/trust shape (the clean BEP set). M3
+// populates only the send-receive default; direction (M4) and receive-encrypted
+// (M6) ride this field later.
+enum FolderType {
+  FOLDER_TYPE_SEND_RECEIVE = 0;
+  FOLDER_TYPE_SEND_ONLY = 1;
+  FOLDER_TYPE_RECEIVE_ONLY = 2;
+  FOLDER_TYPE_RECEIVE_ENCRYPTED = 3;
+}
+
+// Folder is one folder a peer offers in its NetworkConfig. Folders match across
+// nodes solely by folder_id (the shared string agreed at pairing), independent of
+// the encryption key. Tags 4-6 are reserved for the M4 resync cursor
+// (index_epoch_id, high_water_sequence) and the M6 key-agreement token
+// (encryption_password_token).
+message Folder {
+  string folder_id = 1;
+  FolderType folder_type = 2;
+  bool encrypted = 3;
+  reserved 4, 5, 6;
+}
+
+// NetworkConfig is the first post-Hello message, sent exactly once each way. The
+// connection's shared-folder set is the intersection of both sides' folder_ids.
+// Tag 3 is reserved for advertised addresses (address gossip).
+message NetworkConfig {
+  repeated Folder folders = 1;
+  uint32 compression = 2;
+  reserved 3;
+}
+
+// Ping is the idle-timer keepalive.
+message Ping {}
+
+// Close requests a graceful shutdown.
+message Close {
+  string reason = 1;
+}

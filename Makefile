@@ -1,9 +1,12 @@
-.PHONY: build test race vet lint fmt run tidy deploy all
+.PHONY: build test race vet lint fmt run tidy deploy proto all
 
 DISCOVERY_BIN := bin/discovery-server
 DISCOVERY_PKG := ./discovery/cmd/discovery-server
 CHUNK_BIN := bin/trove-chunk
 CHUNK_PKG := ./client/cmd/trove-chunk
+
+PROTOC_GEN_GO_VERSION := v1.36.8
+WIRE_DIR := client/internal/wire
 
 all: fmt vet test build
 
@@ -31,6 +34,15 @@ run:
 
 tidy:
 	go mod tidy
+
+# proto regenerates the committed wire *.pb.go. Requires protoc on PATH; installs
+# the pinned protoc-gen-go into GOBIN. Contributors only need this when editing .proto.
+proto:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	PATH="$$PATH:$$(go env GOPATH)/bin" protoc \
+		--proto_path=$(WIRE_DIR) \
+		--go_out=$(WIRE_DIR)/wirepb --go_opt=paths=source_relative \
+		$(WIRE_DIR)/wire.proto
 
 deploy:
 	bash discovery/deploy/deploy.sh

@@ -20,6 +20,11 @@ const (
 	CodecZstd Codec = 1
 )
 
+// MaxDecodedSize bounds zstd decompression output to defend against decompression
+// bombs on untrusted input. It must be at least the largest plaintext any caller
+// decodes: the wire control-message cap (64 MiB) dominates the chunk cap (4 MiB).
+const MaxDecodedSize = 64 << 20
+
 // Pooled and reused via EncodeAll/DecodeAll; never Closed, which would free them.
 var (
 	encoders = sync.Pool{New: func() any {
@@ -30,7 +35,7 @@ var (
 		return e
 	}}
 	decoders = sync.Pool{New: func() any {
-		d, err := zstd.NewReader(nil)
+		d, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(MaxDecodedSize))
 		if err != nil {
 			panic(fmt.Sprintf("compression: new decoder: %v", err))
 		}
