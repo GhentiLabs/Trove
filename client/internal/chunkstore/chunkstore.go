@@ -141,6 +141,10 @@ func Open(opts Options) (*Store, error) {
 	if err := os.MkdirAll(opts.BlobDir, 0o700); err != nil {
 		return nil, fmt.Errorf("chunkstore: blob dir: %w", err)
 	}
+	// MkdirAll leaves an existing directory's mode untouched, so tighten it.
+	if err := os.Chmod(opts.BlobDir, 0o700); err != nil {
+		return nil, fmt.Errorf("chunkstore: blob dir perms: %w", err)
+	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -362,6 +366,12 @@ func (s *Store) bumpRefcount(ctx context.Context, id hasher.ChunkID) error {
 
 // PutVirtual records a chunk as a pointer into filePath without copying bytes.
 func (s *Store) PutVirtual(ctx context.Context, id hasher.ChunkID, filePath string, offset int64, length, plaintextLen int) error {
+	if !filepath.IsAbs(filePath) {
+		return fmt.Errorf("chunkstore: PutVirtual requires an absolute path, got %q", filePath)
+	}
+	if offset < 0 || length <= 0 || length > maxStoredLen || plaintextLen <= 0 {
+		return fmt.Errorf("chunkstore: invalid virtual chunk: offset=%d length=%d plaintext=%d", offset, length, plaintextLen)
+	}
 	switch backing, exists, err := s.backingOf(ctx, id); {
 	case err != nil:
 		return err
@@ -409,6 +419,9 @@ func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([
 		return s.readVirtual(ctx, id)
 	}
 
+	if !blobID.Valid || !offset.Valid {
+		return nil, fmt.Errorf("%w: physical chunk missing blob location", ErrCorruptIndex)
+	}
 	var path string
 	if err := s.db.QueryRow(ctx, `SELECT path FROM blobs WHERE blob_id = ?`, blobID.Int64).Scan(&path); err != nil {
 		return nil, fmt.Errorf("chunkstore: blob path: %w", err)

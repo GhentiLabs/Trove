@@ -423,6 +423,32 @@ func TestBackingMismatch(t *testing.T) {
 	_ = vids
 }
 
+func TestPutVirtualValidation(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, 0)
+	id := hasher.Sum([]byte("x"))
+	cases := []struct {
+		name   string
+		path   string
+		offset int64
+		length int
+		plen   int
+	}{
+		{"relative path", "rel/path.bin", 0, 10, 10},
+		{"negative offset", "/abs.bin", -1, 10, 10},
+		{"zero length", "/abs.bin", 0, 0, 10},
+		{"zero plaintext", "/abs.bin", 0, 10, 0},
+		{"oversize length", "/abs.bin", 0, maxStoredLen + 1, 10},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := s.PutVirtual(ctx, id, c.path, c.offset, c.length, c.plen); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
 func TestConcurrentPutAndGet(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, 64<<10) // small target exercises rollover under concurrency
