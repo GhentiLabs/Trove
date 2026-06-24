@@ -11,7 +11,11 @@ import (
 	"net"
 )
 
-// Stream is a bidirectional byte stream within a Conn (one QUIC stream).
+// Stream is a bidirectional byte stream within a Conn (one QUIC stream). Close
+// half-closes the write side (sends FIN); the read side stays open until the peer
+// closes its end. This is the QUIC stream contract M4's data plane relies on (one
+// chunk per stream, sender Close = end-of-chunk, receiver reads to EOF). Tear the
+// whole connection down via Conn.Close.
 type Stream interface {
 	io.Reader
 	io.Writer

@@ -20,9 +20,9 @@ identity/snapshot constants (`docs/m2-frozen-constants.md`), and are pinned by `
 
 ## ALPN token (TLS)
 
-`tls.Config.NextProtos` on both the dial and accept paths carries a Trove ALPN token
-(placeholder `"trove/1"`), to be finalized and golden-noted when `client/internal/transport`
-lands in M3 step 4. It is frozen contract once shipped.
+`tls.Config.NextProtos` on both the dial and accept paths carries the Trove ALPN token
+**`"trove/1"`** (`client/internal/transport`, const `alpn`). quic-go requires a non-empty
+NextProtos; a peer offering a different token fails the TLS handshake. Frozen contract.
 
 ## Message types (frozen values)
 
