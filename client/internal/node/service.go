@@ -97,6 +97,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("node: signal: %w", err)
 	}
+	// Close the signaler before s.close() (LIFO defer order): stopping new inbound
+	// requests first ensures no punchInbound calls Probe on a closed transport.
 	defer func() { _ = sig.Close() }()
 
 	mdns, err := discovery.Advertise(s.opts.NodeID, s.port())
@@ -135,7 +137,7 @@ func (s *Service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { s.announceLoop(ctx) })
 	wg.Go(func() { s.browseLoop(ctx) })
-	wg.Go(func() { s.incomingLoop(ctx, sig) })
+	wg.Go(func() { s.incomingLoop(ctx, sig, &wg) })
 	wg.Go(func() { _ = mgr.Run(ctx) })
 	wg.Wait()
 	return ctx.Err()
@@ -164,14 +166,15 @@ func (s *Service) browseLoop(ctx context.Context) {
 }
 
 // incomingLoop opens this node's NAT mapping when a peer punches toward it, so the
-// peer's simultaneous dial reaches the accept loop.
-func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler) {
+// peer's simultaneous dial reaches the accept loop. Each probe is tracked in wg so
+// Run does not close the transport while a punchInbound is still using it.
+func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case ir := <-sig.Incoming():
-			go s.punchInbound(ctx, ir)
+			wg.Go(func() { s.punchInbound(ctx, ir) })
 		}
 	}
 }
@@ -199,6 +202,10 @@ func (s *Service) gather(ctx context.Context) {
 	gctx, cancel := context.WithTimeout(ctx, gatherTimeout)
 	defer cancel()
 
+	s.mu.Lock()
+	existing := s.portMap
+	s.mu.Unlock()
+
 	cands, err := discovery.LocalCandidates(s.port())
 	if err != nil {
 		s.log.Warn("node: local candidates", "err", err)
@@ -210,15 +217,24 @@ func (s *Service) gather(ctx context.Context) {
 	} else {
 		s.log.Warn("node: announce", "err", err)
 	}
-	if s.portMap == nil {
+
+	switch {
+	case existing != nil:
+		cands = append(cands, existing.External)
+	default:
 		if pm, err := discovery.MapPort(gctx, s.port()); err == nil {
 			s.mu.Lock()
-			s.portMap = pm
+			won := s.portMap == nil
+			if won {
+				s.portMap = pm
+			}
+			winner := s.portMap
 			s.mu.Unlock()
-			cands = append(cands, pm.External)
+			if !won {
+				_ = pm.Release() // a concurrent gather won; drop the duplicate mapping
+			}
+			cands = append(cands, winner.External)
 		}
-	} else {
-		cands = append(cands, s.portMap.External)
 	}
 
 	s.mu.Lock()
