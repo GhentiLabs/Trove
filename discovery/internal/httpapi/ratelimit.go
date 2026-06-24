@@ -9,6 +9,12 @@ import (
 	"github.com/GhentiLabs/Trove/discovery/internal/config"
 )
 
+// maxLimiterEntries caps how many per-key limiters one store holds, so a flood of
+// distinct source keys (e.g. addresses from a large IPv6 range) cannot grow the map
+// without bound between sweeps. At ~100 bytes/entry this is a few MB per store, safe
+// on a 1GB host. When full, an arbitrary entry is evicted to admit a new key.
+const maxLimiterEntries = 100_000
+
 // limiterStore holds one token-bucket limiter per source key (IP or node),
 // reaping idle limiters so memory stays bounded under churn.
 type limiterStore struct {
@@ -41,6 +47,12 @@ func (s *limiterStore) allow(key string) bool {
 	s.mu.Lock()
 	kl, ok := s.limiters[key]
 	if !ok {
+		if len(s.limiters) >= maxLimiterEntries {
+			for k := range s.limiters { // evict an arbitrary entry to bound memory
+				delete(s.limiters, k)
+				break
+			}
+		}
 		kl = &keyedLimiter{lim: rate.NewLimiter(s.rps, s.burst)}
 		s.limiters[key] = kl
 	}
