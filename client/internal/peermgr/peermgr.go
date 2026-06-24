@@ -8,12 +8,23 @@ package peermgr
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/session"
+)
+
+// serveResult distinguishes why a connection attempt ended, so the dial loop only
+// grows backoff on a genuine failure, not on a healthy connection that lost dedup.
+type serveResult int
+
+const (
+	serveFailed serveResult = iota // handshake failed
+	serveDedup                     // connection was healthy but lost the tiebreak
+	serveRan                       // session ran to completion
 )
 
 const (
@@ -91,7 +102,7 @@ func New(opts Options) (*Manager, error) {
 func (m *Manager) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	if m.transport != nil {
-		wg.Go(func() { m.acceptLoop(ctx) })
+		wg.Go(func() { m.acceptLoop(ctx, &wg) })
 	}
 	for _, p := range m.peers {
 		wg.Go(func() { m.dialLoop(ctx, p) })
@@ -101,13 +112,15 @@ func (m *Manager) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (m *Manager) acceptLoop(ctx context.Context) {
+// acceptLoop tracks each inbound session goroutine in wg so Run does not return
+// while a serve goroutine is still using the transport.
+func (m *Manager) acceptLoop(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		conn, err := m.transport.Accept(ctx)
 		if err != nil {
 			return
 		}
-		go m.serve(ctx, conn, false)
+		wg.Go(func() { m.serve(ctx, conn, false) })
 	}
 }
 
@@ -125,6 +138,16 @@ func (m *Manager) dialLoop(ctx context.Context, peerID string) {
 		}
 		conn, err := m.connect(ctx, peerID)
 		if err != nil {
+			// errAwaitInbound is the holepunch acceptor's normal outcome: the NAT
+			// probe fired and the connection arrives via the accept loop. Retry at the
+			// base interval to keep the mapping fresh rather than backing off.
+			if errors.Is(err, errAwaitInbound) {
+				backoff = m.minBackoff
+				if !sleep(ctx, m.minBackoff) {
+					return
+				}
+				continue
+			}
 			m.log.Debug("peermgr: dial failed", "peer", peerID, "err", err)
 			if !sleep(ctx, backoff) {
 				return
@@ -132,19 +155,21 @@ func (m *Manager) dialLoop(ctx context.Context, peerID string) {
 			backoff = min(backoff*2, m.maxBackoff)
 			continue
 		}
-		if m.serve(ctx, conn, true) {
+		switch m.serve(ctx, conn, true) {
+		case serveRan, serveDedup:
 			backoff = m.minBackoff
-		} else if !sleep(ctx, backoff) {
-			return
-		} else {
+		case serveFailed:
+			if !sleep(ctx, backoff) {
+				return
+			}
 			backoff = min(backoff*2, m.maxBackoff)
 		}
 	}
 }
 
 // serve completes the handshake on conn and, if it wins deduplication, runs the
-// session until it ends. It returns whether a session was established.
-func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) bool {
+// session until it ends.
+func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) serveResult {
 	sess, err := session.Handshake(ctx, session.Config{
 		Conn:      conn,
 		Initiator: initiator,
@@ -154,16 +179,16 @@ func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) bo
 	})
 	if err != nil {
 		m.log.Debug("peermgr: handshake failed", "initiator", initiator, "err", err)
-		return false
+		return serveFailed
 	}
 	peerID := sess.PeerNodeID()
 	if !m.add(peerID, sess, initiator) {
 		_ = sess.Close()
-		return false
+		return serveDedup
 	}
 	_ = sess.Run(ctx)
 	m.remove(peerID, sess)
-	return true
+	return serveRan
 }
 
 // add registers sess for peerID, resolving a duplicate by keeping the session in

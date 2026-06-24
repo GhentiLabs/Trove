@@ -108,9 +108,18 @@ func TestLadderHolepunchAcceptorProbesAndAwaitsInbound(t *testing.T) {
 		Candidates: func() []disco.Address { return nil },
 		Lookup:     func(context.Context, string) ([]string, error) { return nil, errors.New("not found") },
 		Signal: func(_ context.Context, _ string, _ []disco.Address) (disco.PeerCandidates, error) {
-			return disco.PeerCandidates{PunchAtMillis: time.Now().UnixMilli()}, nil
+			return disco.PeerCandidates{
+				Candidates:    []disco.Address{{IP: "203.0.113.1", Port: 22000, Type: disco.AddressPublic}},
+				PunchAtMillis: time.Now().UnixMilli(),
+			}, nil
 		},
-		Probe: func(context.Context, []string) error { probed.Store(true); return nil },
+		Probe: func(_ context.Context, addrs []string) error {
+			if len(addrs) == 0 {
+				t.Error("acceptor probe got no candidates — its NAT mapping will not open")
+			}
+			probed.Store(true)
+			return nil
+		},
 		Dial: func(context.Context, string, string) (netio.Conn, error) {
 			t.Fatal("acceptor must not dial")
 			return nil, nil

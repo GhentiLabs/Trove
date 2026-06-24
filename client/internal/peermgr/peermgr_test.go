@@ -111,13 +111,20 @@ func TestManagerRejectsUnauthorized(t *testing.T) {
 	peerNode(t, ctx, mn, peer)
 
 	deny := func(string) (bool, error) { return false, nil }
-	m := newManager(t, mn, Options{Peers: []string{peer}, Authorize: deny})
+	mt := mn.Transport(mgrID+"-dial", mgrID)
+	var attempts atomic.Int32
+	connect := func(ctx context.Context, nodeID string) (netio.Conn, error) {
+		attempts.Add(1)
+		return mt.Dial(ctx, nodeID, nodeID)
+	}
+	m := newManager(t, mn, Options{Peers: []string{peer}, Authorize: deny, Connect: connect, MinBackoff: 5 * time.Millisecond})
 
 	var wg sync.WaitGroup
 	wg.Go(func() { _ = m.Run(ctx) })
 
-	// Give the dial loop time to attempt and be rejected repeatedly.
-	time.Sleep(100 * time.Millisecond)
+	// The reject path must actually run (dial succeeds, handshake authorization fails)
+	// and never yield a session.
+	waitFor(t, func() bool { return attempts.Load() >= 2 })
 	if m.ActiveCount() != 0 {
 		t.Fatalf("unauthorized peer reached an active session: count=%d", m.ActiveCount())
 	}
