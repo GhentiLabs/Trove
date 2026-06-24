@@ -42,3 +42,6 @@ server.crt
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# editor scratch files
+*.tmp

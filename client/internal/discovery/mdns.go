@@ -75,10 +75,14 @@ func BrowseLAN(ctx context.Context, self string) <-chan LANPeer {
 				if !ok {
 					return
 				}
-				if e.Instance == self || !identity.ValidNodeID(e.Instance) || len(e.AddrIPv4) == 0 {
+				if e.Instance == self || !identity.ValidNodeID(e.Instance) {
 					continue
 				}
-				peer := LANPeer{NodeID: e.Instance, Addr: net.JoinHostPort(e.AddrIPv4[0].String(), strconv.Itoa(e.Port))}
+				ip := mdnsHost(e)
+				if ip == "" {
+					continue
+				}
+				peer := LANPeer{NodeID: e.Instance, Addr: net.JoinHostPort(ip, strconv.Itoa(e.Port))}
 				select {
 				case out <- peer:
 				case <-ctx.Done():
@@ -88,4 +92,16 @@ func BrowseLAN(ctx context.Context, self string) <-chan LANPeer {
 		}
 	}()
 	return out
+}
+
+// mdnsHost returns the entry's host address, preferring IPv4 but falling back to
+// IPv6 so an IPv6-only LAN peer is still reachable.
+func mdnsHost(e *zeroconf.ServiceEntry) string {
+	if len(e.AddrIPv4) > 0 {
+		return e.AddrIPv4[0].String()
+	}
+	if len(e.AddrIPv6) > 0 {
+		return e.AddrIPv6[0].String()
+	}
+	return ""
 }

@@ -69,6 +69,17 @@ func MapPort(ctx context.Context, internalPort int) (*PortMap, error) {
 	}, nil
 }
 
+// Refresh renews the mapping's lease so it does not lapse after mappingTTL. The
+// daemon calls this on an interval well below mappingTTL.
+func (m *PortMap) Refresh() error {
+	extPort, err := m.nat.AddPortMapping("udp", m.internal, "trove", mappingTTL)
+	if err != nil {
+		return fmt.Errorf("discovery: refresh port mapping: %w", err)
+	}
+	m.External.Port = extPort
+	return nil
+}
+
 // Release removes the port mapping from the gateway.
 func (m *PortMap) Release() error {
 	if err := m.nat.DeletePortMapping("udp", m.internal); err != nil {

@@ -17,7 +17,11 @@ const (
 	idB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
-func allow(string) (bool, error) { return true, nil }
+func allow(string) ([]string, bool, error) { return nil, true, nil }
+
+func grant(ids ...string) func(string) ([]string, bool, error) {
+	return func(string) ([]string, bool, error) { return ids, true, nil }
+}
 
 // connPair returns two connected netio.Conns whose PeerNodeIDs are each other's id.
 func connPair(t *testing.T, aID, bID string) (netio.Conn, netio.Conn) {
@@ -52,9 +56,11 @@ func TestHandshakeReachesActiveAndIntersectsFolders(t *testing.T) {
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	aCfg := Config{Conn: ac, Initiator: true, Authorize: allow,
+	// Each side grants the peer both of its folders; the shared set is the
+	// intersection of what each actually holds ("shared").
+	aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("shared", "only-a"),
 		Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "shared"}, {ShareID: "only-a"}}}}
-	bCfg := Config{Conn: bc, Initiator: false, Authorize: allow,
+	bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("shared", "only-b"),
 		Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "shared"}, {ShareID: "only-b"}}}}
 
 	as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
@@ -80,12 +86,39 @@ func TestHandshakeReachesActiveAndIntersectsFolders(t *testing.T) {
 	_ = bs.Conn().Close()
 }
 
+func TestHandshakeOffersOnlyGrantedFolders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ac, bc := connPair(t, idA, idB)
+
+	// A holds folders fa and fb but grants peer B only fa. B holds both and offers
+	// both (claiming fb). A must not include fb in its shared set despite B offering
+	// it — per-peer authorization, not just share-id secrecy.
+	aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("fa"),
+		Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "fa"}, {ShareID: "fb"}}}}
+	bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("fa", "fb"),
+		Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "fa"}, {ShareID: "fb"}}}}
+
+	as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
+	if aErr != nil || bErr != nil {
+		t.Fatalf("handshake: a=%v b=%v", aErr, bErr)
+	}
+	for _, s := range []*Session{as, bs} {
+		got := s.SharedFolders()
+		if len(got) != 1 || got[0] != "fa" {
+			t.Fatalf("shared folders = %v, want [fa] (fb must not leak past the grant)", got)
+		}
+	}
+	_ = as.Conn().Close()
+	_ = bs.Conn().Close()
+}
+
 func TestHandshakeUnauthorizedNeverActive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	deny := func(string) (bool, error) { return false, nil }
+	deny := func(string) ([]string, bool, error) { return nil, false, nil }
 	aCfg := Config{Conn: ac, Initiator: true, Authorize: deny, Local: Local{NodeID: idA}}
 	bCfg := Config{Conn: bc, Initiator: false, Authorize: allow, Local: Local{NodeID: idB}}
 

@@ -30,6 +30,9 @@ const (
 const (
 	defaultMinBackoff = 1 * time.Second
 	defaultMaxBackoff = 1 * time.Minute
+	// maxInboundHandshakes bounds concurrent inbound handshakes so a flood of
+	// connecting-but-stalling peers cannot grow handshake goroutines without limit.
+	maxInboundHandshakes = 64
 )
 
 // Options configures New.
@@ -40,8 +43,9 @@ type Options struct {
 	Transport netio.Transport
 	// Local is this node's advertised identity and folders for the handshake.
 	Local session.Local
-	// Authorize reports whether a peer's certificate-derived node id may connect.
-	Authorize func(nodeID string) (bool, error)
+	// Authorize gates a peer's certificate-derived node id and returns the shared
+	// folder ids granted to it (passed through to the session).
+	Authorize func(nodeID string) (granted []string, ok bool, err error)
 	// Connect is the reachability ladder: it returns an authenticated transport
 	// connection to nodeID (LAN, direct, or holepunch) or an error to retry.
 	Connect func(ctx context.Context, nodeID string) (netio.Conn, error)
@@ -58,7 +62,7 @@ type Manager struct {
 	self       string
 	transport  netio.Transport
 	local      session.Local
-	authorize  func(string) (bool, error)
+	authorize  func(string) ([]string, bool, error)
 	connect    func(context.Context, string) (netio.Conn, error)
 	peers      []string
 	minBackoff time.Duration
@@ -115,12 +119,22 @@ func (m *Manager) Run(ctx context.Context) error {
 // acceptLoop tracks each inbound session goroutine in wg so Run does not return
 // while a serve goroutine is still using the transport.
 func (m *Manager) acceptLoop(ctx context.Context, wg *sync.WaitGroup) {
+	sem := make(chan struct{}, maxInboundHandshakes)
 	for {
 		conn, err := m.transport.Accept(ctx)
 		if err != nil {
 			return
 		}
-		wg.Go(func() { m.serve(ctx, conn, false) })
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			_ = conn.Close()
+			return
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			m.serve(ctx, conn, false)
+		})
 	}
 }
 

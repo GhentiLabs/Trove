@@ -141,7 +141,8 @@ func (s *Signaler) dispatch(msg disco.SignalMessage) {
 	switch msg.Type {
 	case disco.SignalPeerCandidates:
 		var pc disco.PeerCandidates
-		if msg.Decode(&pc) == nil {
+		if msg.Decode(&pc) == nil && identity.ValidNodeID(pc.FromNodeID) {
+			pc.Candidates = validCandidates(pc.Candidates)
 			s.deliver(pc.FromNodeID, signalResult{cands: pc})
 		}
 	case disco.SignalTargetUnavailable:
@@ -151,7 +152,8 @@ func (s *Signaler) dispatch(msg disco.SignalMessage) {
 		}
 	case disco.SignalIncomingRequest:
 		var ir disco.IncomingRequest
-		if msg.Decode(&ir) == nil {
+		if msg.Decode(&ir) == nil && identity.ValidNodeID(ir.FromNodeID) {
+			ir.Candidates = validCandidates(ir.Candidates)
 			select {
 			case s.incoming <- ir:
 			default:
@@ -163,6 +165,18 @@ func (s *Signaler) dispatch(msg disco.SignalMessage) {
 		_ = msg.Decode(&e)
 		s.log.Warn("discovery: signal error", "code", e.Code, "message", e.Message)
 	}
+}
+
+// validCandidates drops server-relayed candidate addresses that fail validation,
+// keeping untrusted-input rejection at ingestion as the rest of the package does.
+func validCandidates(in []disco.Address) []disco.Address {
+	out := make([]disco.Address, 0, len(in))
+	for _, a := range in {
+		if a.Validate() == nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func (s *Signaler) deliver(target string, r signalResult) {

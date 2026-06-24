@@ -111,42 +111,40 @@ func (t *Transport) LocalAddr() net.Addr { return t.conn.LocalAddr() }
 
 // Probe sends a datagram to each addr on the shared socket to open this side's NAT
 // mapping ahead of a simultaneous-open holepunch. It bounds the target count and
-// skips loopback/multicast/unspecified addresses so an untrusted candidate list
-// cannot turn the node into a UDP reflector; unresolvable addrs are skipped too.
+// skips any address that is not a public unicast endpoint (loopback, multicast,
+// unspecified, link-local, or private) so an untrusted candidate list cannot aim
+// the node's socket at hosts inside its own network. A failed send is skipped, not
+// fatal: one bad candidate must not suppress the others.
 func (t *Transport) Probe(ctx context.Context, addrs []string) error {
 	if len(addrs) > maxProbeTargets {
 		addrs = addrs[:maxProbeTargets]
 	}
 	for _, a := range addrs {
 		ua, err := net.ResolveUDPAddr("udp", a)
-		if err != nil {
+		if err != nil || !routableUnicast(ua.IP) {
 			continue
 		}
-		if ua.IP == nil || ua.IP.IsLoopback() || ua.IP.IsMulticast() || ua.IP.IsUnspecified() {
-			continue
-		}
-		if _, err := t.tr.WriteTo(probePayload, ua); err != nil {
-			return fmt.Errorf("transport: probe %s: %w", a, err)
-		}
+		_, _ = t.tr.WriteTo(probePayload, ua)
 	}
 	return nil
 }
 
-// Close tears down the listener and the underlying socket. It is idempotent;
-// calling the listener's Close twice would otherwise panic.
+func routableUnicast(ip net.IP) bool {
+	return ip != nil && !ip.IsLoopback() && !ip.IsMulticast() && !ip.IsUnspecified() &&
+		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsPrivate()
+}
+
+// Close tears down the listener, the QUIC transport, and the UDP socket. It is
+// idempotent. quic-go does not close an externally-supplied conn, so the socket is
+// closed explicitly; otherwise its file descriptor and port leak.
 func (t *Transport) Close() error {
 	var err error
 	t.closeOnce.Do(func() {
 		_ = t.ln.Close()
 		err = t.tr.Close()
+		_ = t.conn.Close()
 	})
 	return err
-}
-
-// ShouldDial decides, deterministically and identically on both peers, which side
-// dials in a simultaneous-open holepunch: the lexicographically smaller node id.
-func ShouldDial(localNodeID, remoteNodeID string) bool {
-	return localNodeID < remoteNodeID
 }
 
 func clientTLS(cert tls.Certificate, pin string) *tls.Config {

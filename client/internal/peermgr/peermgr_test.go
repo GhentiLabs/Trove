@@ -14,7 +14,7 @@ import (
 
 const mgrID = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
 
-func allow(string) (bool, error) { return true, nil }
+func allow(string) ([]string, bool, error) { return nil, true, nil }
 
 // peerNode is a stub remote: it accepts connections on the MemNet and completes the
 // responder handshake, holding each session so keepalive/close work.
@@ -110,7 +110,7 @@ func TestManagerRejectsUnauthorized(t *testing.T) {
 	peer := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	peerNode(t, ctx, mn, peer)
 
-	deny := func(string) (bool, error) { return false, nil }
+	deny := func(string) ([]string, bool, error) { return nil, false, nil }
 	mt := mn.Transport(mgrID+"-dial", mgrID)
 	var attempts atomic.Int32
 	connect := func(ctx context.Context, nodeID string) (netio.Conn, error) {

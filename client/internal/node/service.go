@@ -29,6 +29,11 @@ const (
 	announceTTL      = 10 * time.Minute
 	announceInterval = 5 * time.Minute
 	gatherTimeout    = 5 * time.Second
+	// maxInboundPunches bounds concurrent inbound holepunch probes so an untrusted
+	// signaler streaming requests cannot exhaust goroutines.
+	maxInboundPunches = 32
+	// maxPunchDelay bounds how far ahead a server-supplied punch time may be.
+	maxPunchDelay = 30 * time.Second
 )
 
 // Options configures a Service.
@@ -169,18 +174,32 @@ func (s *Service) browseLoop(ctx context.Context) {
 // peer's simultaneous dial reaches the accept loop. Each probe is tracked in wg so
 // Run does not close the transport while a punchInbound is still using it.
 func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg *sync.WaitGroup) {
+	sem := make(chan struct{}, maxInboundPunches)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case ir := <-sig.Incoming():
-			wg.Go(func() { s.punchInbound(ctx, ir) })
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			wg.Go(func() {
+				defer func() { <-sem }()
+				s.punchInbound(ctx, ir)
+			})
 		}
 	}
 }
 
 func (s *Service) punchInbound(ctx context.Context, ir disco.IncomingRequest) {
-	if d := time.Until(time.UnixMilli(ir.PunchAtMillis)); d > 0 {
+	d := time.Until(time.UnixMilli(ir.PunchAtMillis))
+	if d > maxPunchDelay {
+		s.log.Debug("node: ignoring implausible punch time", "from", ir.FromNodeID)
+		return
+	}
+	if d > 0 {
 		select {
 		case <-time.After(d):
 		case <-ctx.Done():
@@ -197,14 +216,13 @@ func (s *Service) punchInbound(ctx context.Context, ir disco.IncomingRequest) {
 }
 
 // gather rebuilds the candidate set: local interface addresses, the Trove-observed
-// external address, and a UPnP/NAT-PMP mapping (best-effort).
+// external address, and a UPnP/NAT-PMP mapping (best-effort). It is called serially
+// (once at startup, then from announceLoop's ticker), so a plain assign under the
+// lock suffices. The mapping is created once and its lease renewed each time so it
+// does not lapse after mappingTTL.
 func (s *Service) gather(ctx context.Context) {
 	gctx, cancel := context.WithTimeout(ctx, gatherTimeout)
 	defer cancel()
-
-	s.mu.Lock()
-	existing := s.portMap
-	s.mu.Unlock()
 
 	cands, err := discovery.LocalCandidates(s.port())
 	if err != nil {
@@ -218,23 +236,17 @@ func (s *Service) gather(ctx context.Context) {
 		s.log.Warn("node: announce", "err", err)
 	}
 
-	switch {
-	case existing != nil:
-		cands = append(cands, existing.External)
-	default:
+	if s.portMap == nil {
 		if pm, err := discovery.MapPort(gctx, s.port()); err == nil {
 			s.mu.Lock()
-			won := s.portMap == nil
-			if won {
-				s.portMap = pm
-			}
-			winner := s.portMap
+			s.portMap = pm
 			s.mu.Unlock()
-			if !won {
-				_ = pm.Release() // a concurrent gather won; drop the duplicate mapping
-			}
-			cands = append(cands, winner.External)
 		}
+	} else if err := s.portMap.Refresh(); err != nil {
+		s.log.Warn("node: upnp refresh", "err", err)
+	}
+	if s.portMap != nil {
+		cands = append(cands, s.portMap.External)
 	}
 
 	s.mu.Lock()
@@ -260,15 +272,17 @@ func (s *Service) lookup(ctx context.Context, nodeID string) ([]string, error) {
 	return out, nil
 }
 
-func (s *Service) authorize(nodeID string) (bool, error) {
-	_, err := s.opts.Config.GetPeer(context.Background(), nodeID)
+// authorize gates a peer and returns the shared folder ids granted to it from the
+// peer registry, so the session offers only those folders to that peer.
+func (s *Service) authorize(nodeID string) ([]string, bool, error) {
+	peer, err := s.opts.Config.GetPeer(context.Background(), nodeID)
 	switch {
 	case err == nil:
-		return true, nil
+		return peer.Folders, true, nil
 	case isNotFound(err):
-		return false, nil
+		return nil, false, nil
 	default:
-		return false, err
+		return nil, false, err
 	}
 }
 

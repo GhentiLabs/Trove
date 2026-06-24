@@ -84,9 +84,12 @@ type Config struct {
 	Initiator bool
 	// Local is this node's advertised identity and folders.
 	Local Local
-	// Authorize reports whether the peer's certificate-derived node id may proceed
-	// to Active. It is consulted after Hello, so a rejected peer still sees a Hello.
-	Authorize func(nodeID string) (bool, error)
+	// Authorize gates the peer's certificate-derived node id. It is consulted after
+	// Hello (so a rejected peer still sees a Hello) and returns the shared folder ids
+	// this node grants to that specific peer; only those folders are offered in
+	// NetworkConfig and counted in the shared set. ok=false rejects the peer. A nil
+	// Authorize denies by default.
+	Authorize func(nodeID string) (granted []string, ok bool, err error)
 	// KeepaliveInterval overrides DefaultKeepaliveInterval when non-zero.
 	KeepaliveInterval time.Duration
 	// OnMessage handles control messages other than keepalive and Close — the M4
@@ -147,7 +150,11 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("%w: hello %q, cert %q", ErrFingerprintMismatch, peerHello.GetNodeId(), peerID)
 	}
 
-	ok, err := cfg.Authorize(peerID)
+	authorize := cfg.Authorize
+	if authorize == nil {
+		authorize = func(string) ([]string, bool, error) { return nil, false, nil }
+	}
+	granted, ok, err := authorize(peerID)
 	if err != nil {
 		_ = cfg.Conn.Close()
 		return nil, fmt.Errorf("session: authorize: %w", err)
@@ -157,7 +164,8 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("%w: %s", ErrUnauthorized, peerID)
 	}
 
-	peerCfg, err := exchangeConfig(cfg, ctrl)
+	offered := offeredFolders(cfg.Local.Folders, granted)
+	peerCfg, err := exchangeConfig(cfg.Initiator, ctrl, offered)
 	if err != nil {
 		_ = cfg.Conn.Close()
 		return nil, fmt.Errorf("session: config: %w", err)
@@ -171,7 +179,7 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		conn:       cfg.Conn,
 		ctrl:       ctrl,
 		peerNodeID: peerID,
-		shared:     intersectFolders(cfg.Local.Folders, peerCfg),
+		shared:     intersectFolders(offered, peerCfg),
 		keepalive:  keepalive,
 		onMessage:  cfg.OnMessage,
 		log:        log,
@@ -213,9 +221,9 @@ func exchangeHello(cfg Config, ctrl netio.Stream) (*wirepb.Hello, error) {
 	return peer, nil
 }
 
-func exchangeConfig(cfg Config, ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
-	mine := buildNetworkConfig(cfg.Local)
-	if cfg.Initiator {
+func exchangeConfig(initiator bool, ctrl netio.Stream, offered []Folder) (*wirepb.NetworkConfig, error) {
+	mine := buildNetworkConfig(offered)
+	if initiator {
 		if err := wire.WriteMessage(ctrl, mine); err != nil {
 			return nil, err
 		}
@@ -231,12 +239,9 @@ func exchangeConfig(cfg Config, ctrl netio.Stream) (*wirepb.NetworkConfig, error
 	return peer, nil
 }
 
-func buildNetworkConfig(local Local) *wirepb.NetworkConfig {
-	folders := make([]*wirepb.Folder, 0, len(local.Folders))
-	for _, f := range local.Folders {
-		if f.ShareID == "" {
-			continue
-		}
+func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
+	folders := make([]*wirepb.Folder, 0, len(offered))
+	for _, f := range offered {
 		folders = append(folders, &wirepb.Folder{
 			FolderId:   f.ShareID,
 			FolderType: wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
@@ -244,6 +249,28 @@ func buildNetworkConfig(local Local) *wirepb.NetworkConfig {
 		})
 	}
 	return &wirepb.NetworkConfig{Folders: folders}
+}
+
+// offeredFolders selects the local folders this node will share with a peer: those
+// whose share id appears in the peer's grant. Only these are advertised and matched,
+// so a peer authorized for one folder cannot reach another by guessing its share id.
+func offeredFolders(local []Folder, granted []string) []Folder {
+	grant := make(map[string]struct{}, len(granted))
+	for _, g := range granted {
+		if g != "" {
+			grant[g] = struct{}{}
+		}
+	}
+	var out []Folder
+	for _, f := range local {
+		if f.ShareID == "" {
+			continue
+		}
+		if _, ok := grant[f.ShareID]; ok {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func readNetworkConfig(ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
@@ -257,19 +284,16 @@ func readNetworkConfig(ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
 	return msg.(*wirepb.NetworkConfig), nil
 }
 
-func intersectFolders(local []Folder, peer *wirepb.NetworkConfig) []string {
-	offered := make(map[string]struct{}, len(peer.GetFolders()))
+func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) []string {
+	peerSet := make(map[string]struct{}, len(peer.GetFolders()))
 	for _, f := range peer.GetFolders() {
 		if id := f.GetFolderId(); id != "" {
-			offered[id] = struct{}{}
+			peerSet[id] = struct{}{}
 		}
 	}
 	var out []string
-	for _, f := range local {
-		if f.ShareID == "" {
-			continue
-		}
-		if _, ok := offered[f.ShareID]; ok {
+	for _, f := range offered {
+		if _, ok := peerSet[f.ShareID]; ok {
 			out = append(out, f.ShareID)
 		}
 	}

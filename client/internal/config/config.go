@@ -247,7 +247,7 @@ func (s *Store) RemoveFolder(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrFolderNotFound
 		}
-		return nil
+		return pruneOrphanGrants(ctx, tx)
 	})
 }
 
@@ -261,8 +261,18 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrFolderNotFound
 		}
-		return nil
+		return pruneOrphanGrants(ctx, tx)
 	})
+}
+
+// pruneOrphanGrants drops peer_folders rows whose shared folder id is no longer
+// backed by any local folder, keeping the peer registry consistent when a folder's
+// share id is rotated or the folder is removed.
+func pruneOrphanGrants(ctx context.Context, tx *storage.Tx) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM peer_folders WHERE folder_id NOT IN (SELECT share_id FROM folders WHERE share_id != '')`); err != nil {
+		return fmt.Errorf("config: prune peer folders: %w", err)
+	}
+	return nil
 }
 
 // SetFolderKey stores an explicit master key for a folder, clearing any recorded

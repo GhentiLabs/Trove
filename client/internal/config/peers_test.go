@@ -84,6 +84,44 @@ func TestAddPeerRejectsUnknownShareID(t *testing.T) {
 	}
 }
 
+func TestRemoveFolderPrunesGrants(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+	mustShareFolder(t, s, "docs", "docs-share")
+	if err := s.AddPeer(ctx, Peer{NodeID: peerA, Folders: []string{"docs-share"}}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := s.RemoveFolder(ctx, "docs"); err != nil {
+		t.Fatalf("RemoveFolder: %v", err)
+	}
+	p, err := s.GetPeer(ctx, peerA)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if len(p.Folders) != 0 {
+		t.Fatalf("grant not pruned after folder removed: %v", p.Folders)
+	}
+}
+
+func TestRotateShareIDPrunesOldGrant(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+	mustShareFolder(t, s, "docs", "docs-share")
+	if err := s.AddPeer(ctx, Peer{NodeID: peerA, Folders: []string{"docs-share"}}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := s.SetFolderShareID(ctx, "docs", "rotated-share"); err != nil {
+		t.Fatalf("SetFolderShareID: %v", err)
+	}
+	p, err := s.GetPeer(ctx, peerA)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if len(p.Folders) != 0 {
+		t.Fatalf("stale grant not pruned after share id rotation: %v", p.Folders)
+	}
+}
+
 func mustShareFolder(t *testing.T, s *Store, id, shareID string) {
 	t.Helper()
 	ctx := context.Background()

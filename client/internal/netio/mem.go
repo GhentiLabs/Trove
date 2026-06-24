@@ -176,6 +176,15 @@ func (c *memConn) AcceptStream(ctx context.Context) (Stream, error) {
 
 func (c *memConn) track(s io.Closer) {
 	c.mu.Lock()
+	select {
+	case <-c.closed:
+		// A concurrent shutdown already drained streams; close this late one here so
+		// it is not leaked open.
+		c.mu.Unlock()
+		_ = s.Close()
+		return
+	default:
+	}
 	c.streams = append(c.streams, s)
 	c.mu.Unlock()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -32,18 +33,6 @@ func newTransport(t *testing.T, cert tls.Certificate) *Transport {
 	}
 	t.Cleanup(func() { _ = tr.Close() })
 	return tr
-}
-
-func TestShouldDial(t *testing.T) {
-	if !ShouldDial("aaa", "bbb") {
-		t.Fatal("lower node id should dial")
-	}
-	if ShouldDial("bbb", "aaa") {
-		t.Fatal("higher node id should not dial")
-	}
-	if ShouldDial("same", "same") {
-		t.Fatal("equal node ids should not both dial")
-	}
 }
 
 func TestDialAcceptPinnedRoundTrip(t *testing.T) {
@@ -146,4 +135,22 @@ func TestCloseIsIdempotent(t *testing.T) {
 	if err := tr.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+}
+
+func TestCloseReleasesSocket(t *testing.T) {
+	cert, _ := newIdentity(t)
+	tr, err := New(Options{Cert: cert, UDPAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr := tr.LocalAddr().(*net.UDPAddr)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// The UDP port must be free again; if Close leaked the socket this fails.
+	c, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("port not released after Close: %v", err)
+	}
+	_ = c.Close()
 }
