@@ -58,6 +58,9 @@ func WriteHello(w io.Writer, h *wirepb.Hello) error {
 	if _, err := w.Write(hdr[:]); err != nil {
 		return fmt.Errorf("wire: write hello: %w", err)
 	}
+	if len(body) == 0 {
+		return nil
+	}
 	if _, err := w.Write(body); err != nil {
 		return fmt.Errorf("wire: write hello: %w", err)
 	}

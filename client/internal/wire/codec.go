@@ -58,6 +58,11 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 	if _, err := w.Write(mlen[:]); err != nil {
 		return fmt.Errorf("wire: write length: %w", err)
 	}
+	// A zero-length body needs no write; the reader skips a zero-length read in
+	// kind, so writing one would stall a synchronous stream (e.g. an empty Ping).
+	if len(payload) == 0 {
+		return nil
+	}
 	if _, err := w.Write(payload); err != nil {
 		return fmt.Errorf("wire: write body: %w", err)
 	}

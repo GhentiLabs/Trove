@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net"
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/compression"
@@ -179,6 +180,30 @@ func TestReadMessageRejectsDecompressionBomb(t *testing.T) {
 
 	if _, _, err := ReadMessage(&buf); err == nil {
 		t.Fatal("ReadMessage accepted a decompression bomb")
+	}
+}
+
+// Over a synchronous, unbuffered stream (like net.Pipe or an unread QUIC stream),
+// an empty-body message must not stall: the writer must not emit a zero-length body
+// write that the reader skips. Ping and an empty NetworkConfig are the real cases.
+func TestEmptyBodyOverSynchronousPipe(t *testing.T) {
+	for _, msg := range []proto.Message{&wirepb.Ping{}, &wirepb.NetworkConfig{}} {
+		a, b := net.Pipe()
+		errc := make(chan error, 1)
+		go func() { errc <- WriteMessage(a, msg) }()
+
+		typ, got, err := ReadMessage(b)
+		if err != nil {
+			t.Fatalf("ReadMessage: %v", err)
+		}
+		if err := <-errc; err != nil {
+			t.Fatalf("WriteMessage: %v", err)
+		}
+		if !proto.Equal(got, msg) {
+			t.Fatalf("type %d round-trip mismatch", typ)
+		}
+		_ = a.Close()
+		_ = b.Close()
 	}
 }
 
