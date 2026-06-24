@@ -28,11 +28,15 @@ gcloud compute instances create trove \
 - **Disk:** Standard persistent disk, **30 GB** (the free maximum). Do not use SSD.
 - **Ops Agent:** do **not** install it; it adds memory pressure on a 1 GB VM.
 
-## 2. Firewall: allow only 443
+## 2. Firewall: allow 443 (TCP for the API, UDP for STUN)
+
+The discovery API is TLS over **TCP/443**; the STUN reflexive responder shares the
+same port number on **UDP/443** so peers learn the external mapping of their QUIC
+socket. Open both.
 
 ```sh
 gcloud compute firewall-rules create trove-tls \
-  --allow=tcp:443 --direction=INGRESS --target-tags=trove
+  --allow=tcp:443,udp:443 --direction=INGRESS --target-tags=trove
 gcloud compute instances add-tags trove --zone=us-central1-a --tags=trove
 ```
 
