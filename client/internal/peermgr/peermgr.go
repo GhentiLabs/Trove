@@ -210,14 +210,18 @@ func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) se
 // the same winner, so they converge on a single connection.
 func (m *Manager) add(peerID string, sess *session.Session, initiator bool) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if existing, ok := m.sessions[peerID]; ok {
-		if initiator != (m.self < peerID) {
-			return false
-		}
-		_ = existing.Close()
+	existing, ok := m.sessions[peerID]
+	if ok && initiator != (m.self < peerID) {
+		m.mu.Unlock()
+		return false
 	}
 	m.sessions[peerID] = sess
+	m.mu.Unlock()
+	// Evict the losing duplicate outside the lock: its graceful Close can block for
+	// up to the session's close-grace timeout, which must not stall the manager.
+	if ok {
+		_ = existing.Close()
+	}
 	return true
 }
 

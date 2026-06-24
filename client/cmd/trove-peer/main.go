@@ -87,10 +87,16 @@ func run() error {
 	return svc.Run(ctx)
 }
 
-// pair ensures the shared folder and authorized peer exist, ignoring already-exists.
+// pair ensures the shared folder and authorized peer exist. It is create-only:
+// re-running with a changed -root or an additional grant is a no-op on an existing
+// row, so it reports when an already-configured entry is left unchanged.
 func pair(ctx context.Context, cfg *config.Store, root, share, peer string) error {
 	if share != "" {
-		if err := cfg.AddFolder(ctx, config.Folder{ID: share, Root: root, ShareID: share}); err != nil && !isExists(err) {
+		switch err := cfg.AddFolder(ctx, config.Folder{ID: share, Root: root, ShareID: share}); {
+		case err == nil:
+		case isExists(err):
+			fmt.Fprintf(os.Stderr, "trove-peer: folder %q already configured; -root unchanged\n", share)
+		default:
 			return err
 		}
 	}
@@ -99,7 +105,11 @@ func pair(ctx context.Context, cfg *config.Store, root, share, peer string) erro
 		if share != "" {
 			folders = []string{share}
 		}
-		if err := cfg.AddPeer(ctx, config.Peer{NodeID: peer, Folders: folders}); err != nil && !isExists(err) {
+		switch err := cfg.AddPeer(ctx, config.Peer{NodeID: peer, Folders: folders}); {
+		case err == nil:
+		case isExists(err):
+			fmt.Fprintf(os.Stderr, "trove-peer: peer %s already authorized; grants unchanged\n", peer)
+		default:
 			return err
 		}
 	}

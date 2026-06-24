@@ -21,9 +21,15 @@ var ErrUnreachable = errors.New("peermgr: peer unreachable")
 // loop should back off rather than dial.
 var errAwaitInbound = errors.New("peermgr: awaiting inbound holepunch")
 
-// maxPunchDelay bounds how far in the future a server-supplied punch time may be, so
-// an untrusted signaler cannot park the dial in a long sleep.
-const maxPunchDelay = 30 * time.Second
+// MaxPunchDelay bounds how far in the future a server-supplied punch time may be, so
+// an untrusted signaler cannot park a punch in a long sleep. Both the dialer (here)
+// and the acceptor (node) clamp to this single value so they stay in lockstep.
+const MaxPunchDelay = 30 * time.Second
+
+// signalTimeout bounds the holepunch signal exchange so a slow or error-only server
+// response fails the attempt fast (the SignalError reply carries no target id and so
+// cannot be routed to the waiter) instead of blocking on the caller's context.
+const signalTimeout = 15 * time.Second
 
 // LadderConfig wires the reachability ladder from discovery and transport. The
 // network-touching operations are injected so the tier logic — including the
@@ -100,13 +106,15 @@ func (l *Ladder) holepunch(ctx context.Context, nodeID string) (netio.Conn, erro
 	if l.cfg.Signal == nil {
 		return nil, ErrUnreachable
 	}
-	pc, err := l.cfg.Signal(ctx, nodeID, l.cfg.Candidates())
+	sctx, cancel := context.WithTimeout(ctx, signalTimeout)
+	pc, err := l.cfg.Signal(sctx, nodeID, l.cfg.Candidates())
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("peermgr: holepunch signal: %w", err)
 	}
 
 	d := time.Until(time.UnixMilli(pc.PunchAtMillis))
-	if d > maxPunchDelay {
+	if d > MaxPunchDelay {
 		return nil, fmt.Errorf("peermgr: implausible punch time %dms ahead", d.Milliseconds())
 	}
 	if d > 0 && !sleep(ctx, d) {

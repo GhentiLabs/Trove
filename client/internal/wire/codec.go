@@ -34,6 +34,12 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 	if err != nil {
 		return fmt.Errorf("wire: marshal body: %w", err)
 	}
+	// Bound the plaintext, not just the compressed payload: the reader caps decoded
+	// size at MaxMessageSize, so an oversize-but-compressible body would frame here
+	// yet be unreadable by any conforming peer. Reject it on the writing side.
+	if len(body) > MaxMessageSize {
+		return ErrMessageTooLarge
+	}
 	codec, payload := compression.Compress(body)
 	if len(payload) > MaxMessageSize {
 		return ErrMessageTooLarge

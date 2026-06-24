@@ -184,6 +184,67 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestDuplicateNetworkConfigRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ac, bc := connPair(t, idA, idB)
+
+	// Manual peer: complete the handshake, then send a second NetworkConfig, which an
+	// Active session must reject (exactly-once invariant past the handshake).
+	go func() {
+		ctrl, err := bc.AcceptStream(ctx)
+		if err != nil {
+			return
+		}
+		if _, err := wire.ReadHello(ctrl); err != nil {
+			return
+		}
+		_ = wire.WriteHello(ctrl, &wirepb.Hello{NodeId: idB, WireFormatVersion: wire.WireFormatVersion})
+		if _, _, err := wire.ReadMessage(ctrl); err != nil {
+			return
+		}
+		_ = wire.WriteMessage(ctrl, &wirepb.NetworkConfig{})
+		_ = wire.WriteMessage(ctrl, &wirepb.NetworkConfig{}) // illegal second config
+	}()
+
+	as, err := Handshake(ctx, Config{Conn: ac, Initiator: true, Authorize: allow, Local: Local{NodeID: idA}})
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if err := as.Run(ctx); !errors.Is(err, ErrUnexpectedMessage) {
+		t.Fatalf("Run err = %v, want ErrUnexpectedMessage on duplicate NetworkConfig", err)
+	}
+}
+
+func TestRunReturnsErrorOnAbruptDrop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ac, bc := connPair(t, idA, idB)
+
+	aCfg := Config{Conn: ac, Initiator: true, Authorize: allow, Local: Local{NodeID: idA}}
+	bCfg := Config{Conn: bc, Initiator: false, Authorize: allow, Local: Local{NodeID: idB}}
+	as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
+	if aErr != nil || bErr != nil {
+		t.Fatalf("handshake: a=%v b=%v", aErr, bErr)
+	}
+
+	bRun := make(chan error, 1)
+	go func() { bRun <- bs.Run(ctx) }()
+	go func() { _ = as.Run(ctx) }()
+
+	// Drop A's connection abruptly (no graceful Close). B must surface a read error,
+	// not a clean nil return.
+	_ = as.Conn().Close()
+	select {
+	case err := <-bRun:
+		if err == nil {
+			t.Fatal("peer Run returned nil on an abrupt drop, want an error")
+		}
+	case <-ctx.Done():
+		t.Fatal("peer Run did not return after the drop")
+	}
+}
+
 func TestRunClosePropagatesToPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

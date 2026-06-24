@@ -71,9 +71,6 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
-// ServerAddr is the Trove host:port, used to dial the signaling WebSocket.
-func (c *Client) ServerAddr() string { return c.addr }
-
 // Announce publishes this node's candidate addresses and returns the registration,
 // including the server-observed source address (a STUN-like external candidate).
 func (c *Client) Announce(ctx context.Context, addrs []disco.Address, ttl time.Duration) (disco.AnnounceResponse, error) {

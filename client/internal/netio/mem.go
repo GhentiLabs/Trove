@@ -93,6 +93,8 @@ func (t *memTransport) Dial(ctx context.Context, addr, nodeID string) (Conn, err
 	select {
 	case peer.incoming <- acceptor:
 		return dialer, nil
+	case <-peer.closed:
+		return nil, errTransportClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

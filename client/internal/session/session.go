@@ -92,10 +92,6 @@ type Config struct {
 	Authorize func(nodeID string) (granted []string, ok bool, err error)
 	// KeepaliveInterval overrides DefaultKeepaliveInterval when non-zero.
 	KeepaliveInterval time.Duration
-	// OnMessage handles control messages other than keepalive and Close — the M4
-	// attach point for index/have/want and membership traffic. Run delivers them on
-	// its read goroutine; if nil, such messages are logged and dropped.
-	OnMessage func(wire.MessageType, proto.Message) error
 	// Logger receives session events; nil discards them.
 	Logger *slog.Logger
 }
@@ -107,7 +103,6 @@ type Session struct {
 	peerNodeID string
 	shared     []string
 	keepalive  time.Duration
-	onMessage  func(wire.MessageType, proto.Message) error
 	log        *slog.Logger
 
 	state   atomic.Int32
@@ -181,7 +176,6 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		peerNodeID: peerID,
 		shared:     intersectFolders(offered, peerCfg),
 		keepalive:  keepalive,
-		onMessage:  cfg.OnMessage,
 		log:        log,
 		done:       make(chan struct{}),
 	}
@@ -313,10 +307,10 @@ func (s *Session) State() State { return State(s.state.Load()) }
 // Conn exposes the underlying connection so M4 can open data streams.
 func (s *Session) Conn() netio.Conn { return s.conn }
 
-// Run holds the session open: it answers keepalive and reads control messages,
-// dispatching non-keepalive/Close messages to Config.OnMessage, until the peer
-// closes, the context is cancelled, Close is called, or the connection fails. A
-// graceful peer Close returns nil; callers should treat any return as terminal.
+// Run holds the session open: it answers keepalive and reads control messages until
+// the peer closes, the context is cancelled, Close is called, or the connection
+// fails. A graceful peer Close returns nil; callers should treat any return as
+// terminal.
 func (s *Session) Run(ctx context.Context) error {
 	stop := context.AfterFunc(ctx, func() { _ = s.Close() })
 	defer stop()
@@ -327,7 +321,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.shutdown(false)
 
 	for {
-		typ, msg, err := wire.ReadMessage(s.ctrl)
+		typ, _, err := wire.ReadMessage(s.ctrl)
 		if err != nil {
 			if s.closing.Load() || ctx.Err() != nil {
 				return nil
@@ -340,20 +334,13 @@ func (s *Session) Run(ctx context.Context) error {
 			s.shutdown(false)
 			return nil
 		default:
-			if s.onMessage == nil {
-				s.log.Warn("session: unhandled message", "type", typ)
-				continue
-			}
-			if err := s.onMessage(typ, msg); err != nil {
-				return fmt.Errorf("session: handle message: %w", err)
-			}
+			// Ping and Close are the only messages an Active M3 session expects; a
+			// second NetworkConfig or any other type is a protocol violation. M4 adds
+			// its message types and a handler here.
+			return fmt.Errorf("%w: type %d", ErrUnexpectedMessage, typ)
 		}
 	}
 }
-
-// Send writes a control message to the peer. It is safe for concurrent use and is
-// the M4 path for sending index/have/want and membership messages.
-func (s *Session) Send(m proto.Message) error { return s.writeMessage(m) }
 
 func (s *Session) keepaliveLoop(ctx context.Context) {
 	t := time.NewTicker(s.keepalive)

@@ -32,8 +32,6 @@ const (
 	// maxInboundPunches bounds concurrent inbound holepunch probes so an untrusted
 	// signaler streaming requests cannot exhaust goroutines.
 	maxInboundPunches = 32
-	// maxPunchDelay bounds how far ahead a server-supplied punch time may be.
-	maxPunchDelay = 30 * time.Second
 )
 
 // Options configures a Service.
@@ -195,7 +193,7 @@ func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg 
 
 func (s *Service) punchInbound(ctx context.Context, ir disco.IncomingRequest) {
 	d := time.Until(time.UnixMilli(ir.PunchAtMillis))
-	if d > maxPunchDelay {
+	if d > peermgr.MaxPunchDelay {
 		s.log.Debug("node: ignoring implausible punch time", "from", ir.FromNodeID)
 		return
 	}
@@ -267,6 +265,9 @@ func (s *Service) lookup(ctx context.Context, nodeID string) ([]string, error) {
 	}
 	out := make([]string, 0, len(resp.Addresses))
 	for _, a := range resp.Addresses {
+		if a.Validate() != nil { // reject non-routable addresses, like the signal path
+			continue
+		}
 		out = append(out, a.String())
 	}
 	return out, nil
@@ -343,7 +344,12 @@ func observedAddress(addr string) *disco.Address {
 	if err != nil {
 		return nil
 	}
-	a := disco.Address{IP: host, Port: port, Type: disco.AddressPublic}
+	// The server-observed source is a STUN-like reflexive address. Skip it when it is
+	// private (the server shares our LAN): LocalCandidates already advertises that.
+	if ip := net.ParseIP(host); ip == nil || ip.IsPrivate() {
+		return nil
+	}
+	a := disco.Address{IP: host, Port: port, Type: disco.AddressSTUN}
 	if a.Validate() != nil {
 		return nil
 	}
