@@ -24,8 +24,9 @@ type PortMap struct {
 // MapPort discovers a UPnP/NAT-PMP gateway and maps an external UDP port to
 // internalPort, returning an external candidate. It is best-effort: networks
 // without a supporting gateway (or behind CGNAT) return an error the caller is
-// expected to ignore and fall back to holepunching. Gateway discovery is bounded
-// by ctx.
+// expected to ignore and fall back to holepunching. Gateway discovery is bounded by
+// ctx; if ctx fires first, the discovery goroutine runs on for up to the library's
+// own ~10s timeout before exiting.
 func MapPort(ctx context.Context, internalPort int) (*PortMap, error) {
 	type result struct {
 		gw  nat.NAT
@@ -51,6 +52,11 @@ func MapPort(ctx context.Context, internalPort int) (*PortMap, error) {
 	ext, err := gw.GetExternalAddress()
 	if err != nil {
 		return nil, fmt.Errorf("discovery: external address: %w", err)
+	}
+	if ext.IsPrivate() || ext.IsLoopback() || ext.IsUnspecified() {
+		// Double-NAT / CGNAT: the gateway's WAN address is not Internet-routable, so
+		// advertising it as a public candidate would only mislead remote peers.
+		return nil, fmt.Errorf("discovery: external address %s is not publicly routable", ext)
 	}
 	extPort, err := gw.AddPortMapping("udp", internalPort, "trove", mappingTTL)
 	if err != nil {

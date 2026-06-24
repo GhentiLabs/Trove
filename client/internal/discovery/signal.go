@@ -87,6 +87,16 @@ func (c *Client) Signal(ctx context.Context) (*Signaler, error) {
 func (s *Signaler) Connect(ctx context.Context, target string, cands []disco.Address) (disco.PeerCandidates, error) {
 	ch := make(chan signalResult, 1)
 	s.mu.Lock()
+	select {
+	case <-s.closed:
+		s.mu.Unlock()
+		return disco.PeerCandidates{}, ErrSignalerClosed
+	default:
+	}
+	if _, inFlight := s.pending[target]; inFlight {
+		s.mu.Unlock()
+		return disco.PeerCandidates{}, fmt.Errorf("discovery: connect to %s already in flight", target)
+	}
 	s.pending[target] = ch
 	s.mu.Unlock()
 	defer func() {

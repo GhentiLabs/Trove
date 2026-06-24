@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/GhentiLabs/Trove/pkg/identity"
 	"github.com/libp2p/zeroconf/v2"
@@ -13,6 +14,10 @@ import (
 const (
 	mdnsService = "_trove._udp"
 	mdnsDomain  = "local."
+	// mdnsShutdownTimeout bounds Close: zeroconf's Shutdown sends a goodbye over an
+	// undeadlined multicast write that can hang on a constrained interface, so we
+	// never let it stall daemon teardown. Peers expire the stale entry via its TTL.
+	mdnsShutdownTimeout = 2 * time.Second
 )
 
 // LANPeer is a Trove peer discovered on the local network via mDNS.
@@ -36,10 +41,20 @@ func Advertise(nodeID string, port int) (*MDNS, error) {
 	return &MDNS{server: srv}, nil
 }
 
-// Close withdraws the advertisement.
+// Close withdraws the advertisement, bounded so a hung multicast write cannot stall
+// daemon teardown.
 func (m *MDNS) Close() {
-	if m.server != nil {
+	if m.server == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
 		m.server.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(mdnsShutdownTimeout):
 	}
 }
 
