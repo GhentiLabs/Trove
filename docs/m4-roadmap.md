@@ -1,0 +1,83 @@
+# M4 — One-Way Sync: roadmap
+
+M4 makes the system real: one owner per folder originates snapshots; N replicas pull
+and converge. It ships in phases so each is a working, testable artifact. Phase A is
+implemented; B–E are preserved here with their acceptance gates.
+
+Design constants that hold across all phases:
+- Physical chunk backing only for now (owner double-stores working file + blobs).
+  Virtual backing + `Promote` are a deferred storage optimization (see the
+  client-blueprint "Deferred: virtual backing + Promote" note).
+- One-way semantics: owner send-only, replica receive-only; the conflict path is
+  unreachable by construction.
+- Wire is designed full: later phases add **new** message/stream types, never altering
+  Phase A's frozen ones.
+
+## Phase A — owner → one replica, single-source, crash-safe (DONE)
+
+Sync wire messages (`FolderSummary`/`ManifestRequest`/`ManifestDelta`, golden-pinned),
+the data-stream chunk protocol (`syncengine/codec.go`), reconciliation + anti-entropy
+cursor, single-source puller with hash-verify, crash-safe apply (stage → fsync →
+atomic rename → commit), and the model replica-apply path (`ApplyRemoteAndAdvance`,
+version vectors stored verbatim, atomic with the cursor). Wired into the daemon via
+`peermgr.OnSession` and `node` per-folder stores; `trove-peer -sync-role`.
+
+**Accept (met):** a snapshot converges bit-exact to a replica (identical files, mode,
+symlink targets, snapshot root, and leaf set); every chunk hash-verified; a rename
+transfers no chunk data; a corrupt/truncated chunk is rejected and refetched; a failed
+pull leaves no partial destination and an unadvanced cursor, then resumes; in-flight
+chunks survive a grace-window sweep. Proven deterministically over MemNet + `synctest`
+and real-QUIC loopback. M0–M3 tests still pass.
+
+**Known Phase-A limits (addressed later):** `ManifestDelta` rides the 1 MiB
+control-message cap, so a single full-resync delta is bounded; the owner refuses to
+send an oversized delta (clear error, no reconnect loop) — large folders need
+manifest-delta pagination (Phase C). Owner re-announce is a periodic ticker, not a
+scanner push (acceptable anti-entropy latency). The replica has no startup
+fs-reconcile, so out-of-band deletion of a synced file under the replica is not
+re-materialized until the next delta (Phase E robustness). Manifest-serve goroutines
+are unbounded per session (fine at one trusted peer/folder; bound in Phase C).
+Tombstones keep their `manifest_chunks` rows after `SweepTombstones` removes the
+manifest row (a pre-existing M2 metadata orphan, same on owner and replica); a
+manifest-level GC pass is a later cleanup.
+
+## Phase B — virtual backing + `Promote` (storage optimization)
+
+Owner current chunks become virtual pointers into working files; `Promote` copies a
+superseded chunk to a physical blob before its file is overwritten; replica apply
+registers the new file's chunks as virtual.
+
+**Accept:** ~1× disk for current data; an edited file's retained prior snapshot still
+materializes bit-exact (Promote ran before overwrite); a virtual read re-verifies and
+triggers a rescan on mismatch.
+
+## Phase C — multi-source scheduler
+
+`Have` (explicit list; bloom threshold measured later); a global wanted-set + per-peer
+have-set; parallel `Want` across ≥3 peers with a bounded in-flight window; in-flight
+dedup with fastest-source-wins on stall; optional rarest-first. Manifest-delta
+pagination for large folders.
+
+**Accept:** a fresh replica pulls distinct chunks from multiple peers in parallel; a
+corrupt chunk from one source is rejected and transparently refetched from another;
+memory stays bounded under a large folder and many peers.
+
+## Phase D — membership (L4)
+
+Network object + signed roster (`{node_id, role, added_by, sig, added_at}`) over
+**canonical hand-rolled bytes, never protobuf**; gossip with last-seen; verify
+signatures, reject and don't propagate bad ones; trusted-only.
+
+**Accept:** a signed roster gossips to all members; a new member learns the full roster
+from any one peer; an invalid-signature entry is rejected and not propagated.
+
+## Phase E — SyncReceipts + deletion lifecycle + offline catch-up + live gate
+
+`sync_receipts` table exchanged on folder-sync completion; tombstone deletion applied
+as a consistent snapshot unit (no resurrect on reconnect; reaped after convergence);
+startup fs-reconcile; offline replica catches up via anti-entropy on reconnect.
+
+**Accept (the M4 integration gate):** ≥3 real machines across NAT via Trove/holepunch
+converge a multi-file folder through an edit, a delete, and a rename, with one replica
+offline for part of the run; both ends hold correct SyncReceipts; "last synced" is
+queryable.
