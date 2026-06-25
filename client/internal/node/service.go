@@ -3,19 +3,24 @@ package node
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/discovery"
+	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/peermgr"
 	"github.com/GhentiLabs/Trove/client/internal/session"
-	"github.com/GhentiLabs/Trove/client/internal/syncengine"
+	"github.com/GhentiLabs/Trove/client/internal/storage"
 	"github.com/GhentiLabs/Trove/client/internal/transport"
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 )
@@ -28,6 +33,7 @@ const (
 	maxInboundPunches     = 32
 	signalReconnectMin    = 1 * time.Second
 	signalReconnectMax    = 30 * time.Second
+	gossipInterval        = 30 * time.Second
 )
 
 var errNoSignaler = errors.New("node: signaler not connected")
@@ -41,12 +47,9 @@ type Options struct {
 	UDPAddr  string
 	Logger   *slog.Logger
 
-	// StateDir enables one-way sync: per-folder model and chunk stores are opened
-	// beneath it. When empty, the node runs transport and discovery only.
+	// StateDir enables sync and membership: per-folder stores and the roster database
+	// are opened beneath it. When empty, the node runs transport and discovery only.
 	StateDir string
-	// SyncRole is this node's direction for its shared folders: owner (send-only,
-	// scans and serves) or replica (receive-only, pulls and applies).
-	SyncRole syncengine.Role
 }
 
 // Service is a composed, runnable Trove peer.
@@ -57,6 +60,9 @@ type Service struct {
 	client   *discovery.Client
 	cache    *discovery.Cache
 	stunAddr string
+
+	members *membership.Store
+	gossip  *gossiper
 
 	gatherMu sync.Mutex
 
@@ -102,18 +108,24 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	peers, err := s.peerIDs(ctx)
-	if err != nil {
-		return err
-	}
 
 	var syncRT *syncRuntime
 	if s.opts.StateDir != "" {
+		closeMembers, err := s.openMembership()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = closeMembers() }()
 		syncRT, err = s.buildSyncRuntime(ctx)
 		if err != nil {
 			return err
 		}
 		defer syncRT.close()
+	}
+
+	peers, err := s.peerIDs(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Connect the signaler before the manager starts so the first holepunch round
@@ -154,7 +166,7 @@ func (s *Service) Run(ctx context.Context) error {
 		Logger:    s.log,
 	}
 	if syncRT != nil {
-		mgrOpts.OnSession = syncRT.onSession(s.log)
+		mgrOpts.OnSession = syncRT.onSession(s.log, s.gossip)
 	}
 	mgr, err := peermgr.New(mgrOpts)
 	if err != nil {
@@ -171,6 +183,9 @@ func (s *Service) Run(ctx context.Context) error {
 	wg.Go(func() { _ = mgr.Run(ctx) })
 	if syncRT != nil {
 		wg.Go(func() { syncRT.runScanners(ctx, s.log) })
+	}
+	if s.gossip != nil {
+		wg.Go(func() { s.gossipLoop(ctx) })
 	}
 	wg.Wait()
 	return ctx.Err()
@@ -461,16 +476,70 @@ func localSubnets() []*net.IPNet {
 	return out
 }
 
+// openMembership opens the roster store under StateDir and builds the gossiper. The
+// signing key is the node's own Ed25519 key, carried by its certificate.
+func (s *Service) openMembership() (func() error, error) {
+	key, ok := s.opts.Cert.PrivateKey.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("node: certificate key is not Ed25519")
+	}
+	db, err := storage.Open(storage.Options{Path: filepath.Join(s.opts.StateDir, "membership.db"), MaxOpenConns: 4})
+	if err != nil {
+		return nil, fmt.Errorf("node: open membership db: %w", err)
+	}
+	store, err := membership.Open(membership.Options{DB: db, NodeID: s.opts.NodeID, Key: key})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.members = store
+	s.gossip = newGossiper(store, s.log)
+	return db.Close, nil
+}
+
+func (s *Service) gossipLoop(ctx context.Context) {
+	t := time.NewTicker(gossipInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.gossip.resync(ctx)
+		}
+	}
+}
+
+// authorize grants a peer the groups (by group id, which is the folder share id) it is a
+// verified member of, plus any group it founded — a member can always reach its founder
+// straight from the group id, which bootstraps the roster.
 func (s *Service) authorize(nodeID string) ([]string, bool, error) {
-	peer, err := s.opts.Config.GetPeer(context.Background(), nodeID)
-	switch {
-	case err == nil:
-		return peer.Folders, true, nil
-	case isNotFound(err):
+	if s.members == nil {
 		return nil, false, nil
-	default:
+	}
+	ctx := context.Background()
+	groups, err := s.members.Networks(ctx)
+	if err != nil {
 		return nil, false, err
 	}
+	var granted []string
+	for _, g := range groups {
+		if founder, ok := membership.Founder(g); ok && founder == nodeID {
+			granted = append(granted, g)
+			continue
+		}
+		member, err := s.members.IsMember(ctx, g, nodeID)
+		if err != nil {
+			return nil, false, err
+		}
+		if member {
+			granted = append(granted, g)
+		}
+	}
+	if len(granted) == 0 {
+		return nil, false, nil
+	}
+	return granted, true, nil
 }
 
 func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
@@ -487,15 +556,36 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m3"}, nil
 }
 
+// peerIDs is the set of nodes to proactively connect to: every co-member across all
+// groups this node belongs to, plus the founder of each group, minus self.
 func (s *Service) peerIDs(ctx context.Context) ([]string, error) {
-	peers, err := s.opts.Config.ListPeers(ctx)
+	if s.members == nil {
+		return nil, nil
+	}
+	groups, err := s.members.Networks(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(peers))
-	for _, p := range peers {
-		out = append(out, p.NodeID)
+	seen := make(map[string]struct{})
+	for _, g := range groups {
+		if founder, ok := membership.Founder(g); ok && founder != s.opts.NodeID {
+			seen[founder] = struct{}{}
+		}
+		roster, err := s.members.Roster(ctx, g)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range roster {
+			if e.NodeID != s.opts.NodeID {
+				seen[e.NodeID] = struct{}{}
+			}
+		}
 	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -515,10 +605,6 @@ func (s *Service) close() {
 		_ = pm.Release()
 	}
 	_ = s.tr.Close()
-}
-
-func isNotFound(err error) bool {
-	return errors.Is(err, config.ErrPeerNotFound)
 }
 
 var _ netio.Transport = (*transport.Transport)(nil)

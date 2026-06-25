@@ -59,9 +59,6 @@ func TestMigrateV1ToV2(t *testing.T) {
 	if err := s.SetFolderShareID(ctx, "docs", "docs-share"); err != nil {
 		t.Fatalf("SetFolderShareID after migrate: %v", err)
 	}
-	if err := s.AddPeer(ctx, Peer{NodeID: peerA, Name: "laptop", Folders: []string{"docs-share"}}); err != nil {
-		t.Fatalf("AddPeer after migrate: %v", err)
-	}
 
 	var v int
 	if err := db.QueryRow(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v); err != nil {

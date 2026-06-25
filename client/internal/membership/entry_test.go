@@ -18,7 +18,7 @@ func selfEntry(t *testing.T) (Entry, ed25519.PublicKey) {
 	if err != nil {
 		t.Fatalf("FingerprintKey: %v", err)
 	}
-	e := Entry{NetworkID: "netid", NodeID: id, PublicKey: pub, Role: RoleAdmin, AddedBy: id, AddedAtMs: 1700000000000}
+	e := Entry{NetworkID: "netid", NodeID: id, PublicKey: pub, Role: RoleWriter, AddedBy: id, AddedAtMs: 1700000000000}
 	signed, err := Sign(key, e)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
@@ -35,7 +35,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 
 func TestVerifyRejectsTamperedField(t *testing.T) {
 	e, pub := selfEntry(t)
-	e.Role = RoleMember // changed after signing
+	e.Role = RoleReader // changed after signing
 	if err := e.VerifySig(pub); err == nil {
 		t.Fatal("VerifySig accepted a tampered role")
 	}
@@ -65,7 +65,7 @@ func TestVerifyRejectsWrongSigner(t *testing.T) {
 
 // Golden: the canonical signing-byte layout is a frozen cross-node contract.
 func TestSigningBytesGolden(t *testing.T) {
-	e := Entry{NetworkID: "net", NodeID: "node", PublicKey: make([]byte, 32), Role: RoleAdmin, AddedBy: "adm", AddedAtMs: 1}
+	e := Entry{NetworkID: "net", NodeID: "node", PublicKey: make([]byte, 32), Role: RoleWriter, AddedBy: "adm", AddedAtMs: 1}
 	for i := range e.PublicKey {
 		e.PublicKey[i] = 0x01
 	}

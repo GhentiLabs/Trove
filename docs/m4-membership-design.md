@@ -110,3 +110,75 @@ path too (either grants); C2 can retire manual peers. Auto-dialing roster member
 - A peer flooding bogus entries: each is signature-checked before storage, so the cost
   is CPU per entry; bound the gossip message size (control-frame cap) and entries per
   message.
+
+---
+
+# C2 update — folder-as-group, access tiers, live wiring (2026-06-25)
+
+C2 reworked the model with the project owner. The C1 sections above describe the crypto
+core, which is unchanged on the wire; the **terminology and identity model below
+supersede them**.
+
+## Folder = group
+
+A shared folder **is** a group; there is no separate guest list. The old per-peer
+`config.Peer` grant list is **deleted** (`config/peers.go`, the `peers`/`peer_folders`
+tables). You pick a root folder to share; everything under it comes along; different
+folders are different groups with different members.
+
+## Per-folder group id that commits to the founder
+
+`network_id` is no longer the founder's bare `node_id` (that allowed only one group per
+founder). A group id is now:
+
+```
+group_id = <founder node_id> "." <random hex suffix>     (== the folder's ShareID)
+```
+
+- Distinct folders of one founder get distinct ids (`mintGroupID`).
+- It **commits to the founder**: `membership.Founder(group_id)` recovers the founder
+  node id from the id alone. Genesis verification changed from `node_id == network_id`
+  to `Founder(network_id) == node_id` (still self-signed, writer role, sig verifies).
+- This is the bootstrap: a member that has only `Join`ed a group (empty roster) can
+  still authorize and dial the founder, then pull the roster by gossip.
+- *Deferred:* a dedicated per-folder network keypair (id = fingerprint of a network key)
+  fully decouples group identity from the founder's node key and fixes founder-rekey.
+
+## Access tiers (roles)
+
+`Role` is renamed to the Tahoe-style tiers; **byte values are unchanged** (golden signing
+test intact): `RoleReader = 0`, `RoleWriter = 1`, `RoleHolder = 2` (reserved, rejected by
+`validate` until encrypted-folder sync exists).
+
+- **writer** — read+write, gets the folder key, may add members. The **owner is the
+  founding writer** and the root of trust; he alone may remove members (revocation is
+  still deferred) and cannot be removed.
+- **reader** — receives/reads/restores the folder, gets the key, cannot add members.
+  Today's backup replica.
+- **holder** — ciphertext-only storage, verifies integrity, no key, no read. Needs
+  encrypted-folder sync (currently rejected in `node/sync.go`); not built.
+
+**Invite = write access** (one rule): one-way backup has a single writer (the owner) so
+only the owner invites; two-way sync would have many writers who could all invite.
+
+## Live wiring (node.Service)
+
+- A single `membership.Store` opens at `StateDir/membership.db` (key from the node cert).
+- `authorize(peer)` grants a peer the groups (= ShareIDs) it is a verified member of, or
+  founded (the bootstrap shortcut). `peerIDs()` dials all co-members + founders.
+- Per-folder sync role is derived from the tier: `Founder(ShareID) == self` → owner
+  (sender/scanner), else replica (receiver). The global `-sync-role` flag is gone.
+- A **composite control handler** routes `MembershipGossip` to the node gossiper and
+  everything else to the per-session sync engine; the gossiper `addPeer`s each session
+  and an anti-entropy tick re-pushes rosters periodically.
+- `trove-peer` is now subcommands: `identity`, `found -root`, `invite -group -node -key`,
+  `join -group -root`, `run -trove`.
+
+## Deferred (Phase 4 and beyond)
+
+- **Offline-owner bootstrap:** a discovery-server index keyed by `tag = SHA256(group_id)`
+  → member node-id hints (non-authoritative; trust stays P2P), plus splitting
+  connect-auth from sync-auth so a fresh member can bootstrap from any online member, not
+  only the founder.
+- Encrypted **holder** tier, extra **writers** / two-way sync, member **removal /
+  revocation**, dedicated per-folder network key.

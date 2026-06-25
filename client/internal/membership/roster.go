@@ -3,9 +3,12 @@ package membership
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GhentiLabs/Trove/pkg/identity"
@@ -14,9 +17,9 @@ import (
 )
 
 var (
-	// ErrNotAdmin is returned when the local node tries to add a member to a network
-	// it is not an admin of.
-	ErrNotAdmin = errors.New("membership: local node is not an admin of this network")
+	// ErrNotWriter is returned when the local node tries to add a member to a group it
+	// is not a writer of.
+	ErrNotWriter = errors.New("membership: local node is not a writer of this group")
 	// ErrUnknownNetwork is returned for an operation on a network this node has not
 	// founded or joined.
 	ErrUnknownNetwork = errors.New("membership: unknown network")
@@ -79,13 +82,41 @@ func Open(opts Options) (*Store, error) {
 	return s, nil
 }
 
-// Found creates a network with this node as the founding admin and returns its
-// network_id (this node's id). The genesis entry is self-signed.
+// groupSep separates a group's founder id from its per-group suffix. It is absent from
+// the base32 node-id alphabet, so the split is unambiguous.
+const groupSep = "."
+
+// mintGroupID derives a fresh per-folder group id that commits to its founder: the
+// founder's node id, a separator, and random bytes. Distinct folders of one founder get
+// distinct ids, while any peer can recover the founder from the id alone.
+func mintGroupID(founder string) (string, error) {
+	var b [10]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("membership: mint group id: %w", err)
+	}
+	return founder + groupSep + hex.EncodeToString(b[:]), nil
+}
+
+// Founder returns the node id that founded groupID, recovered from the id itself, and
+// whether groupID is well-formed.
+func Founder(groupID string) (string, bool) {
+	founder, suffix, ok := strings.Cut(groupID, groupSep)
+	if !ok || suffix == "" || !identity.ValidNodeID(founder) {
+		return "", false
+	}
+	return founder, true
+}
+
+// Found creates a group with this node as the founding writer and returns its group id.
+// The genesis entry is self-signed.
 func (s *Store) Found(ctx context.Context) (string, error) {
-	networkID := s.node
+	networkID, err := mintGroupID(s.node)
+	if err != nil {
+		return "", err
+	}
 	entry, err := Sign(s.key, Entry{
 		NetworkID: networkID, NodeID: s.node, PublicKey: s.pub,
-		Role: RoleAdmin, AddedBy: s.node, AddedAtMs: time.Now().UnixMilli(),
+		Role: RoleWriter, AddedBy: s.node, AddedAtMs: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return "", err
@@ -108,17 +139,24 @@ func (s *Store) Join(ctx context.Context, networkID string) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error { return joinTx(ctx, tx, networkID) })
 }
 
-// Add admits a member to a network this node administers, signing the entry with the
+// Add admits a member to a group this node is a writer of, signing the entry with the
 // local key, and returns it for gossip.
 func (s *Store) Add(ctx context.Context, networkID, nodeID string, publicKey []byte, role Role) (Entry, error) {
+	boundID, err := identity.FingerprintKey(publicKey)
+	if err != nil {
+		return Entry{}, fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+	}
+	if boundID != nodeID {
+		return Entry{}, ErrKeyMismatch
+	}
 	var out Entry
-	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		admin, err := loadEntry(ctx, tx, networkID, s.node)
+	err = s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		self, err := loadEntry(ctx, tx, networkID, s.node)
 		if err != nil {
 			return err
 		}
-		if admin == nil || admin.Role != RoleAdmin {
-			return ErrNotAdmin
+		if self == nil || self.Role != RoleWriter {
+			return ErrNotWriter
 		}
 		entry, err := Sign(s.key, Entry{
 			NetworkID: networkID, NodeID: nodeID, PublicKey: publicKey,
@@ -151,11 +189,11 @@ func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([
 			return err
 		}
 		accepted := make(map[string]Entry, len(roster))
-		admins := make(map[string]ed25519.PublicKey, len(roster))
+		writers := make(map[string]ed25519.PublicKey, len(roster))
 		for _, e := range roster {
 			accepted[e.NodeID] = e
-			if e.Role == RoleAdmin {
-				admins[e.NodeID] = e.PublicKey
+			if e.Role == RoleWriter {
+				writers[e.NodeID] = e.PublicKey
 			}
 		}
 
@@ -169,10 +207,10 @@ func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([
 			progress := false
 			rest := pending[:0]
 			for _, e := range pending {
-				if verifyChain(networkID, e, admins) {
+				if verifyChain(networkID, e, writers) {
 					accepted[e.NodeID] = e
-					if e.Role == RoleAdmin {
-						admins[e.NodeID] = e.PublicKey
+					if e.Role == RoleWriter {
+						writers[e.NodeID] = e.PublicKey
 					}
 					added = append(added, e)
 					progress = true
@@ -198,19 +236,20 @@ func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([
 	return added, nil
 }
 
-// verifyChain reports whether e is a valid roster entry: the genesis self-signature
-// for the network root, or an entry signed by an already-verified admin.
-func verifyChain(networkID string, e Entry, admins map[string]ed25519.PublicKey) bool {
+// verifyChain reports whether e is a valid roster entry: the founder's self-signed
+// genesis for the group, or an entry signed by an already-verified writer.
+func verifyChain(networkID string, e Entry, writers map[string]ed25519.PublicKey) bool {
 	if e.NetworkID != networkID {
 		return false
 	}
 	if e.AddedBy == e.NodeID {
-		if e.NodeID != networkID || e.Role != RoleAdmin {
+		founder, ok := Founder(networkID)
+		if !ok || e.NodeID != founder || e.Role != RoleWriter {
 			return false
 		}
 		return e.VerifySig(e.PublicKey) == nil
 	}
-	signer, ok := admins[e.AddedBy]
+	signer, ok := writers[e.AddedBy]
 	if !ok {
 		return false
 	}

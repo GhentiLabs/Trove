@@ -19,8 +19,7 @@ import (
 // written by a newer binary and migrates older ones forward.
 //
 // v1: folders and per-folder keys.
-// v2: folders gain a shared folder_id (the cross-node match key, set at pairing);
-// an authorized-peer registry is added.
+// v2: folders gain a shared folder_id (the group id a folder is bound to).
 const SchemaVersion = 2
 
 // MasterKeyLen is the length of a folder master key.
@@ -42,15 +41,6 @@ var (
 	ErrSchemaTooNew = errors.New("config: database schema newer than this binary")
 	// ErrNodeMismatch is returned when the database belongs to a different node.
 	ErrNodeMismatch = errors.New("config: database belongs to a different node")
-	// ErrPeerExists is returned when adding a peer whose node id already exists.
-	ErrPeerExists = errors.New("config: peer already exists")
-	// ErrPeerNotFound is returned when no peer has the given node id.
-	ErrPeerNotFound = errors.New("config: peer not found")
-	// ErrInvalidNodeID is returned when a peer node id is not a valid fingerprint.
-	ErrInvalidNodeID = errors.New("config: invalid node id")
-	// ErrUnknownShareID is returned when authorizing a peer for a shared folder id that
-	// no local folder carries (the empty share id included).
-	ErrUnknownShareID = errors.New("config: unknown shared folder id")
 )
 
 const schema = `
@@ -69,17 +59,7 @@ CREATE TABLE IF NOT EXISTS folders (
 	kdf_threads INTEGER,
 	created_ms  INTEGER NOT NULL,
 	share_id    TEXT    NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS peers (
-	node_id  TEXT PRIMARY KEY,
-	name     TEXT    NOT NULL DEFAULT '',
-	added_ms INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS peer_folders (
-	node_id   TEXT NOT NULL,
-	folder_id TEXT NOT NULL,
-	PRIMARY KEY (node_id, folder_id)
-) WITHOUT ROWID;`
+);`
 
 // Folder is a registered sync folder.
 type Folder struct {
@@ -242,11 +222,11 @@ func (s *Store) RemoveFolder(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrFolderNotFound
 		}
-		return pruneOrphanGrants(ctx, tx)
+		return nil
 	})
 }
 
-// SetFolderShareID sets a folder's cross-node shared id, agreed at pairing.
+// SetFolderShareID binds a folder to its group id.
 func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		res, err := tx.Exec(ctx, `UPDATE folders SET share_id = ? WHERE id = ?`, shareID, id)
@@ -256,17 +236,8 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrFolderNotFound
 		}
-		return pruneOrphanGrants(ctx, tx)
+		return nil
 	})
-}
-
-// pruneOrphanGrants drops peer_folders rows whose shared folder id is no longer
-// backed by any local folder.
-func pruneOrphanGrants(ctx context.Context, tx *storage.Tx) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM peer_folders WHERE folder_id NOT IN (SELECT share_id FROM folders WHERE share_id != '')`); err != nil {
-		return fmt.Errorf("config: prune peer folders: %w", err)
-	}
-	return nil
 }
 
 // SetFolderKey stores an explicit master key for a folder, clearing any recorded

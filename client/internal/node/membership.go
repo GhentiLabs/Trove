@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 
 	"github.com/GhentiLabs/Trove/client/internal/membership"
@@ -41,17 +42,43 @@ func (g *gossiper) removePeer(peerID string, s *session.Session) {
 	g.mu.Unlock()
 }
 
+// maxGossipEntries bounds the roster a single message may carry, capping the
+// signature-verification work a peer can force under the store's write transaction.
+const maxGossipEntries = 4096
+
 // handle merges an inbound gossip message from fromPeer and re-broadcasts what it
 // newly admitted to the other peers.
 func (g *gossiper) handle(ctx context.Context, fromPeer string, gm *wirepb.MembershipGossip) error {
-	added, err := g.store.Merge(ctx, gm.GetNetworkId(), fromWireEntries(gm.GetEntries()))
+	entries := gm.GetEntries()
+	if len(entries) > maxGossipEntries {
+		g.log.Warn("node: gossip roster over cap, dropping", "peer", fromPeer, "network", gm.GetNetworkId(), "count", len(entries), "cap", maxGossipEntries)
+		return nil
+	}
+	added, err := g.store.Merge(ctx, gm.GetNetworkId(), fromWireEntries(entries))
 	if err != nil {
-		return err
+		// A local roster-store failure is not a protocol violation; log it and let the
+		// anti-entropy tick retry rather than tear the session down.
+		g.log.Warn("node: gossip merge failed", "peer", fromPeer, "network", gm.GetNetworkId(), "err", err)
+		return nil
 	}
 	if len(added) > 0 {
 		g.broadcast(gm.GetNetworkId(), added, fromPeer)
 	}
 	return nil
+}
+
+// resync re-pushes the local rosters to every connected peer; the node calls it on a
+// timer for anti-entropy so a roster that missed a peer eventually reaches it.
+func (g *gossiper) resync(ctx context.Context) {
+	g.mu.Lock()
+	peers := make([]*session.Session, 0, len(g.peers))
+	for _, s := range g.peers {
+		peers = append(peers, s)
+	}
+	g.mu.Unlock()
+	for _, s := range peers {
+		g.sendRosters(ctx, s)
+	}
 }
 
 func (g *gossiper) sendRosters(ctx context.Context, to *session.Session) {
@@ -106,6 +133,9 @@ func toWireGossip(networkID string, entries []membership.Entry) *wirepb.Membersh
 func fromWireEntries(in []*wirepb.MembershipEntry) []membership.Entry {
 	out := make([]membership.Entry, 0, len(in))
 	for _, e := range in {
+		if e.GetRole() > math.MaxUint8 {
+			continue // out of Role's range; Merge would reject it anyway
+		}
 		out = append(out, membership.Entry{
 			NetworkID: e.GetNetworkId(), NodeID: e.GetNodeId(), PublicKey: e.GetPublicKey(),
 			Role: membership.Role(e.GetRole()), AddedBy: e.GetAddedBy(), AddedAtMs: e.GetAddedAtMs(), Sig: e.GetSig(),

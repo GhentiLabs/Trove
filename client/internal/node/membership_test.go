@@ -114,7 +114,7 @@ func TestGossipPropagatesAcrossHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Found: %v", err)
 	}
-	if _, err := f.store.Add(ctx, net, member.id, member.pub, membership.RoleMember); err != nil {
+	if _, err := f.store.Add(ctx, net, member.id, member.pub, membership.RoleReader); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := b.store.Join(ctx, net); err != nil {

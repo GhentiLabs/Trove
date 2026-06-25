@@ -29,10 +29,13 @@ var (
 type Role uint8
 
 const (
-	// RoleMember may sync; it cannot add members.
-	RoleMember Role = 0
-	// RoleAdmin may add members and admins.
-	RoleAdmin Role = 1
+	// RoleReader may read and restore the folder; it cannot add members.
+	RoleReader Role = 0
+	// RoleWriter may read, write, and add members. The owner is the founding writer.
+	RoleWriter Role = 1
+	// RoleHolder stores ciphertext only: it can verify integrity but cannot read or add
+	// members. Reserved; not yet accepted, as encrypted-folder sync is unbuilt.
+	RoleHolder Role = 2
 )
 
 // Entry is one signed roster record: a member's identity and the admin attestation
@@ -106,7 +109,7 @@ func (e Entry) validate() error {
 		return fmt.Errorf("%w: public key length %d", ErrInvalidEntry, len(e.PublicKey))
 	case e.AddedBy == "":
 		return fmt.Errorf("%w: empty added_by", ErrInvalidEntry)
-	case e.Role != RoleMember && e.Role != RoleAdmin:
+	case e.Role != RoleReader && e.Role != RoleWriter:
 		return fmt.Errorf("%w: unknown role %d", ErrInvalidEntry, e.Role)
 	}
 	return nil
