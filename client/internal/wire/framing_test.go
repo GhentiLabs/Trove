@@ -23,8 +23,15 @@ func TestFrozenConstantsGolden(t *testing.T) {
 	if MaxMessageSize != 64<<20 {
 		t.Fatalf("MaxMessageSize = %d, want %d", MaxMessageSize, 64<<20)
 	}
+	if MaxControlMessageSize != 1<<20 {
+		t.Fatalf("MaxControlMessageSize = %d, want %d", MaxControlMessageSize, 1<<20)
+	}
 	if TypeNetworkConfig != 1 || TypePing != 2 || TypeClose != 3 {
 		t.Fatalf("message type values drifted: nc=%d ping=%d close=%d", TypeNetworkConfig, TypePing, TypeClose)
+	}
+	if TypeFolderSummary != 4 || TypeManifestRequest != 5 || TypeManifestDelta != 6 {
+		t.Fatalf("M4 message type values drifted: summary=%d req=%d delta=%d",
+			TypeFolderSummary, TypeManifestRequest, TypeManifestDelta)
 	}
 	if wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE != 0 ||
 		wirepb.FolderType_FOLDER_TYPE_SEND_ONLY != 1 ||
@@ -125,6 +132,43 @@ func TestMessageRoundTrip(t *testing.T) {
 	}
 	if !proto.Equal(msg, cfg) {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", msg, cfg)
+	}
+}
+
+func TestSyncMessageRoundTrip(t *testing.T) {
+	root := bytes.Repeat([]byte{0xAB}, 32)
+	cid := bytes.Repeat([]byte{0xCD}, 32)
+	mid := bytes.Repeat([]byte{0xEF}, 32)
+	cases := []proto.Message{
+		&wirepb.FolderSummary{FolderId: "docs", SnapshotRoot: root, IndexEpochId: 7, HighWaterSequence: 42},
+		&wirepb.ManifestRequest{FolderId: "docs", IndexEpochId: 7, SinceSequence: 12},
+		&wirepb.ManifestDelta{
+			FolderId: "docs", IndexEpochId: 7, HighWaterSequence: 42,
+			Manifests: []*wirepb.RemoteManifest{{
+				Kind: 0, Path: "a/b.txt", Mode: 0o644,
+				Chunks:        []*wirepb.ChunkRef{{ChunkId: cid, Length: 1024}},
+				ManifestId:    mid,
+				VersionVector: []byte{0x01, 0x02},
+				OwnerSequence: 12,
+			}},
+		},
+	}
+	wantTypes := []MessageType{TypeFolderSummary, TypeManifestRequest, TypeManifestDelta}
+	for i, msg := range cases {
+		var buf bytes.Buffer
+		if err := WriteMessage(&buf, msg); err != nil {
+			t.Fatalf("WriteMessage %T: %v", msg, err)
+		}
+		typ, got, err := ReadMessage(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("ReadMessage %T: %v", msg, err)
+		}
+		if typ != wantTypes[i] {
+			t.Fatalf("%T type = %d, want %d", msg, typ, wantTypes[i])
+		}
+		if !proto.Equal(got, msg) {
+			t.Fatalf("%T round-trip mismatch:\n got %+v\nwant %+v", msg, got, msg)
+		}
 	}
 }
 

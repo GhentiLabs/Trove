@@ -211,16 +211,17 @@ func (x *Header) GetCompression() uint32 {
 
 // Folder is one folder a peer offers in its NetworkConfig. Folders match across
 // nodes solely by folder_id (the shared string agreed at pairing), independent of
-// the encryption key. Tags 4-6 are reserved for the M4 resync cursor
-// (index_epoch_id, high_water_sequence) and the M6 key-agreement token
+// the encryption key. Tag 6 is reserved for the M6 key-agreement token
 // (encryption_password_token).
 type Folder struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
-	FolderType    FolderType             `protobuf:"varint,2,opt,name=folder_type,json=folderType,proto3,enum=trove.wire.v1.FolderType" json:"folder_type,omitempty"`
-	Encrypted     bool                   `protobuf:"varint,3,opt,name=encrypted,proto3" json:"encrypted,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	FolderType        FolderType             `protobuf:"varint,2,opt,name=folder_type,json=folderType,proto3,enum=trove.wire.v1.FolderType" json:"folder_type,omitempty"`
+	Encrypted         bool                   `protobuf:"varint,3,opt,name=encrypted,proto3" json:"encrypted,omitempty"`
+	IndexEpochId      uint64                 `protobuf:"varint,4,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence int64                  `protobuf:"varint,5,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Folder) Reset() {
@@ -274,6 +275,20 @@ func (x *Folder) GetEncrypted() bool {
 	return false
 }
 
+func (x *Folder) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *Folder) GetHighWaterSequence() int64 {
+	if x != nil {
+		return x.HighWaterSequence
+	}
+	return 0
+}
+
 // NetworkConfig is the first post-Hello message, sent exactly once each way. The
 // connection's shared-folder set is the intersection of both sides' folder_ids.
 // Tag 3 is reserved for advertised addresses (address gossip).
@@ -321,6 +336,385 @@ func (x *NetworkConfig) GetFolders() []*Folder {
 	return nil
 }
 
+// FolderSummary is the owner's per-folder anti-entropy announcement on the control
+// stream, sent once a session is Active and whenever the owner's folder root
+// advances. A replica compares snapshot_root to its own and requests a delta if
+// they differ; index_epoch_id and high_water_sequence drive the resync cursor.
+type FolderSummary struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
+	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *FolderSummary) Reset() {
+	*x = FolderSummary{}
+	mi := &file_wire_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FolderSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FolderSummary) ProtoMessage() {}
+
+func (x *FolderSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FolderSummary.ProtoReflect.Descriptor instead.
+func (*FolderSummary) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *FolderSummary) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *FolderSummary) GetSnapshotRoot() []byte {
+	if x != nil {
+		return x.SnapshotRoot
+	}
+	return nil
+}
+
+func (x *FolderSummary) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *FolderSummary) GetHighWaterSequence() int64 {
+	if x != nil {
+		return x.HighWaterSequence
+	}
+	return 0
+}
+
+// ManifestRequest asks the owner for every manifest with seq greater than
+// since_sequence under the named epoch. since_sequence = 0 requests a full resync;
+// an index_epoch_id that differs from the owner's also forces a full resync.
+type ManifestRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	IndexEpochId  uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	SinceSequence int64                  `protobuf:"varint,3,opt,name=since_sequence,json=sinceSequence,proto3" json:"since_sequence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ManifestRequest) Reset() {
+	*x = ManifestRequest{}
+	mi := &file_wire_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ManifestRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ManifestRequest) ProtoMessage() {}
+
+func (x *ManifestRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ManifestRequest.ProtoReflect.Descriptor instead.
+func (*ManifestRequest) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ManifestRequest) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *ManifestRequest) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *ManifestRequest) GetSinceSequence() int64 {
+	if x != nil {
+		return x.SinceSequence
+	}
+	return 0
+}
+
+// ChunkRef is one ordered chunk reference within a manifest: the chunk identity and
+// its plaintext length. Offsets are derived from the running length sum.
+type ChunkRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChunkId       []byte                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	Length        int64                  `protobuf:"varint,2,opt,name=length,proto3" json:"length,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChunkRef) Reset() {
+	*x = ChunkRef{}
+	mi := &file_wire_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChunkRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChunkRef) ProtoMessage() {}
+
+func (x *ChunkRef) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChunkRef.ProtoReflect.Descriptor instead.
+func (*ChunkRef) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ChunkRef) GetChunkId() []byte {
+	if x != nil {
+		return x.ChunkId
+	}
+	return nil
+}
+
+func (x *ChunkRef) GetLength() int64 {
+	if x != nil {
+		return x.Length
+	}
+	return 0
+}
+
+// RemoteManifest carries one manifest in a delta with the owner's identity fields
+// verbatim, so a replica stores it without minting its own version. manifest_id is
+// re-verified against the chunk references on apply.
+type RemoteManifest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          uint32                 `protobuf:"varint,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Mode          uint32                 `protobuf:"varint,3,opt,name=mode,proto3" json:"mode,omitempty"`
+	SymlinkTarget string                 `protobuf:"bytes,4,opt,name=symlink_target,json=symlinkTarget,proto3" json:"symlink_target,omitempty"`
+	Chunks        []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	ManifestId    []byte                 `protobuf:"bytes,6,opt,name=manifest_id,json=manifestId,proto3" json:"manifest_id,omitempty"`
+	VersionVector []byte                 `protobuf:"bytes,7,opt,name=version_vector,json=versionVector,proto3" json:"version_vector,omitempty"`
+	OwnerSequence int64                  `protobuf:"varint,8,opt,name=owner_sequence,json=ownerSequence,proto3" json:"owner_sequence,omitempty"`
+	Deleted       bool                   `protobuf:"varint,9,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoteManifest) Reset() {
+	*x = RemoteManifest{}
+	mi := &file_wire_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoteManifest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoteManifest) ProtoMessage() {}
+
+func (x *RemoteManifest) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoteManifest.ProtoReflect.Descriptor instead.
+func (*RemoteManifest) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RemoteManifest) GetKind() uint32 {
+	if x != nil {
+		return x.Kind
+	}
+	return 0
+}
+
+func (x *RemoteManifest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *RemoteManifest) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *RemoteManifest) GetSymlinkTarget() string {
+	if x != nil {
+		return x.SymlinkTarget
+	}
+	return ""
+}
+
+func (x *RemoteManifest) GetChunks() []*ChunkRef {
+	if x != nil {
+		return x.Chunks
+	}
+	return nil
+}
+
+func (x *RemoteManifest) GetManifestId() []byte {
+	if x != nil {
+		return x.ManifestId
+	}
+	return nil
+}
+
+func (x *RemoteManifest) GetVersionVector() []byte {
+	if x != nil {
+		return x.VersionVector
+	}
+	return nil
+}
+
+func (x *RemoteManifest) GetOwnerSequence() int64 {
+	if x != nil {
+		return x.OwnerSequence
+	}
+	return 0
+}
+
+func (x *RemoteManifest) GetDeleted() bool {
+	if x != nil {
+		return x.Deleted
+	}
+	return false
+}
+
+func (x *RemoteManifest) GetDeletedMs() int64 {
+	if x != nil {
+		return x.DeletedMs
+	}
+	return 0
+}
+
+// ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
+// owner-sequence order, plus the epoch and high-water they were taken at so the
+// replica advances its cursor to exactly what it consumed.
+type ManifestDelta struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	IndexEpochId      uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence int64                  `protobuf:"varint,3,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	Manifests         []*RemoteManifest      `protobuf:"bytes,4,rep,name=manifests,proto3" json:"manifests,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ManifestDelta) Reset() {
+	*x = ManifestDelta{}
+	mi := &file_wire_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ManifestDelta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ManifestDelta) ProtoMessage() {}
+
+func (x *ManifestDelta) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ManifestDelta.ProtoReflect.Descriptor instead.
+func (*ManifestDelta) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ManifestDelta) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *ManifestDelta) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *ManifestDelta) GetHighWaterSequence() int64 {
+	if x != nil {
+		return x.HighWaterSequence
+	}
+	return 0
+}
+
+func (x *ManifestDelta) GetManifests() []*RemoteManifest {
+	if x != nil {
+		return x.Manifests
+	}
+	return nil
+}
+
 // Ping is the idle-timer keepalive.
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -330,7 +724,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_wire_proto_msgTypes[4]
+	mi := &file_wire_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -342,7 +736,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[4]
+	mi := &file_wire_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -355,7 +749,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{4}
+	return file_wire_proto_rawDescGZIP(), []int{9}
 }
 
 // Close requests a graceful shutdown.
@@ -368,7 +762,7 @@ type Close struct {
 
 func (x *Close) Reset() {
 	*x = Close{}
-	mi := &file_wire_proto_msgTypes[5]
+	mi := &file_wire_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -380,7 +774,7 @@ func (x *Close) String() string {
 func (*Close) ProtoMessage() {}
 
 func (x *Close) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[5]
+	mi := &file_wire_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -393,7 +787,7 @@ func (x *Close) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Close.ProtoReflect.Descriptor instead.
 func (*Close) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{5}
+	return file_wire_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Close) GetReason() string {
@@ -418,14 +812,47 @@ const file_wire_proto_rawDesc = "" +
 	"\x0eclient_version\x18\x05 \x01(\tR\rclientVersion\">\n" +
 	"\x06Header\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12 \n" +
-	"\vcompression\x18\x02 \x01(\rR\vcompression\"\x91\x01\n" +
+	"\vcompression\x18\x02 \x01(\rR\vcompression\"\xdb\x01\n" +
 	"\x06Folder\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12:\n" +
 	"\vfolder_type\x18\x02 \x01(\x0e2\x19.trove.wire.v1.FolderTypeR\n" +
 	"folderType\x12\x1c\n" +
-	"\tencrypted\x18\x03 \x01(\bR\tencryptedJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"F\n" +
+	"\tencrypted\x18\x03 \x01(\bR\tencrypted\x12$\n" +
+	"\x0eindex_epoch_id\x18\x04 \x01(\x04R\findexEpochId\x12.\n" +
+	"\x13high_water_sequence\x18\x05 \x01(\x03R\x11highWaterSequenceJ\x04\b\x06\x10\a\"F\n" +
 	"\rNetworkConfig\x12/\n" +
-	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\x06\n" +
+	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xa7\x01\n" +
+	"\rFolderSummary\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
+	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
+	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"{\n" +
+	"\x0fManifestRequest\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
+	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12%\n" +
+	"\x0esince_sequence\x18\x03 \x01(\x03R\rsinceSequence\"=\n" +
+	"\bChunkRef\x12\x19\n" +
+	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xcc\x02\n" +
+	"\x0eRemoteManifest\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
+	"\x04mode\x18\x03 \x01(\rR\x04mode\x12%\n" +
+	"\x0esymlink_target\x18\x04 \x01(\tR\rsymlinkTarget\x12/\n" +
+	"\x06chunks\x18\x05 \x03(\v2\x17.trove.wire.v1.ChunkRefR\x06chunks\x12\x1f\n" +
+	"\vmanifest_id\x18\x06 \x01(\fR\n" +
+	"manifestId\x12%\n" +
+	"\x0eversion_vector\x18\a \x01(\fR\rversionVector\x12%\n" +
+	"\x0eowner_sequence\x18\b \x01(\x03R\rownerSequence\x12\x18\n" +
+	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
+	"\n" +
+	"deleted_ms\x18\n" +
+	" \x01(\x03R\tdeletedMs\"\xbf\x01\n" +
+	"\rManifestDelta\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
+	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +
+	"\x13high_water_sequence\x18\x03 \x01(\x03R\x11highWaterSequence\x12;\n" +
+	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +
@@ -449,24 +876,31 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_wire_proto_goTypes = []any{
-	(FolderType)(0),       // 0: trove.wire.v1.FolderType
-	(*Hello)(nil),         // 1: trove.wire.v1.Hello
-	(*Header)(nil),        // 2: trove.wire.v1.Header
-	(*Folder)(nil),        // 3: trove.wire.v1.Folder
-	(*NetworkConfig)(nil), // 4: trove.wire.v1.NetworkConfig
-	(*Ping)(nil),          // 5: trove.wire.v1.Ping
-	(*Close)(nil),         // 6: trove.wire.v1.Close
+	(FolderType)(0),         // 0: trove.wire.v1.FolderType
+	(*Hello)(nil),           // 1: trove.wire.v1.Hello
+	(*Header)(nil),          // 2: trove.wire.v1.Header
+	(*Folder)(nil),          // 3: trove.wire.v1.Folder
+	(*NetworkConfig)(nil),   // 4: trove.wire.v1.NetworkConfig
+	(*FolderSummary)(nil),   // 5: trove.wire.v1.FolderSummary
+	(*ManifestRequest)(nil), // 6: trove.wire.v1.ManifestRequest
+	(*ChunkRef)(nil),        // 7: trove.wire.v1.ChunkRef
+	(*RemoteManifest)(nil),  // 8: trove.wire.v1.RemoteManifest
+	(*ManifestDelta)(nil),   // 9: trove.wire.v1.ManifestDelta
+	(*Ping)(nil),            // 10: trove.wire.v1.Ping
+	(*Close)(nil),           // 11: trove.wire.v1.Close
 }
 var file_wire_proto_depIdxs = []int32{
 	0, // 0: trove.wire.v1.Folder.folder_type:type_name -> trove.wire.v1.FolderType
 	3, // 1: trove.wire.v1.NetworkConfig.folders:type_name -> trove.wire.v1.Folder
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	7, // 2: trove.wire.v1.RemoteManifest.chunks:type_name -> trove.wire.v1.ChunkRef
+	8, // 3: trove.wire.v1.ManifestDelta.manifests:type_name -> trove.wire.v1.RemoteManifest
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -480,7 +914,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   6,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

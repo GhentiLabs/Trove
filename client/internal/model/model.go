@@ -93,6 +93,19 @@ CREATE TABLE IF NOT EXISTS snapshot_manifests (
 CREATE TABLE IF NOT EXISTS counters (
 	name TEXT    PRIMARY KEY,
 	next INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replica_cursors (
+	folder_id     TEXT    NOT NULL,
+	owner_peer_id TEXT    NOT NULL,
+	epoch         INTEGER NOT NULL,
+	high_water    INTEGER NOT NULL,
+	updated_ms    INTEGER NOT NULL,
+	PRIMARY KEY (folder_id, owner_peer_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS folder_epoch (
+	id         INTEGER PRIMARY KEY CHECK (id = 1),
+	epoch      INTEGER NOT NULL,
+	created_ms INTEGER NOT NULL
 );`
 
 // querier is the read surface shared by *storage.DB and *storage.Tx, so load

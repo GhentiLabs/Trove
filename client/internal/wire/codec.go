@@ -20,6 +20,12 @@ const (
 	TypePing MessageType = 2
 	// TypeClose requests a graceful shutdown.
 	TypeClose MessageType = 3
+	// TypeFolderSummary announces an owner folder's current root and resync cursor.
+	TypeFolderSummary MessageType = 4
+	// TypeManifestRequest asks an owner for the manifest delta since a cursor.
+	TypeManifestRequest MessageType = 5
+	// TypeManifestDelta carries the requested manifest delta back to a replica.
+	TypeManifestDelta MessageType = 6
 )
 
 // WriteMessage frames m as uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body.
@@ -127,6 +133,12 @@ func typeOf(m proto.Message) (MessageType, bool) {
 		return TypePing, true
 	case *wirepb.Close:
 		return TypeClose, true
+	case *wirepb.FolderSummary:
+		return TypeFolderSummary, true
+	case *wirepb.ManifestRequest:
+		return TypeManifestRequest, true
+	case *wirepb.ManifestDelta:
+		return TypeManifestDelta, true
 	default:
 		return 0, false
 	}
@@ -140,6 +152,12 @@ func newMessage(t MessageType) (proto.Message, bool) {
 		return &wirepb.Ping{}, true
 	case TypeClose:
 		return &wirepb.Close{}, true
+	case TypeFolderSummary:
+		return &wirepb.FolderSummary{}, true
+	case TypeManifestRequest:
+		return &wirepb.ManifestRequest{}, true
+	case TypeManifestDelta:
+		return &wirepb.ManifestDelta{}, true
 	default:
 		return nil, false
 	}

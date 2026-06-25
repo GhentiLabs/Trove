@@ -34,14 +34,15 @@ enum FolderType {
 
 // Folder is one folder a peer offers in its NetworkConfig. Folders match across
 // nodes solely by folder_id (the shared string agreed at pairing), independent of
-// the encryption key. Tags 4-6 are reserved for the M4 resync cursor
-// (index_epoch_id, high_water_sequence) and the M6 key-agreement token
+// the encryption key. Tag 6 is reserved for the M6 key-agreement token
 // (encryption_password_token).
 message Folder {
   string folder_id = 1;
   FolderType folder_type = 2;
   bool encrypted = 3;
-  reserved 4, 5, 6;
+  uint64 index_epoch_id = 4;
+  int64 high_water_sequence = 5;
+  reserved 6;
 }
 
 // NetworkConfig is the first post-Hello message, sent exactly once each way. The
@@ -50,6 +51,59 @@ message Folder {
 message NetworkConfig {
   repeated Folder folders = 1;
   reserved 3;
+}
+
+// FolderSummary is the owner's per-folder anti-entropy announcement on the control
+// stream, sent once a session is Active and whenever the owner's folder root
+// advances. A replica compares snapshot_root to its own and requests a delta if
+// they differ; index_epoch_id and high_water_sequence drive the resync cursor.
+message FolderSummary {
+  string folder_id = 1;
+  bytes snapshot_root = 2;
+  uint64 index_epoch_id = 3;
+  int64 high_water_sequence = 4;
+}
+
+// ManifestRequest asks the owner for every manifest with seq greater than
+// since_sequence under the named epoch. since_sequence = 0 requests a full resync;
+// an index_epoch_id that differs from the owner's also forces a full resync.
+message ManifestRequest {
+  string folder_id = 1;
+  uint64 index_epoch_id = 2;
+  int64 since_sequence = 3;
+}
+
+// ChunkRef is one ordered chunk reference within a manifest: the chunk identity and
+// its plaintext length. Offsets are derived from the running length sum.
+message ChunkRef {
+  bytes chunk_id = 1;
+  int64 length = 2;
+}
+
+// RemoteManifest carries one manifest in a delta with the owner's identity fields
+// verbatim, so a replica stores it without minting its own version. manifest_id is
+// re-verified against the chunk references on apply.
+message RemoteManifest {
+  uint32 kind = 1;
+  string path = 2;
+  uint32 mode = 3;
+  string symlink_target = 4;
+  repeated ChunkRef chunks = 5;
+  bytes manifest_id = 6;
+  bytes version_vector = 7;
+  int64 owner_sequence = 8;
+  bool deleted = 9;
+  int64 deleted_ms = 10;
+}
+
+// ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
+// owner-sequence order, plus the epoch and high-water they were taken at so the
+// replica advances its cursor to exactly what it consumed.
+message ManifestDelta {
+  string folder_id = 1;
+  uint64 index_epoch_id = 2;
+  int64 high_water_sequence = 3;
+  repeated RemoteManifest manifests = 4;
 }
 
 // Ping is the idle-timer keepalive.
