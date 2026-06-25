@@ -9,6 +9,24 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 )
 
+func TestDataStreamConstantsGolden(t *testing.T) {
+	if DataMagic != 0x54445254 {
+		t.Fatalf("DataMagic = %#x, want 0x54445254", DataMagic)
+	}
+	if DataVersion != 1 {
+		t.Fatalf("DataVersion = %d, want 1", DataVersion)
+	}
+	if msgKindChunk != 0x01 {
+		t.Fatalf("msgKindChunk = %#x, want 0x01", msgKindChunk)
+	}
+	if MaxFolderIDLen != 512 {
+		t.Fatalf("MaxFolderIDLen = %d, want 512", MaxFolderIDLen)
+	}
+	if MaxChunkBytes != 4<<20 {
+		t.Fatalf("MaxChunkBytes = %d, want %d", MaxChunkBytes, 4<<20)
+	}
+}
+
 func TestChunkRequestGoldenLayout(t *testing.T) {
 	id := hasher.Sum([]byte("chunk"))
 	var buf bytes.Buffer
@@ -126,11 +144,11 @@ func TestReadChunkRequestRejectsOversizeFolderID(t *testing.T) {
 
 func TestReadChunkResponseRejectsOversizeLength(t *testing.T) {
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, DataMagic)
+	_ = binary.Write(&buf, binary.BigEndian, DataMagic)
 	buf.WriteByte(DataVersion)
 	buf.WriteByte(byte(StatusOK))
 	buf.Write([]byte{0, 0})
-	binary.Write(&buf, binary.BigEndian, uint32(MaxChunkBytes+1))
+	_ = binary.Write(&buf, binary.BigEndian, uint32(MaxChunkBytes+1))
 	if _, _, err := readChunkResponseHeader(&buf); !errors.Is(err, errChunkTooLarge) {
 		t.Fatalf("err = %v, want errChunkTooLarge", err)
 	}

@@ -1,10 +1,15 @@
+// Package syncengine drives one-way folder convergence over an Active session: an
+// owner serves its manifests and chunks; a replica pulls them and applies them
+// crash-safely to disk. One Engine is bound to one session and covers the folders
+// shared on it. It depends on model, chunkstore, session, and wire, and nothing
+// depends back on it. Control messages ride the session control stream as protobuf;
+// chunk payloads ride dedicated data streams as raw bytes (see codec.go).
 package syncengine
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,30 +19,30 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/model"
+	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/session"
 	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 	"github.com/GhentiLabs/Trove/client/internal/wire"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
 	// DefaultInFlight bounds a replica's concurrent chunk data streams.
 	DefaultInFlight = 16
-	// maxServeStreams bounds an owner's concurrent chunk-serving goroutines.
-	maxServeStreams = 64
-	// tmpDirName is the per-folder staging directory for crash-safe apply.
-	tmpDirName = ".trove-tmp"
-	// deltaTimeout bounds how long a replica waits for a ManifestDelta reply.
-	deltaTimeout = 60 * time.Second
+
+	maxServeStreams  = 64
+	tmpDirName       = ".trove-tmp"
+	deltaTimeout     = 60 * time.Second
+	announceInterval = 5 * time.Second
 )
 
 var (
 	// ErrNoSession is returned when New is given no session.
 	ErrNoSession = errors.New("syncengine: nil session")
-	// errChunkUnavailable means the owner no longer holds a requested chunk.
+
 	errChunkUnavailable = errors.New("syncengine: chunk unavailable from owner")
-	// errChunkVerify means a received chunk did not hash to its requested id.
-	errChunkVerify = errors.New("syncengine: chunk failed hash verification")
+	errChunkVerify      = errors.New("syncengine: chunk failed hash verification")
 )
 
 // Role is a folder's one-way direction on a session.
@@ -78,7 +83,6 @@ type Engine struct {
 	serveSem chan struct{}
 
 	servedChunks atomic.Int64
-	servedBytes  atomic.Int64
 }
 
 type folderState struct {
@@ -132,8 +136,7 @@ func New(opts Options) (*Engine, error) {
 	return e, nil
 }
 
-// Drive runs the engine for the session lifetime: it clears replica staging debris,
-// starts the owner serve loop, announces owned folders, and blocks until ctx is done.
+// Drive runs the sync engine until ctx is cancelled.
 func (e *Engine) Drive(ctx context.Context) error {
 	for _, fs := range e.folders {
 		if fs.cfg.Role == RoleReplica {
@@ -143,6 +146,7 @@ func (e *Engine) Drive(ctx context.Context) error {
 	var wg sync.WaitGroup
 	if e.ownsAny {
 		wg.Go(func() { e.serveLoop(ctx) })
+		wg.Go(func() { e.announceLoop(ctx) })
 	}
 	e.Announce(ctx)
 	<-ctx.Done()
@@ -150,8 +154,20 @@ func (e *Engine) Drive(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// Announce sends a FolderSummary for every owned folder, reflecting its current
-// root and resync cursor. It is called on connect and after a local change.
+func (e *Engine) announceLoop(ctx context.Context) {
+	t := time.NewTicker(announceInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			e.Announce(ctx)
+		}
+	}
+}
+
+// Announce sends a FolderSummary for every owned folder.
 func (e *Engine) Announce(ctx context.Context) {
 	for _, fs := range e.folders {
 		if fs.cfg.Role != RoleOwner {
@@ -184,9 +200,8 @@ func (e *Engine) announceFolder(ctx context.Context, fs *folderState) error {
 	})
 }
 
-// Handle routes an M4 control message; it is installed as the session's control
-// handler and must not block the read loop, so replies and reconciliation run in
-// their own goroutines.
+// Handle is the session's control handler for syncengine messages. It must not
+// block the read loop, so owner replies and reconciliation run in their own goroutines.
 func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Message) error {
 	switch typ {
 	case wire.TypeFolderSummary:
@@ -217,8 +232,7 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 	return nil
 }
 
-// ServedChunks is the number of chunks this engine has served as an owner. It is
-// the observability hook the dedup test uses to assert a rename moves no chunk data.
+// ServedChunks is the number of chunks this engine has served as an owner.
 func (e *Engine) ServedChunks() int64 { return e.servedChunks.Load() }
 
 func (e *Engine) serveLoop(ctx context.Context) {
@@ -240,7 +254,7 @@ func (e *Engine) serveLoop(ctx context.Context) {
 	}
 }
 
-func (e *Engine) serveOneStream(ctx context.Context, s netioStream) {
+func (e *Engine) serveOneStream(ctx context.Context, s netio.Stream) {
 	defer func() { _ = s.Close() }()
 	folderID, id, err := readChunkRequest(s)
 	if err != nil {
@@ -264,7 +278,6 @@ func (e *Engine) serveOneStream(ctx context.Context, s netioStream) {
 		return
 	}
 	e.servedChunks.Add(1)
-	e.servedBytes.Add(int64(len(data)))
 }
 
 func (e *Engine) serveManifest(ctx context.Context, fs *folderState, req *wirepb.ManifestRequest) {
@@ -295,21 +308,22 @@ func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.Ma
 	if err != nil {
 		return nil, err
 	}
-	root, err := fs.cfg.Model.CurrentRoot(ctx)
-	if err != nil {
-		return nil, err
-	}
 	manifests := make([]*wirepb.RemoteManifest, 0, len(recs))
 	for _, rec := range recs {
 		manifests = append(manifests, recordToWire(rec))
 	}
-	return &wirepb.ManifestDelta{
+	delta := &wirepb.ManifestDelta{
 		FolderId:          fs.cfg.FolderID,
 		IndexEpochId:      epoch,
 		HighWaterSequence: hw,
 		Manifests:         manifests,
-		SnapshotRoot:      root.Bytes(),
-	}, nil
+	}
+	// Fail rather than send a frame the replica's ReadControlMessage would reject,
+	// which would otherwise reconnect-loop. Large folders need delta pagination.
+	if proto.Size(delta) > wire.MaxControlMessageSize {
+		return nil, fmt.Errorf("syncengine: folder %q delta exceeds control-frame cap (%d manifests); pagination required", fs.cfg.FolderID, len(manifests))
+	}
+	return delta, nil
 }
 
 func recordToWire(rec model.Record) *wirepb.RemoteManifest {
@@ -332,12 +346,4 @@ func recordToWire(rec model.Record) *wirepb.RemoteManifest {
 		rm.DeletedMs = rec.DeletedAt.UnixMilli()
 	}
 	return rm
-}
-
-// netioStream mirrors netio.Stream so serveOneStream reads/writes without importing
-// netio for the alias alone.
-type netioStream interface {
-	io.Reader
-	io.Writer
-	io.Closer
 }
