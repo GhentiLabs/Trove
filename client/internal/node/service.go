@@ -517,7 +517,7 @@ func (s *Service) authorize(ctx context.Context, nodeID string) ([]string, bool,
 	if s.members == nil {
 		return nil, false, nil
 	}
-	groups, err := s.members.Networks(ctx)
+	groups, err := s.members.Groups(ctx)
 	if err != nil {
 		return nil, false, err
 	}
@@ -561,7 +561,7 @@ func (s *Service) peerIDs(ctx context.Context) ([]string, error) {
 	if s.members == nil {
 		return nil, nil
 	}
-	groups, err := s.members.Networks(ctx)
+	groups, err := s.members.Groups(ctx)
 	if err != nil {
 		return nil, err
 	}

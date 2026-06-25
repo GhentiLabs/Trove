@@ -51,14 +51,14 @@ const maxGossipEntries = 4096
 func (g *gossiper) handle(ctx context.Context, fromPeer string, gm *wirepb.MembershipGossip) error {
 	entries := gm.GetEntries()
 	if len(entries) > maxGossipEntries {
-		g.log.Warn("node: gossip roster over cap, dropping", "peer", fromPeer, "network", gm.GetNetworkId(), "count", len(entries), "cap", maxGossipEntries)
+		g.log.Warn("node: gossip roster over cap, dropping", "peer", fromPeer, "group", gm.GetNetworkId(), "count", len(entries), "cap", maxGossipEntries)
 		return nil
 	}
 	added, err := g.store.Merge(ctx, gm.GetNetworkId(), fromWireEntries(entries))
 	if err != nil {
 		// A local roster-store failure is not a protocol violation; log it and let the
 		// anti-entropy tick retry rather than tear the session down.
-		g.log.Warn("node: gossip merge failed", "peer", fromPeer, "network", gm.GetNetworkId(), "err", err)
+		g.log.Warn("node: gossip merge failed", "peer", fromPeer, "group", gm.GetNetworkId(), "err", err)
 		return nil
 	}
 	if len(added) > 0 {
@@ -82,21 +82,21 @@ func (g *gossiper) resync(ctx context.Context) {
 }
 
 func (g *gossiper) sendRosters(ctx context.Context, to *session.Session) {
-	nets, err := g.store.Networks(ctx)
+	groups, err := g.store.Groups(ctx)
 	if err != nil {
-		g.log.Warn("node: list networks", "err", err)
+		g.log.Warn("node: list groups", "err", err)
 		return
 	}
-	for _, net := range nets {
-		roster, err := g.store.Roster(ctx, net)
+	for _, group := range groups {
+		roster, err := g.store.Roster(ctx, group)
 		if err != nil {
-			g.log.Warn("node: load roster", "network", net, "err", err)
+			g.log.Warn("node: load roster", "group", group, "err", err)
 			continue
 		}
 		if len(roster) == 0 {
 			continue
 		}
-		if err := to.Send(toWireGossip(net, roster)); err != nil {
+		if err := to.Send(toWireGossip(group, roster)); err != nil {
 			g.log.Debug("node: send roster", "peer", to.PeerNodeID(), "err", err)
 		}
 	}

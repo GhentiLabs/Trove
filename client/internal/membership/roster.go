@@ -20,9 +20,9 @@ var (
 	// ErrNotWriter is returned when the local node tries to add a member to a group it
 	// is not a writer of.
 	ErrNotWriter = errors.New("membership: local node is not a writer of this group")
-	// ErrUnknownNetwork is returned for an operation on a network this node has not
-	// founded or joined.
-	ErrUnknownNetwork = errors.New("membership: unknown network")
+	// ErrUnknownGroup is returned for an operation on a group this node has not founded
+	// or joined.
+	ErrUnknownGroup = errors.New("membership: unknown group")
 	// ErrNodeMismatch is returned when the store's node id does not match its key.
 	ErrNodeMismatch = errors.New("membership: node id does not match key")
 )
@@ -281,8 +281,8 @@ func (s *Store) IsMember(ctx context.Context, networkID, nodeID string) (bool, e
 	return e != nil, err
 }
 
-// Networks returns the ids of every network this node belongs to.
-func (s *Store) Networks(ctx context.Context) ([]string, error) {
+// Groups returns the ids of every group this node belongs to.
+func (s *Store) Groups(ctx context.Context) ([]string, error) {
 	rows, err := s.db.Query(ctx, `SELECT network_id FROM networks ORDER BY network_id`)
 	if err != nil {
 		return nil, fmt.Errorf("membership: list networks: %w", err)
@@ -306,7 +306,7 @@ type querier interface {
 
 func joinTx(ctx context.Context, tx *storage.Tx, networkID string) error {
 	if networkID == "" {
-		return fmt.Errorf("%w: empty network id", ErrUnknownNetwork)
+		return fmt.Errorf("%w: empty group id", ErrUnknownGroup)
 	}
 	_, err := tx.Exec(ctx, `INSERT OR IGNORE INTO networks (network_id, joined_ms) VALUES (?, ?)`, networkID, time.Now().UnixMilli())
 	if err != nil {
