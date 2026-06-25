@@ -18,6 +18,24 @@ import (
 // place, then commit the model. The destination is never written directly, and a
 // crash before the commit re-applies idempotently on restart.
 func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, delta *wirepb.ManifestDelta) error {
+	// Validate the whole batch against the folder boundary before touching the
+	// filesystem: a hostile owner must not be able to delete the root, escape it, or
+	// plant an escaping symlink. The model commit re-validates, but only after the disk
+	// is mutated, so this guard has to run first.
+	dests := make([]string, len(batch))
+	for i, rm := range batch {
+		dest, err := fs.destPath(rm.Manifest.Path)
+		if err != nil {
+			return err
+		}
+		if !rm.Deleted {
+			if err := model.ValidateManifest(rm.Manifest); err != nil {
+				return fmt.Errorf("syncengine: reject manifest: %w", err)
+			}
+		}
+		dests[i] = dest
+	}
+
 	stage := filepath.Join(fs.cfg.Root, tmpDirName)
 	_ = os.RemoveAll(stage) // discard any debris from a previous failed attempt
 	if err := os.MkdirAll(stage, 0o700); err != nil {
@@ -37,11 +55,8 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 	}
 
 	parents := make(map[string]struct{}, len(batch))
-	for _, rm := range batch {
-		dest, err := fs.destPath(rm.Manifest.Path)
-		if err != nil {
-			return err
-		}
+	for i, rm := range batch {
+		dest := dests[i]
 		if err := fs.materialize(rm, dest, staged); err != nil {
 			return err
 		}
@@ -99,7 +114,7 @@ func (fs *folderState) stageFile(ctx context.Context, path string, rm model.Remo
 func (fs *folderState) destPath(rel string) (string, error) {
 	p := filepath.Join(fs.cfg.Root, filepath.FromSlash(rel))
 	r, err := filepath.Rel(fs.cfg.Root, p)
-	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("syncengine: path escapes folder root: %q", rel)
 	}
 	return p, nil
@@ -141,10 +156,14 @@ func (fs *folderState) materialize(rm model.RemoteManifest, dest string, staged 
 	case manifest.KindSymlink:
 		return materializeSymlink(dest, rm.Manifest.SymlinkTarget)
 	case manifest.KindRegular:
+		sp, ok := staged[rm.Manifest.Path]
+		if !ok {
+			return fmt.Errorf("syncengine: no staged file for %q", rm.Manifest.Path)
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return fmt.Errorf("syncengine: mkdir parent of %q: %w", rm.Manifest.Path, err)
 		}
-		if err := os.Rename(staged[rm.Manifest.Path], dest); err != nil {
+		if err := os.Rename(sp, dest); err != nil {
 			return fmt.Errorf("syncengine: rename %q: %w", rm.Manifest.Path, err)
 		}
 		return nil

@@ -151,13 +151,25 @@ run_cell() {
 	fi
 	local trove="trove://${COORD_IP}:${PORT}?id=${fp}"
 
-	local idA idB
-	idA=$(ip netns exec clA trove-peer -dir "$STATE/A" 2>/dev/null | awk '/node id:/{print $3}')
-	idB=$(ip netns exec clB trove-peer -dir "$STATE/B" 2>/dev/null | awk '/node id:/{print $3}')
+	# Identities (node id + public key); the first call mints each keypair on disk.
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
 
-	ip netns exec clA trove-peer -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -share demo -peer "$idB" -debug >"$LOG/A" 2>&1 &
+	# A owns a folder group: seed deterministic content, found the group, invite B as a
+	# reader, B joins into an empty root. Local config steps, no network.
+	local SRC="$STATE/A/share" DST="$STATE/B/share" group
+	mkdir -p "$SRC/sub" "$DST"
+	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	printf 'hello trove\n' >"$SRC/sub/note.txt"
+	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" | awk '/group id:/{print $3}')
+	if [ -z "$group" ]; then log "found failed"; kill $coord_pid 2>/dev/null; return 2; fi
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DST" >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
 	local pa=$!
-	ip netns exec clB trove-peer -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -share demo -peer "$idA" -debug >"$LOG/B" 2>&1 &
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
 	local pb=$!
 
 	local wait=$WAIT_OK
@@ -182,13 +194,31 @@ run_cell() {
 	grep -q "holepunch" "$LOG/A" && grep -q "holepunch" "$LOG/B" && attempted=1
 	kill -0 $pa 2>/dev/null && kill -0 $pb 2>/dev/null || alive=0
 
+	# On a punchable pair the replica must receive the owner's folder BIT-EXACT — this
+	# is the real end-to-end check: membership auth + gossip bootstrap + the sync engine.
+	local xfer="n/a" j
+	if [ $ok -eq 1 ] && [ $stable -eq 1 ]; then
+		xfer="fail"
+		for j in $(seq 1 30); do
+			if cmp -s "$SRC/big.bin" "$DST/big.bin" 2>/dev/null \
+			   && cmp -s "$SRC/sub/note.txt" "$DST/sub/note.txt" 2>/dev/null; then
+				xfer="ok"; break
+			fi
+			sleep 1
+		done
+	fi
+
 	kill $pa $pb $coord_pid 2>/dev/null
 	wait $pa $pb 2>/dev/null
 
 	local result="fail" took=""
-	if [ $ok -eq 1 ] && [ $stable -eq 1 ]; then
+	if [ $ok -eq 1 ] && [ $stable -eq 1 ] && [ "$xfer" = ok ]; then
 		result="success"
-		took=" in ${i}s"
+		took=" in ${i}s, files bit-exact"
+	elif [ $ok -eq 1 ] && [ "$xfer" = fail ]; then
+		log "cell ${na}x${nb}: session formed but file transfer FAILED"
+		log "---- A sync ----"; grep -iE "sync|manifest|chunk|scan|folder" "$LOG/A" | tail -15
+		log "---- B sync ----"; grep -iE "sync|manifest|chunk|coordinator|apply|folder" "$LOG/B" | tail -15
 	fi
 
 	if [ "$result" = "$expect" ]; then

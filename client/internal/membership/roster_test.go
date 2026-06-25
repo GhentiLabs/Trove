@@ -93,7 +93,6 @@ func TestAddRequiresWriter(t *testing.T) {
 	ctx := context.Background()
 	net, _ := f.store.Found(ctx)
 
-	// a is not a writer of net; it cannot add members.
 	if _, err := a.store.Add(ctx, net, victim.id, victim.pub, RoleReader); !errors.Is(err, ErrNotWriter) {
 		t.Fatalf("Add by non-writer: err = %v, want ErrNotWriter", err)
 	}

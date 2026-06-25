@@ -176,7 +176,7 @@ func (s *Store) Add(ctx context.Context, networkID, nodeID string, publicKey []b
 
 // Merge verifies incoming entries against the stored roster and the network root,
 // stores the valid, and returns the newly added entries (for re-gossip). Entries are
-// add-only in C1; an entry whose chain cannot be verified is dropped.
+// add-only; an entry whose chain cannot be verified is dropped.
 func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([]Entry, error) {
 	var added []Entry
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {

@@ -35,7 +35,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 
 func TestVerifyRejectsTamperedField(t *testing.T) {
 	e, pub := selfEntry(t)
-	e.Role = RoleReader // changed after signing
+	e.Role = RoleReader
 	if err := e.VerifySig(pub); err == nil {
 		t.Fatal("VerifySig accepted a tampered role")
 	}
@@ -49,7 +49,7 @@ func TestVerifyRejectsTamperedField(t *testing.T) {
 func TestVerifyRejectsKeyNodeMismatch(t *testing.T) {
 	e, _ := selfEntry(t)
 	other, _, _ := identity.GenerateKey()
-	e.PublicKey = other // fingerprint(PublicKey) no longer equals NodeID
+	e.PublicKey = other
 	if err := e.VerifySig(other); err == nil {
 		t.Fatal("VerifySig accepted a public key that does not match the node id")
 	}

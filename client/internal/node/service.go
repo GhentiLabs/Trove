@@ -553,7 +553,7 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 			offered = append(offered, session.Folder{ShareID: f.ShareID, Encrypted: f.Encrypted})
 		}
 	}
-	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m3"}, nil
+	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m4"}, nil
 }
 
 // peerIDs is the set of nodes to proactively connect to: every co-member across all

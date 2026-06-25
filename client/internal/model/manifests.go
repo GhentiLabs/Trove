@@ -71,7 +71,7 @@ func (s *Store) Stat(ctx context.Context, path string) (StatSig, bool, error) {
 func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadata) (manifest.ID, error) {
 	m.Path = manifest.NormalizePath(m.Path)
 	m.SymlinkTarget = manifest.NormalizePath(m.SymlinkTarget)
-	if err := validate(m); err != nil {
+	if err := ValidateManifest(m); err != nil {
 		return manifest.ID{}, err
 	}
 	id := m.ID()
@@ -259,7 +259,10 @@ func getRecord(ctx context.Context, q querier, path string) (Record, error) {
 	return rec, nil
 }
 
-func validate(m manifest.Manifest) error {
+// ValidateManifest rejects a manifest whose path or symlink target would escape the
+// folder root, or whose kind/content is inconsistent. The replica validates with it
+// before touching the filesystem so a hostile owner cannot plant escaping paths.
+func ValidateManifest(m manifest.Manifest) error {
 	if m.Path == "" {
 		return fmt.Errorf("%w: empty path", ErrInvalidManifest)
 	}

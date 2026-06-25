@@ -37,9 +37,10 @@ const (
 	deltaTimeout      = 60 * time.Second
 	announceInterval  = 5 * time.Second
 
-	// protoRepeatedOverhead approximates a repeated field's tag + length prefix when
-	// budgeting a delta page; the maxDeltaBytes headroom absorbs the approximation.
-	protoRepeatedOverhead = 2
+	// protoRepeatedOverhead bounds a repeated field's tag (1) + length varint (up to 3
+	// for values below 16 KiB) when budgeting a delta page, so the estimate never
+	// undercounts the wire size.
+	protoRepeatedOverhead = 4
 
 	// defaultMaxDeltaBytes caps one ManifestDelta page below the control-frame cap,
 	// leaving headroom for the envelope; larger folders span multiple pages.
@@ -371,7 +372,14 @@ func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.Ma
 	for _, rec := range recs {
 		rm := recordToWire(rec)
 		s := proto.Size(rm) + protoRepeatedOverhead
-		if len(manifests) > 0 && size+s > e.maxDeltaBytes {
+		if size+s > e.maxDeltaBytes {
+			if len(manifests) == 0 {
+				// A single manifest too large for one control frame would be sent as an
+				// undeliverable page that the replica rejects and re-requests forever.
+				// Fail loudly instead; splitting a manifest's chunk refs across pages is
+				// the real fix (large-file follow-up).
+				return nil, fmt.Errorf("syncengine: manifest %q (%d bytes) exceeds the delta page cap", rec.Manifest.Path, s)
+			}
 			complete = false
 			break
 		}

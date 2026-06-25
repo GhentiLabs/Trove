@@ -4,7 +4,23 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
+
+// A single manifest too large for one control frame must fail loudly, not be emitted as
+// an undeliverable page that the replica rejects and re-requests forever.
+func TestBuildDeltaRejectsOversizedManifest(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	writeFile(t, owner.root, "f.txt", []byte("content"))
+	owner.scan(t)
+
+	e := &Engine{maxDeltaBytes: 1}
+	fs := &folderState{cfg: FolderConfig{FolderID: folderID, Model: owner.model}}
+	if _, err := e.buildDelta(context.Background(), fs, &wirepb.ManifestRequest{}); err == nil {
+		t.Fatal("buildDelta accepted a manifest larger than the page cap")
+	}
+}
 
 // TestManifestDeltaPagination converges a folder whose full manifest delta exceeds a
 // single control frame, so the owner must send it in multiple pages.

@@ -33,9 +33,7 @@ const (
 	RoleReader Role = 0
 	// RoleWriter may read, write, and add members. The owner is the founding writer.
 	RoleWriter Role = 1
-	// RoleHolder stores ciphertext only: it can verify integrity but cannot read or add
-	// members. Reserved; not yet accepted, as encrypted-folder sync is unbuilt.
-	RoleHolder Role = 2
+	// Value 2 is reserved for a future ciphertext-only holder tier (encrypted folders).
 )
 
 // Entry is one signed roster record: a member's identity and the admin attestation

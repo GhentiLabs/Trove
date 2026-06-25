@@ -17,9 +17,6 @@ import (
 
 // SchemaVersion is the current config database layout. Open refuses a database
 // written by a newer binary and migrates older ones forward.
-//
-// v1: folders and per-folder keys.
-// v2: folders gain a shared folder_id (the group id a folder is bound to).
 const SchemaVersion = 2
 
 // MasterKeyLen is the length of a folder master key.
