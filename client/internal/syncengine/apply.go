@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
@@ -37,10 +38,14 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 
 	parents := make(map[string]struct{}, len(batch))
 	for _, rm := range batch {
-		if err := fs.materialize(rm, staged); err != nil {
+		dest, err := fs.destPath(rm.Manifest.Path)
+		if err != nil {
 			return err
 		}
-		parents[filepath.Dir(filepath.Join(fs.cfg.Root, filepath.FromSlash(rm.Manifest.Path)))] = struct{}{}
+		if err := fs.materialize(rm, dest, staged); err != nil {
+			return err
+		}
+		parents[filepath.Dir(dest)] = struct{}{}
 	}
 	// Fsync touched directories so the renames are durable before the model commit
 	// makes them visible; otherwise a power loss could lose a converged file.
@@ -89,8 +94,18 @@ func (fs *folderState) stageFile(ctx context.Context, path string, rm model.Remo
 	return f.Close()
 }
 
-func (fs *folderState) materialize(rm model.RemoteManifest, staged map[string]string) error {
-	dest := filepath.Join(fs.cfg.Root, filepath.FromSlash(rm.Manifest.Path))
+// destPath resolves a folder-relative path to an absolute path under the folder root,
+// rejecting any path that escapes the root (defends against a hostile owner on every OS).
+func (fs *folderState) destPath(rel string) (string, error) {
+	p := filepath.Join(fs.cfg.Root, filepath.FromSlash(rel))
+	r, err := filepath.Rel(fs.cfg.Root, p)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("syncengine: path escapes folder root: %q", rel)
+	}
+	return p, nil
+}
+
+func (fs *folderState) materialize(rm model.RemoteManifest, dest string, staged map[string]string) error {
 	if rm.Deleted {
 		if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("syncengine: remove %q: %w", rm.Manifest.Path, err)

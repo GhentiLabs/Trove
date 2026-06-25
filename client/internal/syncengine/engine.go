@@ -39,6 +39,8 @@ const (
 	// defaultMaxDeltaBytes caps one ManifestDelta page below the control-frame cap,
 	// leaving headroom for the envelope; larger folders span multiple pages.
 	defaultMaxDeltaBytes = wire.MaxControlMessageSize - 4096
+	// maxDeltaPages bounds a single reconcile's paging so a peer cannot loop it.
+	maxDeltaPages = 1 << 20
 )
 
 var (
@@ -129,6 +131,10 @@ func New(opts Options) (*Engine, error) {
 	if maxDelta <= 0 {
 		maxDelta = defaultMaxDeltaBytes
 	}
+	shared := make(map[string]struct{}, len(opts.Session.SharedFolders()))
+	for _, id := range opts.Session.SharedFolders() {
+		shared[id] = struct{}{}
+	}
 	e := &Engine{
 		sess:          opts.Session,
 		log:           log,
@@ -137,6 +143,9 @@ func New(opts Options) (*Engine, error) {
 		folders:       make(map[string]*folderState, len(opts.Folders)),
 	}
 	for _, fc := range opts.Folders {
+		if _, ok := shared[fc.FolderID]; !ok {
+			return nil, fmt.Errorf("syncengine: folder %q not shared on this session", fc.FolderID)
+		}
 		if fc.Model == nil || fc.Chunks == nil {
 			return nil, fmt.Errorf("syncengine: folder %q missing stores", fc.FolderID)
 		}
