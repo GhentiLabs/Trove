@@ -76,10 +76,8 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 		since = hw
 	}
 
-	// Pull the delta a page at a time; each page is a full apply unit that advances
-	// the cursor, so memory stays bounded and a crash resumes mid-folder. The cursor
-	// must strictly advance and the page count is capped, so a buggy or hostile owner
-	// cannot loop the replica forever.
+	// Pull the delta a page at a time. The cursor must strictly advance and the page
+	// count is capped, so a buggy or hostile owner cannot loop the replica forever.
 	for pages := 0; ; pages++ {
 		if pages >= maxDeltaPages {
 			return fmt.Errorf("syncengine: delta exceeded %d pages for %q", maxDeltaPages, fs.cfg.FolderID)

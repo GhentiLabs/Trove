@@ -55,9 +55,13 @@ func (c *Coordinator) addSource(peerID string, conn netio.Conn) {
 	c.mu.Unlock()
 }
 
-func (c *Coordinator) removeSource(peerID string) {
+// removeSource deletes peerID only if it still maps to conn, so a session being torn
+// down never evicts a newer session that already replaced it for the same peer.
+func (c *Coordinator) removeSource(peerID string, conn netio.Conn) {
 	c.mu.Lock()
-	delete(c.sources, peerID)
+	if c.sources[peerID] == conn {
+		delete(c.sources, peerID)
+	}
 	c.mu.Unlock()
 }
 
@@ -180,14 +184,17 @@ func (c *Coordinator) fetch(ctx context.Context, id hasher.ChunkID, ownerID stri
 	return lastErr
 }
 
-// fetchFrom pulls one chunk from a single source over a fresh data stream, verifies
-// it, and stores it. Storing before any manifest references it keeps it above the
-// sweep's grace cutoff.
+// fetchFrom pulls and stores one verified chunk from a single source. Storing before
+// any manifest references it keeps it above the sweep's grace cutoff.
 func (c *Coordinator) fetchFrom(ctx context.Context, conn netio.Conn, id hasher.ChunkID) error {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
 		return fmt.Errorf("syncengine: open data stream: %w", err)
 	}
+	// Closing the stream on ctx cancellation unblocks a read that the deadline alone
+	// would otherwise hold until it fires.
+	stop := context.AfterFunc(ctx, func() { _ = s.Close() })
+	defer stop()
 	defer func() { _ = s.Close() }()
 	if dl, ok := ctx.Deadline(); ok {
 		_ = s.SetReadDeadline(dl)

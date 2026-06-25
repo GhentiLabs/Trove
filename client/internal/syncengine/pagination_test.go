@@ -18,11 +18,11 @@ func TestManifestDeltaPagination(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	os, rs := memSessionPair(t, ctx, owner, replica)
+	ownerSess, replicaSess := memSessionPair(t, ctx, owner, replica)
 
 	// A tiny delta budget forces many small pages out of the 60 manifests.
 	ownerEng, err := New(Options{
-		Session: os, MaxDeltaBytes: 512,
+		Session: ownerSess, MaxDeltaBytes: 512,
 		Folders: []FolderConfig{{FolderID: folderID, Role: RoleOwner, Root: owner.root, Model: owner.model, Chunks: owner.chunks}},
 	})
 	if err != nil {
@@ -30,16 +30,16 @@ func TestManifestDeltaPagination(t *testing.T) {
 	}
 	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err := New(Options{
-		Session: rs,
+		Session: replicaSess,
 		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
 	})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)
 	}
-	os.SetControlHandler(ownerEng.Handle)
-	rs.SetControlHandler(replicaEng.Handle)
-	go func() { _ = os.Run(ctx) }()
-	go func() { _ = rs.Run(ctx) }()
+	ownerSess.SetControlHandler(ownerEng.Handle)
+	replicaSess.SetControlHandler(replicaEng.Handle)
+	go func() { _ = ownerSess.Run(ctx) }()
+	go func() { _ = replicaSess.Run(ctx) }()
 	go func() { _ = ownerEng.Drive(ctx) }()
 	go func() { _ = replicaEng.Drive(ctx) }()
 

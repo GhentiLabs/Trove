@@ -31,10 +31,15 @@ const (
 	// DefaultInFlight bounds a replica's concurrent chunk data streams.
 	DefaultInFlight = 16
 
-	maxServeStreams  = 64
-	tmpDirName       = ".trove-tmp"
-	deltaTimeout     = 60 * time.Second
-	announceInterval = 5 * time.Second
+	maxServeStreams   = 64
+	maxManifestServes = 8
+	tmpDirName        = ".trove-tmp"
+	deltaTimeout      = 60 * time.Second
+	announceInterval  = 5 * time.Second
+
+	// protoRepeatedOverhead approximates a repeated field's tag + length prefix when
+	// budgeting a delta page; the maxDeltaBytes headroom absorbs the approximation.
+	protoRepeatedOverhead = 2
 
 	// defaultMaxDeltaBytes caps one ManifestDelta page below the control-frame cap,
 	// leaving headroom for the envelope; larger folders span multiple pages.
@@ -92,6 +97,7 @@ type Engine struct {
 	folders       map[string]*folderState
 	ownsAny       bool
 	serveSem      chan struct{}
+	manifestSem   chan struct{}
 
 	servedChunks atomic.Int64
 	servedDeltas atomic.Int64
@@ -152,6 +158,9 @@ func New(opts Options) (*Engine, error) {
 		if fc.Role == RoleReplica && fc.Coord == nil {
 			return nil, fmt.Errorf("syncengine: replica folder %q missing coordinator", fc.FolderID)
 		}
+		if fc.Role == RoleOwner && fc.Coord != nil {
+			return nil, fmt.Errorf("syncengine: owner folder %q must not have a coordinator", fc.FolderID)
+		}
 		e.folders[fc.FolderID] = &folderState{eng: e, cfg: fc}
 		if fc.Role == RoleOwner {
 			e.ownsAny = true
@@ -159,6 +168,9 @@ func New(opts Options) (*Engine, error) {
 	}
 	if len(e.folders) > 0 {
 		e.serveSem = make(chan struct{}, maxServeStreams)
+	}
+	if e.ownsAny {
+		e.manifestSem = make(chan struct{}, maxManifestServes)
 	}
 	return e, nil
 }
@@ -168,21 +180,22 @@ func New(opts Options) (*Engine, error) {
 // serves inbound chunk requests; an owner also announces.
 func (e *Engine) Drive(ctx context.Context) error {
 	peer := e.sess.PeerNodeID()
+	conn := e.sess.Conn()
 	for _, fs := range e.folders {
 		if fs.cfg.Role == RoleReplica {
 			_ = os.RemoveAll(filepath.Join(fs.cfg.Root, tmpDirName))
 		}
 		if fs.cfg.Coord != nil {
-			fs.cfg.Coord.addSource(peer, e.sess.Conn())
-			defer fs.cfg.Coord.removeSource(peer)
+			fs.cfg.Coord.addSource(peer, conn)
+			defer fs.cfg.Coord.removeSource(peer, conn)
 		}
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { e.serveLoop(ctx) })
 	if e.ownsAny {
 		wg.Go(func() { e.announceLoop(ctx) })
+		e.Announce(ctx)
 	}
-	e.Announce(ctx)
 	<-ctx.Done()
 	wg.Wait()
 	return ctx.Err()
@@ -256,7 +269,16 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 		if fs == nil || fs.cfg.Role != RoleOwner {
 			return nil
 		}
-		go e.serveManifest(ctx, fs, req)
+		select {
+		case e.manifestSem <- struct{}{}:
+		default:
+			e.log.Warn("syncengine: manifest serve backlog, dropping request", "folder", req.GetFolderId())
+			return nil
+		}
+		go func() {
+			defer func() { <-e.manifestSem }()
+			e.serveManifest(ctx, fs, req)
+		}()
 	case wire.TypeManifestDelta:
 		d := msg.(*wirepb.ManifestDelta)
 		if fs := e.folders[d.GetFolderId()]; fs != nil {
@@ -348,7 +370,7 @@ func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.Ma
 	size := 0
 	for _, rec := range recs {
 		rm := recordToWire(rec)
-		s := proto.Size(rm) + 2
+		s := proto.Size(rm) + protoRepeatedOverhead
 		if len(manifests) > 0 && size+s > e.maxDeltaBytes {
 			complete = false
 			break

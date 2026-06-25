@@ -105,12 +105,32 @@ func (fs *folderState) destPath(rel string) (string, error) {
 	return p, nil
 }
 
+// clearTypeConflict removes an existing entry at dest whose kind (dir vs non-dir)
+// differs from the target, so a file→dir or dir→file change at a path applies cleanly
+// instead of failing MkdirAll/Rename forever.
+func clearTypeConflict(dest string, kind manifest.Kind) error {
+	fi, err := os.Lstat(dest)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() == (kind == manifest.KindDir) {
+		return nil
+	}
+	return os.RemoveAll(dest)
+}
+
 func (fs *folderState) materialize(rm model.RemoteManifest, dest string, staged map[string]string) error {
 	if rm.Deleted {
-		if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.RemoveAll(dest); err != nil {
 			return fmt.Errorf("syncengine: remove %q: %w", rm.Manifest.Path, err)
 		}
 		return nil
+	}
+	if err := clearTypeConflict(dest, rm.Manifest.Kind); err != nil {
+		return fmt.Errorf("syncengine: clear %q: %w", rm.Manifest.Path, err)
 	}
 	switch rm.Manifest.Kind {
 	case manifest.KindDir:
