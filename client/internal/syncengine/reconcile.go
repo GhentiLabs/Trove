@@ -8,6 +8,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
+	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
@@ -62,8 +63,11 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 			return err
 		}
 		if !ok || ep != a.epoch || hw != a.highWater {
-			return m.ApplyRemoteAndAdvance(ctx, nil, fs.cfg.FolderID, owner, a.epoch, a.highWater)
+			if err := m.ApplyRemoteAndAdvance(ctx, nil, fs.cfg.FolderID, owner, a.epoch, a.highWater); err != nil {
+				return err
+			}
 		}
+		fs.markConverged(ctx, cur, a.epoch, a.highWater)
 		return nil
 	}
 
@@ -91,12 +95,41 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 			return err
 		}
 		if res.complete {
+			root, err := m.CurrentRoot(ctx)
+			if err != nil {
+				return err
+			}
+			fs.markConverged(ctx, root, a.epoch, res.since)
 			return nil
 		}
 		if res.since < since || (res.since == since && res.offset <= offset) {
 			return fmt.Errorf("syncengine: delta cursor did not advance past (%d,%d) for %q", since, offset, fs.cfg.FolderID)
 		}
 		since, offset, carry = res.since, res.offset, res.carry
+	}
+}
+
+// markConverged records that this replica reached root at (epoch, highWater) and
+// reports it to the owner so the owner can answer "last synced" and gate tombstone
+// reaping on convergence. Both writes are best-effort: a dropped receipt is re-sent on
+// the next reconcile, so a transient failure must not fail the reconcile itself.
+func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
+	owner := fs.eng.sess.PeerNodeID()
+	now := time.Now()
+	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
+		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: now,
+	}); err != nil {
+		fs.eng.log.Warn("syncengine: record receipt", "folder", fs.cfg.FolderID, "err", err)
+		return
+	}
+	if err := fs.eng.sess.Send(&wirepb.SyncReceipt{
+		FolderId:          fs.cfg.FolderID,
+		SnapshotRoot:      root.Bytes(),
+		IndexEpochId:      epoch,
+		HighWaterSequence: highWater,
+		SyncedMs:          now.UnixMilli(),
+	}); err != nil {
+		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", owner, "err", err)
 	}
 }
 

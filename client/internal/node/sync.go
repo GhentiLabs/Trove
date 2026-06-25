@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -96,6 +98,20 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	return rt, nil
 }
 
+// repairReplicas re-materializes any out-of-band-deleted files for each replica folder
+// from its local chunk store. It runs once at startup, before peers attach, so a
+// converged replica self-heals without waiting for the owner's next delta.
+func (rt *syncRuntime) repairReplicas(ctx context.Context, log *slog.Logger) {
+	for _, fc := range rt.folders {
+		if fc.Role != syncengine.RoleReplica {
+			continue
+		}
+		if err := syncengine.RepairFolder(ctx, fc, log); err != nil {
+			log.Warn("node: startup repair", "folder", fc.FolderID, "err", err)
+		}
+	}
+}
+
 func (rt *syncRuntime) close() {
 	for i := len(rt.closers) - 1; i >= 0; i-- {
 		_ = rt.closers[i]()
@@ -162,6 +178,65 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				driveWg.Wait()
 			}
 			gossip.removePeer(peerID, sess)
+		}
+	}
+}
+
+// tombstoneSweepInterval is how often an owner tries to reap converged, expired
+// deletions. The retention window dwarfs it, so a coarse tick is plenty.
+const tombstoneSweepInterval = time.Hour
+
+// runTombstoneSweeper periodically reaps each owned folder's expired tombstones,
+// gated on every known replica having converged past them (see SweepTombstones). A
+// node that owns no folder returns immediately.
+func (rt *syncRuntime) runTombstoneSweeper(ctx context.Context, log *slog.Logger) {
+	ownsAny := false
+	for _, fc := range rt.folders {
+		if fc.Role == syncengine.RoleOwner {
+			ownsAny = true
+			break
+		}
+	}
+	if !ownsAny {
+		return
+	}
+	t := time.NewTicker(tombstoneSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rt.sweepTombstones(ctx, log)
+		}
+	}
+}
+
+func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
+	now := time.Now()
+	for _, fc := range rt.folders {
+		if fc.Role != syncengine.RoleOwner {
+			continue
+		}
+		epoch, err := fc.Model.FolderEpoch(ctx)
+		if err != nil {
+			log.Warn("node: tombstone sweep epoch", "folder", fc.FolderID, "err", err)
+			continue
+		}
+		safeSeq := int64(math.MaxInt64)
+		if hw, ok, err := fc.Model.ConvergedHighWater(ctx, epoch); err != nil {
+			log.Warn("node: tombstone sweep gate", "folder", fc.FolderID, "err", err)
+			continue
+		} else if ok {
+			safeSeq = hw
+		}
+		n, err := fc.Model.SweepTombstones(ctx, now, safeSeq)
+		if err != nil {
+			log.Warn("node: tombstone sweep", "folder", fc.FolderID, "err", err)
+			continue
+		}
+		if n > 0 {
+			log.Info("node: reaped tombstones", "folder", fc.FolderID, "count", n)
 		}
 	}
 }

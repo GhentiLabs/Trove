@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -162,7 +163,7 @@ func TestSweepTombstones(t *testing.T) {
 	}
 	root, _ := s.Cut(ctx)
 
-	if n, err := s.SweepTombstones(ctx, time.Now()); err != nil || n != 0 {
+	if n, err := s.SweepTombstones(ctx, time.Now(), math.MaxInt64); err != nil || n != 0 {
 		t.Fatalf("premature sweep removed %d (err %v), want 0", n, err)
 	}
 	if _, err := s.GetManifest(ctx, "a"); err != nil {
@@ -170,7 +171,7 @@ func TestSweepTombstones(t *testing.T) {
 	}
 
 	future := time.Now().Add(TombstoneLifetime + time.Hour)
-	if n, err := s.SweepTombstones(ctx, future); err != nil || n != 1 {
+	if n, err := s.SweepTombstones(ctx, future, math.MaxInt64); err != nil || n != 1 {
 		t.Fatalf("expiry sweep removed %d (err %v), want 1", n, err)
 	}
 	if _, err := s.GetManifest(ctx, "a"); !errors.Is(err, ErrManifestNotFound) {
@@ -180,6 +181,80 @@ func TestSweepTombstones(t *testing.T) {
 	snap, _ := s.GetSnapshot(ctx, root)
 	if l, ok := leafFor(snap, "a"); !ok || !l.Deleted {
 		t.Fatal("sweep destroyed historical tombstone in retained snapshot")
+	}
+}
+
+// TestSweepTombstonesConvergenceGate proves a deletion is reaped only after every
+// known replica has converged past it, even once its retention has expired.
+func TestSweepTombstonesConvergenceGate(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	mustPut(t, s, regular("a", "1"), Metadata{Size: 1})
+	id, err := s.DeleteManifest(ctx, "a")
+	if err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	_ = id
+	rec, err := s.GetManifest(ctx, "a")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	tombSeq := rec.Seq
+	future := time.Now().Add(TombstoneLifetime + time.Hour)
+
+	// Expired, but the only replica has not yet reached the tombstone's sequence.
+	if n, err := s.SweepTombstones(ctx, future, tombSeq-1); err != nil || n != 0 {
+		t.Fatalf("sweep removed %d (err %v) while a replica was behind, want 0", n, err)
+	}
+	if _, err := s.GetManifest(ctx, "a"); err != nil {
+		t.Fatalf("tombstone reaped before convergence: %v", err)
+	}
+
+	// Once the replica converges past it, the expired tombstone is reaped.
+	if n, err := s.SweepTombstones(ctx, future, tombSeq); err != nil || n != 1 {
+		t.Fatalf("sweep removed %d (err %v) after convergence, want 1", n, err)
+	}
+	if _, err := s.GetManifest(ctx, "a"); !errors.Is(err, ErrManifestNotFound) {
+		t.Fatalf("converged tombstone still present: %v", err)
+	}
+}
+
+// TestConvergedHighWater checks the per-epoch minimum receipt high-water that gates
+// tombstone reaping.
+func TestConvergedHighWater(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	root, err := s.CurrentRoot(ctx)
+	if err != nil {
+		t.Fatalf("CurrentRoot: %v", err)
+	}
+
+	if _, ok, err := s.ConvergedHighWater(ctx, 7); err != nil || ok {
+		t.Fatalf("empty receipts: ok=%v err=%v, want ok=false", ok, err)
+	}
+
+	now := time.Now()
+	must := func(peer string, epoch uint64, hw int64) {
+		if err := s.RecordReceipt(ctx, Receipt{PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: now}); err != nil {
+			t.Fatalf("RecordReceipt: %v", err)
+		}
+	}
+	must("p1", 7, 40)
+	must("p2", 7, 25)
+	must("p3", 9, 5) // different epoch, must be ignored
+
+	hw, ok, err := s.ConvergedHighWater(ctx, 7)
+	if err != nil || !ok || hw != 25 {
+		t.Fatalf("ConvergedHighWater(7) = (%d, %v, %v), want (25, true, nil)", hw, ok, err)
+	}
+
+	got, ok, err := s.Receipt(ctx, "p2")
+	if err != nil || !ok || got.HighWater != 25 || got.Root != root {
+		t.Fatalf("Receipt(p2) = (%+v, %v, %v), want hw=25 root match", got, ok, err)
+	}
+	all, err := s.Receipts(ctx)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("Receipts len=%d err=%v, want 3", len(all), err)
 	}
 }
 

@@ -903,6 +903,87 @@ func (x *MembershipGossip) GetEntries() []*MembershipEntry {
 	return nil
 }
 
+// SyncReceipt is a replica's acknowledgement that it has converged a folder to the
+// owner's snapshot_root at (index_epoch_id, high_water_sequence). The owner records one
+// per replica so "last synced" is queryable and tombstone reaping can wait for every
+// replica to pass the deletion. It rides the mutually-authenticated session, so peer
+// identity is the session's, not a field here.
+type SyncReceipt struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
+	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	SyncedMs          int64                  `protobuf:"varint,5,opt,name=synced_ms,json=syncedMs,proto3" json:"synced_ms,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SyncReceipt) Reset() {
+	*x = SyncReceipt{}
+	mi := &file_wire_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncReceipt) ProtoMessage() {}
+
+func (x *SyncReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncReceipt.ProtoReflect.Descriptor instead.
+func (*SyncReceipt) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SyncReceipt) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *SyncReceipt) GetSnapshotRoot() []byte {
+	if x != nil {
+		return x.SnapshotRoot
+	}
+	return nil
+}
+
+func (x *SyncReceipt) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *SyncReceipt) GetHighWaterSequence() int64 {
+	if x != nil {
+		return x.HighWaterSequence
+	}
+	return 0
+}
+
+func (x *SyncReceipt) GetSyncedMs() int64 {
+	if x != nil {
+		return x.SyncedMs
+	}
+	return 0
+}
+
 // Ping is the idle-timer keepalive.
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -912,7 +993,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -924,7 +1005,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[11]
+	mi := &file_wire_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -937,7 +1018,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{11}
+	return file_wire_proto_rawDescGZIP(), []int{12}
 }
 
 // Close requests a graceful shutdown.
@@ -950,7 +1031,7 @@ type Close struct {
 
 func (x *Close) Reset() {
 	*x = Close{}
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -962,7 +1043,7 @@ func (x *Close) String() string {
 func (*Close) ProtoMessage() {}
 
 func (x *Close) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -975,7 +1056,7 @@ func (x *Close) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Close.ProtoReflect.Descriptor instead.
 func (*Close) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{12}
+	return file_wire_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Close) GetReason() string {
@@ -1059,7 +1140,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x10MembershipGossip\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\tR\tnetworkId\x128\n" +
-	"\aentries\x18\x02 \x03(\v2\x1e.trove.wire.v1.MembershipEntryR\aentries\"\x06\n" +
+	"\aentries\x18\x02 \x03(\v2\x1e.trove.wire.v1.MembershipEntryR\aentries\"\xc2\x01\n" +
+	"\vSyncReceipt\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
+	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
+	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\x12\x1b\n" +
+	"\tsynced_ms\x18\x05 \x01(\x03R\bsyncedMs\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +
@@ -1083,7 +1170,7 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_wire_proto_goTypes = []any{
 	(FolderType)(0),          // 0: trove.wire.v1.FolderType
 	(*Hello)(nil),            // 1: trove.wire.v1.Hello
@@ -1097,8 +1184,9 @@ var file_wire_proto_goTypes = []any{
 	(*ManifestDelta)(nil),    // 9: trove.wire.v1.ManifestDelta
 	(*MembershipEntry)(nil),  // 10: trove.wire.v1.MembershipEntry
 	(*MembershipGossip)(nil), // 11: trove.wire.v1.MembershipGossip
-	(*Ping)(nil),             // 12: trove.wire.v1.Ping
-	(*Close)(nil),            // 13: trove.wire.v1.Close
+	(*SyncReceipt)(nil),      // 12: trove.wire.v1.SyncReceipt
+	(*Ping)(nil),             // 13: trove.wire.v1.Ping
+	(*Close)(nil),            // 14: trove.wire.v1.Close
 }
 var file_wire_proto_depIdxs = []int32{
 	0,  // 0: trove.wire.v1.Folder.folder_type:type_name -> trove.wire.v1.FolderType
@@ -1124,7 +1212,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -137,6 +137,19 @@ message MembershipGossip {
   repeated MembershipEntry entries = 2;
 }
 
+// SyncReceipt is a replica's acknowledgement that it has converged a folder to the
+// owner's snapshot_root at (index_epoch_id, high_water_sequence). The owner records one
+// per replica so "last synced" is queryable and tombstone reaping can wait for every
+// replica to pass the deletion. It rides the mutually-authenticated session, so peer
+// identity is the session's, not a field here.
+message SyncReceipt {
+  string folder_id = 1;
+  bytes snapshot_root = 2;
+  uint64 index_epoch_id = 3;
+  int64 high_water_sequence = 4;
+  int64 synced_ms = 5;
+}
+
 // Ping is the idle-timer keepalive.
 message Ping {}
 

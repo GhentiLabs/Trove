@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
@@ -90,21 +91,27 @@ func syncDir(dir string) error {
 }
 
 func (fs *folderState) stageFile(ctx context.Context, path string, rm model.RemoteManifest) error {
+	return stageRegular(ctx, fs.cfg.Chunks, fs.cfg.FolderCtx, path, rm.Manifest)
+}
+
+// stageRegular reassembles m's chunks from the local chunk store into a fresh staging
+// file at path, fsyncs it, and applies its mode. The caller renames it into place.
+func stageRegular(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.FolderContext, path string, m manifest.Manifest) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("syncengine: create temp: %w", err)
 	}
-	if err := fs.cfg.Chunks.Reassemble(ctx, fs.cfg.FolderCtx, chunkIDs(rm.Manifest.Chunks), f); err != nil {
+	if err := chunks.Reassemble(ctx, fc, chunkIDs(m.Chunks), f); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: reassemble %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: reassemble %q: %w", m.Path, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: fsync %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: fsync %q: %w", m.Path, err)
 	}
-	if err := f.Chmod(fileMode(rm.Manifest.Mode)); err != nil {
+	if err := f.Chmod(fileMode(m.Mode)); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: chmod %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: chmod %q: %w", m.Path, err)
 	}
 	return f.Close()
 }
@@ -112,8 +119,12 @@ func (fs *folderState) stageFile(ctx context.Context, path string, rm model.Remo
 // destPath resolves a folder-relative path to an absolute path under the folder root,
 // rejecting any path that escapes the root (defends against a hostile owner on every OS).
 func (fs *folderState) destPath(rel string) (string, error) {
-	p := filepath.Join(fs.cfg.Root, filepath.FromSlash(rel))
-	r, err := filepath.Rel(fs.cfg.Root, p)
+	return resolveDest(fs.cfg.Root, rel)
+}
+
+func resolveDest(root, rel string) (string, error) {
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	r, err := filepath.Rel(root, p)
 	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("syncengine: path escapes folder root: %q", rel)
 	}

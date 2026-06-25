@@ -293,8 +293,34 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 		if fs := e.folders[d.GetFolderId()]; fs != nil {
 			fs.deliver(d)
 		}
+	case wire.TypeSyncReceipt:
+		e.recordReceipt(ctx, msg.(*wirepb.SyncReceipt))
 	}
 	return nil
+}
+
+// recordReceipt stores a replica's convergence acknowledgement against this owner's
+// folder, stamped with the owner's own clock so "last synced" never depends on a
+// replica's clock. It is ignored unless this node owns the folder.
+func (e *Engine) recordReceipt(ctx context.Context, rec *wirepb.SyncReceipt) {
+	fs := e.folders[rec.GetFolderId()]
+	if fs == nil || fs.cfg.Role != RoleOwner {
+		return
+	}
+	root, err := snapshot.RootFromBytes(rec.GetSnapshotRoot())
+	if err != nil {
+		e.log.Warn("syncengine: bad receipt root", "folder", rec.GetFolderId(), "peer", e.sess.PeerNodeID(), "err", err)
+		return
+	}
+	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
+		PeerID:    e.sess.PeerNodeID(),
+		Root:      root,
+		Epoch:     rec.GetIndexEpochId(),
+		HighWater: rec.GetHighWaterSequence(),
+		SyncedAt:  time.Now(),
+	}); err != nil {
+		e.log.Warn("syncengine: record peer receipt", "folder", rec.GetFolderId(), "peer", e.sess.PeerNodeID(), "err", err)
+	}
 }
 
 // ServedChunks is the number of chunks this engine has served as an owner.

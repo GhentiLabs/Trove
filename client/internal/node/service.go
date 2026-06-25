@@ -121,6 +121,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return err
 		}
 		defer syncRT.close()
+		syncRT.repairReplicas(ctx, s.log)
 	}
 
 	peers, err := s.peerIDs(ctx)
@@ -183,6 +184,7 @@ func (s *Service) Run(ctx context.Context) error {
 	wg.Go(func() { _ = mgr.Run(ctx) })
 	if syncRT != nil {
 		wg.Go(func() { syncRT.runScanners(ctx, s.log) })
+		wg.Go(func() { syncRT.runTombstoneSweeper(ctx, s.log) })
 	}
 	if s.gossip != nil {
 		wg.Go(func() { s.gossipLoop(ctx) })
