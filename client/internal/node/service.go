@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -26,7 +25,11 @@ const (
 	gatherTimeout         = 5 * time.Second
 	stunKeepaliveInterval = 20 * time.Second
 	maxInboundPunches     = 32
+	signalReconnectMin    = 1 * time.Second
+	signalReconnectMax    = 30 * time.Second
 )
+
+var errNoSignaler = errors.New("node: signaler not connected")
 
 // Options configures a Service.
 type Options struct {
@@ -53,6 +56,9 @@ type Service struct {
 	cands     []disco.Address
 	reflexive disco.Address
 	portMap   *discovery.PortMap
+
+	sigMu sync.Mutex
+	sig   *discovery.Signaler
 }
 
 // New binds the transport and builds the discovery client. Call Run to start.
@@ -95,12 +101,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.gather(ctx)
 
-	sig, err := s.client.Signal(ctx)
-	if err != nil {
-		return fmt.Errorf("node: signal: %w", err)
-	}
-	defer func() { _ = sig.Close() }()
-
 	mdns, err := discovery.Advertise(s.opts.NodeID, s.port())
 	if err != nil {
 		s.log.Warn("node: mdns advertise failed", "err", err)
@@ -117,7 +117,7 @@ func (s *Service) Run(ctx context.Context) error {
 		Dial:       s.tr.Dial,
 		Probe:      s.tr.Probe,
 		Lookup:     s.lookup,
-		Signal:     sig.Connect,
+		Signal:     s.signal,
 		Candidates: s.candidates,
 		Logger:     s.log,
 	})
@@ -140,7 +140,7 @@ func (s *Service) Run(ctx context.Context) error {
 	wg.Go(func() { s.announceLoop(ctx) })
 	wg.Go(func() { s.stunKeepaliveLoop(ctx) })
 	wg.Go(func() { s.browseLoop(ctx) })
-	wg.Go(func() { s.incomingLoop(ctx, sig, &wg) })
+	wg.Go(func() { s.signalLoop(ctx, &wg) })
 	wg.Go(func() { _ = mgr.Run(ctx) })
 	wg.Wait()
 	return ctx.Err()
@@ -166,11 +166,39 @@ func (s *Service) browseLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg *sync.WaitGroup) {
+// signalLoop maintains the signaling connection, reconnecting with backoff so a
+// dropped WebSocket does not permanently disable holepunching, and dispatches
+// inbound punch requests while a connection is live.
+func (s *Service) signalLoop(ctx context.Context, wg *sync.WaitGroup) {
 	sem := make(chan struct{}, maxInboundPunches)
+	backoff := signalReconnectMin
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		sig, err := s.client.Signal(ctx)
+		if err != nil {
+			s.log.Warn("node: signal connect", "err", err)
+			if !sleep(ctx, backoff) {
+				return
+			}
+			backoff = min(backoff*2, signalReconnectMax)
+			continue
+		}
+		backoff = signalReconnectMin
+		s.setSignaler(sig)
+		s.drainIncoming(ctx, sig, sem, wg)
+		s.setSignaler(nil)
+		_ = sig.Close()
+	}
+}
+
+func (s *Service) drainIncoming(ctx context.Context, sig *discovery.Signaler, sem chan struct{}, wg *sync.WaitGroup) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-sig.Done():
 			return
 		case ir := <-sig.Incoming():
 			select {
@@ -183,6 +211,33 @@ func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg 
 				s.punchInbound(ctx, ir)
 			})
 		}
+	}
+}
+
+func (s *Service) signal(ctx context.Context, nodeID string, cands []disco.Address) (disco.PeerCandidates, error) {
+	s.sigMu.Lock()
+	sig := s.sig
+	s.sigMu.Unlock()
+	if sig == nil {
+		return disco.PeerCandidates{}, errNoSignaler
+	}
+	return sig.Connect(ctx, nodeID, cands)
+}
+
+func (s *Service) setSignaler(sig *discovery.Signaler) {
+	s.sigMu.Lock()
+	s.sig = sig
+	s.sigMu.Unlock()
+}
+
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

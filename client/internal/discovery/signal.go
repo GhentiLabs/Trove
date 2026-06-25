@@ -113,6 +113,9 @@ func (s *Signaler) Connect(ctx context.Context, target string, cands []disco.Add
 // Incoming delivers holepunch requests from peers reaching toward this node.
 func (s *Signaler) Incoming() <-chan disco.IncomingRequest { return s.incoming }
 
+// Done is closed when the signaler has shut down (peer or transport close).
+func (s *Signaler) Done() <-chan struct{} { return s.closed }
+
 func (s *Signaler) readLoop() {
 	defer func() { _ = s.Close() }()
 	for {

@@ -131,6 +131,27 @@ func TestSignalConnectTargetUnavailable(t *testing.T) {
 	}
 }
 
+func TestSignalDoneClosesOnServerHangup(t *testing.T) {
+	cliCert, _ := newIdentity(t)
+	url := fakeSignalServer(t, func(ctx context.Context, c *websocket.Conn) {
+		_ = c.Close(websocket.StatusNormalClosure, "bye")
+	})
+
+	sig := dialSignaler(t, url, cliCert)
+	select {
+	case <-sig.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done not closed after server hangup")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	target := "dddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if _, err := sig.Connect(ctx, target, nil); !errors.Is(err, ErrSignalerClosed) {
+		t.Fatalf("Connect after drop err = %v, want ErrSignalerClosed", err)
+	}
+}
+
 func TestSignalReceivesIncoming(t *testing.T) {
 	cliCert, _ := newIdentity(t)
 	from := "dddddddddddddddddddddddddddddddddddddddddddddddddddd"
