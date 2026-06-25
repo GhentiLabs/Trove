@@ -2,12 +2,11 @@
 
 M4 makes the system real: one owner per folder originates snapshots; N replicas pull
 and converge. It ships in phases so each is a working, testable artifact. Phase A is
-implemented; B–E are preserved here with their acceptance gates.
+implemented; B–D are preserved here with their acceptance gates.
 
 Design constants that hold across all phases:
-- Physical chunk backing only for now (owner double-stores working file + blobs).
-  Virtual backing + `Promote` are a deferred storage optimization (see the
-  client-blueprint "Deferred: virtual backing + Promote" note).
+- Physical chunk backing only, owner and replica (~2× disk). The 1× storage
+  optimization is deferred to M7; see `docs/m7-storage-optimization-design.md`.
 - One-way semantics: owner send-only, replica receive-only; the conflict path is
   unreachable by construction.
 - Wire is designed full: later phases add **new** message/stream types, never altering
@@ -41,17 +40,14 @@ Tombstones keep their `manifest_chunks` rows after `SweepTombstones` removes the
 manifest row (a pre-existing M2 metadata orphan, same on owner and replica); a
 manifest-level GC pass is a later cleanup.
 
-## Phase B — virtual backing + `Promote` (storage optimization)
+> **Storage optimization (1× disk) moved out of M4.** The original "virtual backing +
+> `Promote`" Phase B is dissolved: a passive-scanner owner cannot Promote-before-overwrite
+> (user edits land before the daemon sees them), so virtual backing is unsafe on the owner.
+> The 1× work is reframed around reflink/CoW and deferred to M7 (retention), where history
+> preservation becomes load-bearing. See `docs/m7-storage-optimization-design.md`. M4 ships
+> physical-uniform storage throughout. Remaining M4 phases below are relabelled B–D.
 
-Owner current chunks become virtual pointers into working files; `Promote` copies a
-superseded chunk to a physical blob before its file is overwritten; replica apply
-registers the new file's chunks as virtual.
-
-**Accept:** ~1× disk for current data; an edited file's retained prior snapshot still
-materializes bit-exact (Promote ran before overwrite); a virtual read re-verifies and
-triggers a rescan on mismatch.
-
-## Phase C — multi-source scheduler
+## Phase B — multi-source scheduler
 
 `Have` (explicit list; bloom threshold measured later); a global wanted-set + per-peer
 have-set; parallel `Want` across ≥3 peers with a bounded in-flight window; in-flight
@@ -62,7 +58,7 @@ pagination for large folders.
 corrupt chunk from one source is rejected and transparently refetched from another;
 memory stays bounded under a large folder and many peers.
 
-## Phase D — membership (L4)
+## Phase C — membership (L4)
 
 Network object + signed roster (`{node_id, role, added_by, sig, added_at}`) over
 **canonical hand-rolled bytes, never protobuf**; gossip with last-seen; verify
@@ -71,7 +67,7 @@ signatures, reject and don't propagate bad ones; trusted-only.
 **Accept:** a signed roster gossips to all members; a new member learns the full roster
 from any one peer; an invalid-signature entry is rejected and not propagated.
 
-## Phase E — SyncReceipts + deletion lifecycle + offline catch-up + live gate
+## Phase D — SyncReceipts + deletion lifecycle + offline catch-up + live gate
 
 `sync_receipts` table exchanged on folder-sync completion; tombstone deletion applied
 as a consistent snapshot unit (no resurrect on reconnect; reaped after convergence);
