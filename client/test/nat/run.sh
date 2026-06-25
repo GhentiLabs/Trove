@@ -110,11 +110,35 @@ EOF
 
 teardown() {
 	local ns i
-	for ns in coord natA clA natB clB; do ip netns del $ns 2>/dev/null; done
+	for ns in coord natA clA natB clB natC clC; do ip netns del $ns 2>/dev/null; done
 	ip link del br0 2>/dev/null
 	# netns/link teardown is asynchronous; wait for br0 to vanish so the next cell
 	# does not race a half-deleted topology.
 	for i in $(seq 1 25); do ip link show br0 >/dev/null 2>&1 || break; sleep 0.2; done
+}
+
+# start_coordinator launches the discovery server in the coord netns and sets COORD_PID
+# and TROVE_URL (the trove:// url with the server's mTLS fingerprint).
+start_coordinator() {
+	ip netns exec coord env \
+		TROVE_DISCOVERY_LISTEN_ADDR=0.0.0.0:${PORT} \
+		TROVE_DISCOVERY_STUN_ADDR=0.0.0.0:${PORT} \
+		TROVE_DISCOVERY_METRICS_ADDR=127.0.0.1:9090 \
+		TROVE_DISCOVERY_SERVER_KEY=$STATE/coord.key \
+		TROVE_DISCOVERY_SERVER_CERT=$STATE/coord.crt \
+		TROVE_DISCOVERY_ANALYTICS_DB=$STATE/coord.db \
+		discovery-server >"$LOG/coord" 2>&1 &
+	COORD_PID=$!
+	local fp="" i
+	for i in $(seq 1 50); do
+		fp=$(grep -o '"fingerprint":"[^"]*"' "$LOG/coord" 2>/dev/null | head -1 | cut -d'"' -f4)
+		[ -n "$fp" ] && break
+		sleep 0.2
+	done
+	if [ -z "$fp" ]; then
+		log "coordinator failed to start"; cat "$LOG/coord"; kill $COORD_PID 2>/dev/null; return 2
+	fi
+	TROVE_URL="trove://${COORD_IP}:${PORT}?id=${fp}"
 }
 
 # run_cell <natA-type> <natB-type> <success|fail>
@@ -130,26 +154,8 @@ run_cell() {
 	apply_nat A 192.168.10 "$na"
 	apply_nat B 192.168.20 "$nb"
 
-	ip netns exec coord env \
-		TROVE_DISCOVERY_LISTEN_ADDR=0.0.0.0:${PORT} \
-		TROVE_DISCOVERY_STUN_ADDR=0.0.0.0:${PORT} \
-		TROVE_DISCOVERY_METRICS_ADDR=127.0.0.1:9090 \
-		TROVE_DISCOVERY_SERVER_KEY=$STATE/coord.key \
-		TROVE_DISCOVERY_SERVER_CERT=$STATE/coord.crt \
-		TROVE_DISCOVERY_ANALYTICS_DB=$STATE/coord.db \
-		discovery-server >"$LOG/coord" 2>&1 &
-	local coord_pid=$!
-
-	local fp="" i
-	for i in $(seq 1 50); do
-		fp=$(grep -o '"fingerprint":"[^"]*"' "$LOG/coord" 2>/dev/null | head -1 | cut -d'"' -f4)
-		[ -n "$fp" ] && break
-		sleep 0.2
-	done
-	if [ -z "$fp" ]; then
-		log "coordinator failed to start"; cat "$LOG/coord"; kill $coord_pid 2>/dev/null; return 2
-	fi
-	local trove="trove://${COORD_IP}:${PORT}?id=${fp}"
+	if ! start_coordinator; then return 2; fi
+	local coord_pid=$COORD_PID trove=$TROVE_URL
 
 	# Identities (node id + public key); the first call mints each keypair on disk.
 	local idB keyB
@@ -272,6 +278,134 @@ run_cell() {
 	return 1
 }
 
+report_gate_logs() {
+	local p
+	for p in A B C; do
+		log "---- peer $p ----"
+		grep -iE "session active|holepunch|reflexive|sync|manifest|chunk|apply|repair|receipt|tombstone|error" "$LOG/$p" 2>/dev/null | tail -15
+	done
+}
+
+# run_offline_gate runs the M4 Phase D acceptance shape over real holepunch: an owner (A)
+# and two punchable replicas (B, C) converge a folder; then C goes offline while the owner
+# edits, deletes, and renames files; B converges live; C reconnects and both catches up via
+# anti-entropy and re-materializes a file deleted out-of-band under it at startup — ending
+# bit-exact with no resurrected deletion, and the owner holds a receipt for both replicas.
+run_offline_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	setup_side C 192.168.30 100.64.0.30
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+	apply_nat C 192.168.30 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB idC keyC
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+	idC=$(ip netns exec clC trove-peer identity -dir "$STATE/C" | awk '/node id:/{print $3}')
+	keyC=$(ip netns exec clC trove-peer identity -dir "$STATE/C" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTB="$STATE/B/share" DSTC="$STATE/C/share" group
+	mkdir -p "$SRC/sub" "$DSTB" "$DSTC"
+	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	head -c 262144 /dev/urandom >"$SRC/movable.bin"
+	printf 'hello trove\n' >"$SRC/sub/note.txt"
+	printf 'never touched by the owner\n' >"$SRC/stable.txt"
+	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" | awk '/group id:/{print $3}')
+	if [ -z "$group" ]; then log "offline-gate: found failed"; kill $COORD_PID 2>/dev/null; return 2; fi
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" >"$LOG/setup" 2>&1
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idC" -key "$keyC" >>"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DSTB" >>"$LOG/setup" 2>&1
+	ip netns exec clC trove-peer join -dir "$STATE/C" -group "$group" -root "$DSTC" >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+	ip netns exec clC trove-peer run -dir "$STATE/C" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/C" 2>&1 &
+	local pc=$!
+
+	# Round 1: both replicas receive the founding folder bit-exact.
+	local r1="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/big.bin" "$DSTB/big.bin" 2>/dev/null && cmp -s "$SRC/stable.txt" "$DSTB/stable.txt" 2>/dev/null \
+		   && cmp -s "$SRC/big.bin" "$DSTC/big.bin" 2>/dev/null && cmp -s "$SRC/stable.txt" "$DSTC/stable.txt" 2>/dev/null; then
+			r1="ok"; break
+		fi
+		sleep 1
+	done
+	if [ "$r1" != ok ]; then
+		log "offline-gate: round 1 convergence FAILED"; report_gate_logs
+		kill $pa $pb $pc $COORD_PID 2>/dev/null; return 1
+	fi
+
+	# C goes offline. Delete a synced, owner-stable file under C out-of-band: only the
+	# replica's startup repair can restore it (the owner never re-sends it), so its
+	# presence after restart proves D3 in the live setting.
+	kill $pc 2>/dev/null; wait $pc 2>/dev/null
+	rm -f "$DSTC/stable.txt"
+
+	# Owner mutates while C is offline: edit + delete + rename.
+	printf 'edited while C was offline\n' >"$SRC/sub/note.txt"
+	rm -f "$SRC/big.bin"
+	mv "$SRC/movable.bin" "$SRC/moved.bin"
+
+	# B converges live to the new state.
+	local r2b="fail"
+	for j in $(seq 1 60); do
+		if cmp -s "$SRC/sub/note.txt" "$DSTB/sub/note.txt" 2>/dev/null && cmp -s "$SRC/moved.bin" "$DSTB/moved.bin" 2>/dev/null \
+		   && [ ! -e "$DSTB/big.bin" ] && [ ! -e "$DSTB/movable.bin" ]; then
+			r2b="ok"; break
+		fi
+		sleep 1
+	done
+
+	# C reconnects: startup repair restores stable.txt, then anti-entropy applies the
+	# edit, the deletion (no resurrection), and the rename.
+	ip netns exec clC trove-peer run -dir "$STATE/C" -trove "$trove" -listen 0.0.0.0:22000 -debug >>"$LOG/C" 2>&1 &
+	pc=$!
+	local r2c="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/sub/note.txt" "$DSTC/sub/note.txt" 2>/dev/null && cmp -s "$SRC/moved.bin" "$DSTC/moved.bin" 2>/dev/null \
+		   && cmp -s "$SRC/stable.txt" "$DSTC/stable.txt" 2>/dev/null \
+		   && [ ! -e "$DSTC/big.bin" ] && [ ! -e "$DSTC/movable.bin" ]; then
+			r2c="ok"; break
+		fi
+		sleep 1
+	done
+	local repair="fail"
+	grep -q "repaired files from local chunks" "$LOG/C" && repair="ok"
+
+	# Both replicas' receipts are queryable on the owner.
+	local receipts="fail" out
+	for j in $(seq 1 20); do
+		out=$(ip netns exec clA trove-peer status -dir "$STATE/A" 2>/dev/null)
+		if echo "$out" | grep -q "peer ${idB}" && echo "$out" | grep -q "peer ${idC}"; then
+			receipts="ok"; break
+		fi
+		sleep 1
+	done
+
+	kill $pa $pb $pc $COORD_PID 2>/dev/null
+	wait $pa $pb $pc 2>/dev/null
+
+	if [ "$r1" = ok ] && [ "$r2b" = ok ] && [ "$r2c" = ok ] && [ "$repair" = ok ] && [ "$receipts" = ok ]; then
+		log "offline-gate: PASS (3 peers; B live + C offline→repair+catch-up through edit/delete/rename; receipts for B and C)"
+		return 0
+	fi
+	log "offline-gate: FAIL (r1=$r1 r2b=$r2b r2c=$r2c repair=$repair receipts=$receipts)"
+	report_gate_logs
+	return 1
+}
+
 main() {
 	if ! ip netns add _probe 2>/dev/null; then
 		log "this harness needs --privileged (CAP_NET_ADMIN + netns)"; exit 2
@@ -279,11 +413,18 @@ main() {
 	ip netns del _probe 2>/dev/null
 	trap teardown EXIT
 
-	# One cell per invocation (cone<->cone is punchable once the STUN reflexive
-	# address is correct; any symmetric side is not punchable and must fail
-	# gracefully, no relay). The Makefile runs the three cells as parallel
-	# containers; a bare `docker run` runs the default punchable cell.
-	run_cell "$NAT_A" "$NAT_B" "$EXPECT"
+	case "${SCENARIO:-cell}" in
+	cell)
+		# One cell per invocation (cone<->cone is punchable once the STUN reflexive
+		# address is correct; any symmetric side is not punchable and must fail
+		# gracefully, no relay). The Makefile runs the cells as parallel containers; a
+		# bare `docker run` runs the default punchable cell.
+		run_cell "$NAT_A" "$NAT_B" "$EXPECT" ;;
+	offline-gate)
+		run_offline_gate ;;
+	*)
+		log "unknown SCENARIO ${SCENARIO}"; exit 2 ;;
+	esac
 }
 
 main "$@"
