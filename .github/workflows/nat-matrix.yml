@@ -1,0 +1,15 @@
+# Cross-NAT hole-punch matrix. Builds a privileged netns/nftables topology and runs
+# the real binaries through each NAT-type cell. Runs on every PR.
+name: NAT matrix
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  nat-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: make nat-matrix

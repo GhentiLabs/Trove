@@ -1,7 +1,6 @@
-// Package config is the client's persisted, versioned configuration, stored in
-// its own SQLite database so it never contends with the high-churn chunk index.
-// It holds this node's identity reference and the registry of synced folders,
-// including each encrypted folder's master key. All mutations are transactional.
+// Package config is the client's persisted, versioned configuration in its own
+// SQLite database, holding this node's identity reference and the registry of synced
+// folders (with each encrypted folder's master key). All mutations are transactional.
 package config
 
 import (
@@ -17,8 +16,12 @@ import (
 )
 
 // SchemaVersion is the current config database layout. Open refuses a database
-// written by a newer binary.
-const SchemaVersion = 1
+// written by a newer binary and migrates older ones forward.
+//
+// v1: folders and per-folder keys.
+// v2: folders gain a shared folder_id (the cross-node match key, set at pairing);
+// an authorized-peer registry is added.
+const SchemaVersion = 2
 
 // MasterKeyLen is the length of a folder master key.
 const MasterKeyLen = crypto.MasterKeyLen
@@ -33,13 +36,21 @@ var (
 	ErrFolderExists = errors.New("config: folder already exists")
 	// ErrNoKey is returned when a folder has no master key set.
 	ErrNoKey = errors.New("config: folder has no master key")
-	// ErrKeyExists is returned when minting a key for a folder that already has
-	// one; overwriting it would orphan any data encrypted under the old key.
+	// ErrKeyExists is returned when minting a key for a folder that already has one.
 	ErrKeyExists = errors.New("config: folder already has a key")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
 	ErrSchemaTooNew = errors.New("config: database schema newer than this binary")
 	// ErrNodeMismatch is returned when the database belongs to a different node.
 	ErrNodeMismatch = errors.New("config: database belongs to a different node")
+	// ErrPeerExists is returned when adding a peer whose node id already exists.
+	ErrPeerExists = errors.New("config: peer already exists")
+	// ErrPeerNotFound is returned when no peer has the given node id.
+	ErrPeerNotFound = errors.New("config: peer not found")
+	// ErrInvalidNodeID is returned when a peer node id is not a valid fingerprint.
+	ErrInvalidNodeID = errors.New("config: invalid node id")
+	// ErrUnknownShareID is returned when authorizing a peer for a shared folder id that
+	// no local folder carries (the empty share id included).
+	ErrUnknownShareID = errors.New("config: unknown shared folder id")
 )
 
 const schema = `
@@ -56,14 +67,28 @@ CREATE TABLE IF NOT EXISTS folders (
 	kdf_time    INTEGER,
 	kdf_mem_kib INTEGER,
 	kdf_threads INTEGER,
-	created_ms  INTEGER NOT NULL
-);`
+	created_ms  INTEGER NOT NULL,
+	share_id    TEXT    NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS peers (
+	node_id  TEXT PRIMARY KEY,
+	name     TEXT    NOT NULL DEFAULT '',
+	added_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS peer_folders (
+	node_id   TEXT NOT NULL,
+	folder_id TEXT NOT NULL,
+	PRIMARY KEY (node_id, folder_id)
+) WITHOUT ROWID;`
 
 // Folder is a registered sync folder.
 type Folder struct {
 	ID        string
 	Root      string
 	Encrypted bool
+	// ShareID is the cross-node match key agreed at pairing, distinct from ID and the
+	// encryption key. Empty until the folder is paired.
+	ShareID string
 }
 
 // Store is the config database handle.
@@ -74,10 +99,8 @@ type Store struct {
 
 // Options configures Open.
 type Options struct {
-	// DB is the opened config database.
 	DB *storage.DB
-	// NodeID is this node's identity, e.g. from identity.FingerprintCert. It is
-	// persisted on first open and verified on every subsequent open.
+	// NodeID is persisted on first open and verified on every subsequent open.
 	NodeID string
 }
 
@@ -101,7 +124,7 @@ func (s *Store) init(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, schema); err != nil {
 			return fmt.Errorf("config: schema: %w", err)
 		}
-		if err := storage.CheckMeta(ctx, tx, "schema_version", fmt.Sprint(SchemaVersion), s.validateVersion); err != nil {
+		if err := checkVersion(ctx, tx); err != nil {
 			return err
 		}
 		return storage.CheckMeta(ctx, tx, "node_id", s.node, func(got string) error {
@@ -113,13 +136,41 @@ func (s *Store) init(ctx context.Context) error {
 	})
 }
 
-func (s *Store) validateVersion(got string) error {
-	var v int
-	if _, err := fmt.Sscanf(got, "%d", &v); err != nil {
-		return fmt.Errorf("config: unreadable schema_version %q: %w", got, err)
+func checkVersion(ctx context.Context, tx *storage.Tx) error {
+	var v string
+	err := tx.QueryRow(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := tx.Exec(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, SchemaVersion); err != nil {
+			return fmt.Errorf("config: set version: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("config: read version: %w", err)
 	}
-	if v > SchemaVersion {
-		return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, v, SchemaVersion)
+	var stored int
+	if _, err := fmt.Sscanf(v, "%d", &stored); err != nil {
+		return fmt.Errorf("config: unreadable schema_version %q: %w", v, err)
+	}
+	switch {
+	case stored > SchemaVersion:
+		return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, stored, SchemaVersion)
+	case stored < SchemaVersion:
+		return migrate(ctx, tx, stored)
+	}
+	return nil
+}
+
+// migrate upgrades an older config database to SchemaVersion in place. The schema
+// statement already creates wholly new tables; migrate only alters existing ones.
+func migrate(ctx context.Context, tx *storage.Tx, from int) error {
+	if from < 2 {
+		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN share_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("config: migrate v2: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE meta SET value = ? WHERE key = 'schema_version'`, SchemaVersion); err != nil {
+		return fmt.Errorf("config: set version: %w", err)
 	}
 	return nil
 }
@@ -139,8 +190,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 			return fmt.Errorf("config: check folder: %w", err)
 		}
 		_, err = tx.Exec(ctx,
-			`INSERT INTO folders (id, root, encrypted, created_ms) VALUES (?, ?, ?, ?)`,
-			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli())
+			`INSERT INTO folders (id, root, encrypted, created_ms, share_id) VALUES (?, ?, ?, ?, ?)`,
+			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID)
 		if err != nil {
 			return fmt.Errorf("config: add folder: %w", err)
 		}
@@ -151,8 +202,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 // GetFolder returns the folder with the given id.
 func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 	var f Folder
-	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted FROM folders WHERE id = ?`, id).
-		Scan(&f.ID, &f.Root, &f.Encrypted)
+	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id FROM folders WHERE id = ?`, id).
+		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Folder{}, ErrFolderNotFound
@@ -164,7 +215,7 @@ func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 
 // ListFolders returns all registered folders ordered by id.
 func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted FROM folders ORDER BY id`)
+	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id FROM folders ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("config: list folders: %w", err)
 	}
@@ -173,7 +224,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
 	for rows.Next() {
 		var f Folder
-		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted); err != nil {
+		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID); err != nil {
 			return nil, fmt.Errorf("config: scan folder: %w", err)
 		}
 		out = append(out, f)
@@ -191,8 +242,31 @@ func (s *Store) RemoveFolder(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrFolderNotFound
 		}
-		return nil
+		return pruneOrphanGrants(ctx, tx)
 	})
+}
+
+// SetFolderShareID sets a folder's cross-node shared id, agreed at pairing.
+func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error {
+	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		res, err := tx.Exec(ctx, `UPDATE folders SET share_id = ? WHERE id = ?`, shareID, id)
+		if err != nil {
+			return fmt.Errorf("config: set share id: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrFolderNotFound
+		}
+		return pruneOrphanGrants(ctx, tx)
+	})
+}
+
+// pruneOrphanGrants drops peer_folders rows whose shared folder id is no longer
+// backed by any local folder.
+func pruneOrphanGrants(ctx context.Context, tx *storage.Tx) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM peer_folders WHERE folder_id NOT IN (SELECT share_id FROM folders WHERE share_id != '')`); err != nil {
+		return fmt.Errorf("config: prune peer folders: %w", err)
+	}
+	return nil
 }
 
 // SetFolderKey stores an explicit master key for a folder, clearing any recorded
@@ -230,8 +304,8 @@ func (s *Store) DeriveFolderKey(ctx context.Context, id, passphrase string) ([Ma
 	return key, nil
 }
 
-// setKeyIfAbsent writes a key only if the folder exists and has none, checking
-// and writing in one transaction so concurrent callers cannot both succeed.
+// setKeyIfAbsent writes a key only if the folder exists and has none, in one
+// transaction so concurrent callers cannot both succeed.
 func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte, t, m, p *int64) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		var existing []byte

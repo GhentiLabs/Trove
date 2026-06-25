@@ -522,7 +522,7 @@ func verify(fc FolderContext, id hasher.ChunkID, codec compression.Codec, encryp
 		}
 		data = opened
 	}
-	plain, err := compression.Decompress(codec, data)
+	plain, err := compression.Decompress(codec, data, compression.MaxDecodedSize)
 	if err != nil {
 		return nil, err
 	}
