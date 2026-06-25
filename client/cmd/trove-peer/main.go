@@ -14,9 +14,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
+	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/node"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 	"github.com/GhentiLabs/Trove/pkg/identity"
@@ -30,6 +32,7 @@ commands:
   invite     admit a reader to a group you own (-group -node -key)
   join       join a group founded by someone else (-group -root)
   run        run the peer: sync and membership gossip (-trove)
+  status     show each folder's role, root, and last-synced receipts
 `
 
 func main() {
@@ -56,6 +59,8 @@ func run(args []string) error {
 		return cmdJoin(rest)
 	case "run":
 		return cmdRun(rest)
+	case "status":
+		return cmdStatus(rest)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", cmd)
@@ -218,6 +223,77 @@ func cmdJoin(args []string) error {
 		return err
 	}
 	fmt.Printf("joined %s; run `trove-peer run -trove ...` to sync\n", *group)
+	return nil
+}
+
+func cmdStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	dir := fs.String("dir", ".trove", "state directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_, _, nodeID, err := loadIdentity(*dir)
+	if err != nil {
+		return err
+	}
+	db, err := storage.Open(storage.Options{Path: filepath.Join(*dir, "config.db"), MaxOpenConns: 1})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	cfg, err := config.Open(config.Options{DB: db, NodeID: nodeID})
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	folders, err := cfg.ListFolders(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println("node id:", nodeID)
+	for _, f := range folders {
+		if f.ShareID == "" {
+			continue
+		}
+		role := "reader"
+		if founder, ok := membership.Founder(f.ShareID); ok && founder == nodeID {
+			role = "owner"
+		}
+		fmt.Printf("\nfolder %s (%s)\n  root: %s\n", f.ShareID, role, f.Root)
+		if err := printFolderReceipts(ctx, *dir, f.ID, nodeID); err != nil {
+			fmt.Printf("  receipts: unavailable (%v)\n", err)
+		}
+	}
+	return nil
+}
+
+func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string) error {
+	path := filepath.Join(dir, "folders", folderID, "model.db")
+	if _, err := os.Stat(path); err != nil {
+		fmt.Println("  not yet synced")
+		return nil
+	}
+	mdb, err := storage.Open(storage.Options{Path: path, MaxOpenConns: 1})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mdb.Close() }()
+	ms, err := model.Open(model.Options{DB: mdb, NodeID: nodeID})
+	if err != nil {
+		return err
+	}
+	receipts, err := ms.Receipts(ctx)
+	if err != nil {
+		return err
+	}
+	if len(receipts) == 0 {
+		fmt.Println("  not yet synced")
+		return nil
+	}
+	for _, r := range receipts {
+		fmt.Printf("  peer %s  seq=%d  last synced %s\n",
+			r.PeerID, r.HighWater, r.SyncedAt.Format(time.RFC3339))
+	}
 	return nil
 }
 
