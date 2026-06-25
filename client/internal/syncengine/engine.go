@@ -59,7 +59,9 @@ const (
 	RoleReplica
 )
 
-// FolderConfig binds one shared folder to its local stores and on-disk root.
+// FolderConfig binds one shared folder to its local stores and on-disk root. Coord is
+// the node's per-folder multi-source coordinator, shared across the node's sessions; a
+// replica sets it, an owner leaves it nil.
 type FolderConfig struct {
 	FolderID  string
 	Role      Role
@@ -67,6 +69,7 @@ type FolderConfig struct {
 	FolderCtx chunkstore.FolderContext
 	Model     *model.Store
 	Chunks    *chunkstore.Store
+	Coord     *Coordinator
 }
 
 // Options configures an Engine bound to one Active session.
@@ -142,22 +145,29 @@ func New(opts Options) (*Engine, error) {
 			e.ownsAny = true
 		}
 	}
-	if e.ownsAny {
+	if len(e.folders) > 0 {
 		e.serveSem = make(chan struct{}, maxServeStreams)
 	}
 	return e, nil
 }
 
-// Drive runs the sync engine until ctx is cancelled.
+// Drive runs the sync engine until ctx is cancelled. It registers this session as a
+// source with each folder's coordinator (so a replica can pull from this peer) and
+// serves inbound chunk requests; an owner also announces.
 func (e *Engine) Drive(ctx context.Context) error {
+	peer := e.sess.PeerNodeID()
 	for _, fs := range e.folders {
 		if fs.cfg.Role == RoleReplica {
 			_ = os.RemoveAll(filepath.Join(fs.cfg.Root, tmpDirName))
 		}
+		if fs.cfg.Coord != nil {
+			fs.cfg.Coord.addSource(peer, e.sess.Conn())
+			defer fs.cfg.Coord.removeSource(peer)
+		}
 	}
 	var wg sync.WaitGroup
+	wg.Go(func() { e.serveLoop(ctx) })
 	if e.ownsAny {
-		wg.Go(func() { e.serveLoop(ctx) })
 		wg.Go(func() { e.announceLoop(ctx) })
 	}
 	e.Announce(ctx)
@@ -274,7 +284,7 @@ func (e *Engine) serveOneStream(ctx context.Context, s netio.Stream) {
 		return
 	}
 	fs := e.folders[folderID]
-	if fs == nil || fs.cfg.Role != RoleOwner {
+	if fs == nil {
 		_ = writeChunkResponseHeader(s, StatusError, 0)
 		return
 	}

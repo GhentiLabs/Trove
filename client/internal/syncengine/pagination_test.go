@@ -28,9 +28,10 @@ func TestManifestDeltaPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("owner engine: %v", err)
 	}
+	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err := New(Options{
 		Session: rs,
-		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks}},
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
 	})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)

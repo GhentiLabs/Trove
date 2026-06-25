@@ -107,7 +107,7 @@ func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since int64)
 	if err != nil {
 		return pageResult{}, err
 	}
-	if err := fs.eng.pull(ctx, fs, pull); err != nil {
+	if err := fs.cfg.Coord.pull(ctx, pull, fs.eng.sess.PeerNodeID()); err != nil {
 		return pageResult{}, err
 	}
 	if err := fs.apply(ctx, batch, delta); err != nil {

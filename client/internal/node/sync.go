@@ -70,9 +70,13 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 			return nil, fmt.Errorf("node: open chunk store %q: %w", f.ShareID, err)
 		}
 		rt.closers = append(rt.closers, cs.Close)
-		rt.folders = append(rt.folders, syncengine.FolderConfig{
+		fc := syncengine.FolderConfig{
 			FolderID: f.ShareID, Role: s.opts.SyncRole, Root: f.Root, Model: ms, Chunks: cs,
-		})
+		}
+		if s.opts.SyncRole == syncengine.RoleReplica {
+			fc.Coord = syncengine.NewCoordinator(f.ShareID, fc.FolderCtx, cs, 0, s.log)
+		}
+		rt.folders = append(rt.folders, fc)
 	}
 	ok = true
 	return rt, nil
