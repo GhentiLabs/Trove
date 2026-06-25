@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"time"
 )
 
 // ErrPeerClosed is returned by a Stream read when the peer closed the connection
@@ -22,6 +23,9 @@ type Stream interface {
 	io.Reader
 	io.Writer
 	io.Closer
+	// SetReadDeadline bounds blocking reads so a stalled peer cannot hold a reader
+	// past a per-attempt timeout. A zero time clears the deadline.
+	SetReadDeadline(t time.Time) error
 }
 
 // Conn is a multiplexed, mutually-authenticated connection to one peer. Its

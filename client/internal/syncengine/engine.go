@@ -140,6 +140,9 @@ func New(opts Options) (*Engine, error) {
 		if fc.Model == nil || fc.Chunks == nil {
 			return nil, fmt.Errorf("syncengine: folder %q missing stores", fc.FolderID)
 		}
+		if fc.Role == RoleReplica && fc.Coord == nil {
+			return nil, fmt.Errorf("syncengine: replica folder %q missing coordinator", fc.FolderID)
+		}
 		e.folders[fc.FolderID] = &folderState{eng: e, cfg: fc}
 		if fc.Role == RoleOwner {
 			e.ownsAny = true

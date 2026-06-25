@@ -162,7 +162,7 @@ func (c *Coordinator) missing(ctx context.Context, refs []manifest.ChunkRef) ([]
 func (c *Coordinator) fetch(ctx context.Context, id hasher.ChunkID, ownerID string) error {
 	sources := c.order(ownerID)
 	if len(sources) == 0 {
-		return fmt.Errorf("%w: %s (no sources)", errChunkUnavailable, id)
+		return fmt.Errorf("syncengine: no sources for chunk %s", id)
 	}
 	var lastErr error
 	for _, src := range sources {
@@ -189,6 +189,9 @@ func (c *Coordinator) fetchFrom(ctx context.Context, conn netio.Conn, id hasher.
 		return fmt.Errorf("syncengine: open data stream: %w", err)
 	}
 	defer func() { _ = s.Close() }()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = s.SetReadDeadline(dl)
+	}
 
 	if err := writeChunkRequest(s, c.folderID, id); err != nil {
 		return err

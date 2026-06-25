@@ -68,7 +68,7 @@ func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
 
 	// 3) B connects to A first and registers it as a source (A serves what it holds).
 	abA, abB := memSessionPair(t, ctx, a, b)
-	aServe := engineOn(t, ctx, abA, a, RoleReplica, nil)
+	aServe := engineOn(t, ctx, abA, a, RoleReplica, ca)
 	engineOn(t, ctx, abB, b, RoleReplica, cb)
 	waitSources(t, cb, 1)
 
@@ -119,7 +119,7 @@ func TestMultiSourceCorruptSourceRefetched(t *testing.T) {
 	fc := &faultyConn{}
 	fc.corrupt.Store(true)
 	abA, abB := memSessionPair(t, ctx, a, b, func(c netio.Conn) netio.Conn { fc.Conn = c; return fc })
-	engineOn(t, ctx, abA, a, RoleReplica, nil)
+	engineOn(t, ctx, abA, a, RoleReplica, ca)
 	engineOn(t, ctx, abB, b, RoleReplica, cb)
 	waitSources(t, cb, 1)
 
