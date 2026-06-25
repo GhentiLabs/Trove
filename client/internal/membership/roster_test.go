@@ -86,6 +86,42 @@ func TestFoundDistinctGroups(t *testing.T) {
 	}
 }
 
+// Re-merging entries already in the roster admits nothing, so gossip does not amplify.
+func TestMergeIdempotentOnKnownEntries(t *testing.T) {
+	f := newNode(t)
+	a := newNode(t)
+	ctx := context.Background()
+	net, _ := f.store.Found(ctx)
+	if _, err := f.store.Add(ctx, net, a.id, a.pub, RoleReader); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	full := mustRoster(t, f.store, net)
+
+	b := newNode(t)
+	if err := b.store.Join(ctx, net); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := b.store.Merge(ctx, net, full); err != nil || len(added) != len(full) {
+		t.Fatalf("first merge: added %d err %v, want %d", len(added), err, len(full))
+	}
+	added, err := b.store.Merge(ctx, net, full)
+	if err != nil {
+		t.Fatalf("re-merge: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("re-merge admitted %d known entries, want 0", len(added))
+	}
+}
+
+// The reserved holder role (2) cannot be signed until encrypted-folder sync exists.
+func TestSignRejectsReservedRole(t *testing.T) {
+	n := newNode(t)
+	e := Entry{NetworkID: "net", NodeID: n.id, PublicKey: n.pub, Role: 2, AddedBy: n.id, AddedAtMs: 1}
+	if _, err := Sign(n.key, e); !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("Sign with reserved role 2: err = %v, want ErrInvalidEntry", err)
+	}
+}
+
 func TestAddRequiresWriter(t *testing.T) {
 	f := newNode(t)
 	a := newNode(t)

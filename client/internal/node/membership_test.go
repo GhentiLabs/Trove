@@ -88,6 +88,17 @@ func gossipPair(t *testing.T, ctx context.Context, aID, bID string, ga, gb *goss
 	return ar.s, bs
 }
 
+// A protobuf role value outside Role's uint8 range is dropped, not truncated into a
+// valid role.
+func TestFromWireEntriesDropsOverflowRole(t *testing.T) {
+	if got := fromWireEntries([]*wirepb.MembershipEntry{{Role: 256}}); len(got) != 0 {
+		t.Fatalf("overflow role not dropped: got %d entries", len(got))
+	}
+	if got := fromWireEntries([]*wirepb.MembershipEntry{{Role: 1}}); len(got) != 1 {
+		t.Fatalf("in-range role dropped: got %d entries", len(got))
+	}
+}
+
 func bindGossip(s *session.Session, g *gossiper) {
 	peer := s.PeerNodeID()
 	s.SetControlHandler(func(ctx context.Context, typ wire.MessageType, msg proto.Message) error {
