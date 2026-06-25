@@ -45,3 +45,6 @@ server.crt
 
 # editor scratch files
 *.tmp
+
+# local agent config
+.claude/

@@ -115,8 +115,6 @@ func TestProbeAndLocalAddr(t *testing.T) {
 	if tr.LocalAddr() == nil {
 		t.Fatal("LocalAddr is nil")
 	}
-	// The reflector guard skips loopback, multicast, and unresolvable candidates,
-	// returning without sending — never erroring on a hostile candidate list.
 	bad := []string{tr.LocalAddr().String(), "239.0.0.1:1", "not-an-addr", "0.0.0.0:1"}
 	if err := tr.Probe(context.Background(), bad); err != nil {
 		t.Fatalf("Probe should skip non-routable candidates without error: %v", err)
@@ -147,7 +145,6 @@ func TestCloseReleasesSocket(t *testing.T) {
 	if err := tr.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// The UDP port must be free again; if Close leaked the socket this fails.
 	c, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		t.Fatalf("port not released after Close: %v", err)

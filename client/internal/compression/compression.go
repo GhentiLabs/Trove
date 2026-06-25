@@ -1,7 +1,6 @@
-// Package compression applies per-chunk zstd compression on the storage path,
-// after chunking and before encryption. Each chunk records the codec used so the
-// read path knows how to reverse it. If a chunk does not compress smaller it is
-// stored uncompressed (CodecNone), so stored size never exceeds plaintext size.
+// Package compression applies per-chunk zstd compression, after chunking and before
+// encryption. A chunk that does not compress smaller is stored uncompressed
+// (CodecNone), so stored size never exceeds plaintext size.
 package compression
 
 import (
@@ -11,8 +10,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Codec identifies how a chunk's stored bytes were compressed. Values are
-// persisted in the chunk index and must remain stable.
+// Codec identifies how a chunk's stored bytes were compressed. Values are persisted
+// and must remain stable.
 type Codec uint8
 
 const (
@@ -20,12 +19,10 @@ const (
 	CodecZstd Codec = 1
 )
 
-// MaxDecodedSize bounds zstd decompression output to defend against decompression
-// bombs on untrusted input. It must be at least the largest plaintext any caller
-// decodes: the wire control-message cap (64 MiB) dominates the chunk cap (4 MiB).
+// MaxDecodedSize bounds zstd output against decompression bombs. It must cover the
+// largest plaintext any caller decodes (the 64 MiB wire control-message cap).
 const MaxDecodedSize = 64 << 20
 
-// Pooled and reused via EncodeAll/DecodeAll; never Closed, which would free them.
 var (
 	encoders = sync.Pool{New: func() any {
 		e, err := zstd.NewWriter(nil)

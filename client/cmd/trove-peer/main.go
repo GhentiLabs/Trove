@@ -1,13 +1,4 @@
-// Command trove-peer is the thin M3 integration harness: it runs one Trove peer —
-// identity, QUIC transport, Trove discovery, and the connection manager — so two
-// machines can discover each other, holepunch, and reach an Active session. It is
-// the driver for the live acceptance gate, not the full daemon (L10).
-//
-// Print this node's id, then on each machine register the other's id and a shared
-// folder id:
-//
-//	trove-peer -trove trove://host:port?id=fp -listen 0.0.0.0:22000 \
-//	  -root /path/to/folder -share vacation -peer <other-node-id>
+// Command trove-peer runs one Trove peer; it drives the live acceptance gate.
 package main
 
 import (
@@ -41,6 +32,8 @@ func run() error {
 	root := flag.String("root", "", "local folder root to share (with -share)")
 	share := flag.String("share", "", "shared folder id agreed with the peer")
 	peer := flag.String("peer", "", "authorize this peer node id (participating in -share)")
+	debug := flag.Bool("debug", false, "verbose debug logging (per-dial/probe/candidate detail)")
+	logJSON := flag.Bool("log-json", false, "emit structured JSON logs instead of human-readable text")
 	flag.Parse()
 
 	if err := os.MkdirAll(*dir, 0o700); err != nil {
@@ -78,7 +71,16 @@ func run() error {
 		return nil
 	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level := slog.LevelInfo
+	if *debug {
+		level = slog.LevelDebug
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	if *logJSON {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	}
+	log := slog.New(handler)
 	svc, err := node.New(node.Options{Cert: cert, NodeID: nodeID, Config: cfg, TroveURL: *trove, UDPAddr: *listen, Logger: log})
 	if err != nil {
 		return err
@@ -87,9 +89,6 @@ func run() error {
 	return svc.Run(ctx)
 }
 
-// pair ensures the shared folder and authorized peer exist. It is create-only:
-// re-running with a changed -root or an additional grant is a no-op on an existing
-// row, so it reports when an already-configured entry is left unchanged.
 func pair(ctx context.Context, cfg *config.Store, root, share, peer string) error {
 	if share != "" {
 		switch err := cfg.AddFolder(ctx, config.Folder{ID: share, Root: root, ShareID: share}); {

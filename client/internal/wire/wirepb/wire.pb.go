@@ -280,7 +280,6 @@ func (x *Folder) GetEncrypted() bool {
 type NetworkConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Folders       []*Folder              `protobuf:"bytes,1,rep,name=folders,proto3" json:"folders,omitempty"`
-	Compression   uint32                 `protobuf:"varint,2,opt,name=compression,proto3" json:"compression,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -320,13 +319,6 @@ func (x *NetworkConfig) GetFolders() []*Folder {
 		return x.Folders
 	}
 	return nil
-}
-
-func (x *NetworkConfig) GetCompression() uint32 {
-	if x != nil {
-		return x.Compression
-	}
-	return 0
 }
 
 // Ping is the idle-timer keepalive.
@@ -431,10 +423,9 @@ const file_wire_proto_rawDesc = "" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12:\n" +
 	"\vfolder_type\x18\x02 \x01(\x0e2\x19.trove.wire.v1.FolderTypeR\n" +
 	"folderType\x12\x1c\n" +
-	"\tencrypted\x18\x03 \x01(\bR\tencryptedJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"h\n" +
+	"\tencrypted\x18\x03 \x01(\bR\tencryptedJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"F\n" +
 	"\rNetworkConfig\x12/\n" +
-	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afolders\x12 \n" +
-	"\vcompression\x18\x02 \x01(\rR\vcompressionJ\x04\b\x03\x10\x04\"\x06\n" +
+	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +

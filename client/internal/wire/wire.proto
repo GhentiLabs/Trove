@@ -49,7 +49,6 @@ message Folder {
 // Tag 3 is reserved for advertised addresses (address gossip).
 message NetworkConfig {
   repeated Folder folders = 1;
-  uint32 compression = 2;
   reserved 3;
 }
 

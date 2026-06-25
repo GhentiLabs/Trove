@@ -9,9 +9,6 @@ import (
 	"sync"
 )
 
-// streamBufferSize bounds how many Conns may await Accept, and streams await
-// AcceptStream, before the producer blocks. A test that opens more than this many
-// streams (or dials this many conns) before the accept loop runs will block.
 const streamBufferSize = 16
 
 var (
@@ -19,14 +16,7 @@ var (
 	errTransportClosed = errors.New("netio: transport closed")
 )
 
-// MemNet is an in-memory Transport registry for deterministic tests. Transports
-// register under an address and dial each other by that address.
-//
-// Each stream is backed by net.Pipe, which is synchronous and unbuffered: a Write
-// blocks until the peer Reads. This models backpressure but differs from QUIC,
-// which buffers writes. A test that writes on both ends of a stream before either
-// reads will therefore deadlock under MemNet though it would succeed over QUIC;
-// such tests must run the read side concurrently.
+// MemNet is an in-memory Transport registry for deterministic tests.
 type MemNet struct {
 	mu         sync.Mutex
 	transports map[string]*memTransport
@@ -37,8 +27,7 @@ func NewMemNet() *MemNet {
 	return &MemNet{transports: make(map[string]*memTransport)}
 }
 
-// Transport registers and returns a Transport listening at addr and presenting
-// nodeID to peers it dials and accepts.
+// Transport registers and returns a Transport listening at addr as nodeID.
 func (m *MemNet) Transport(addr, nodeID string) Transport {
 	t := &memTransport{
 		net:      m,
@@ -141,8 +130,6 @@ func newMemConn(peerNodeID string) *memConn {
 func (c *memConn) PeerNodeID() string { return c.peerNodeID }
 
 func (c *memConn) OpenStream(ctx context.Context) (Stream, error) {
-	// Reject deterministically when already closed; otherwise the buffered send
-	// below races the closed case in the select and may spuriously succeed.
 	select {
 	case <-c.closed:
 		return nil, errConnClosed
@@ -180,8 +167,6 @@ func (c *memConn) track(s io.Closer) {
 	c.mu.Lock()
 	select {
 	case <-c.closed:
-		// A concurrent shutdown already drained streams; close this late one here so
-		// it is not leaked open.
 		c.mu.Unlock()
 		_ = s.Close()
 		return
@@ -191,9 +176,6 @@ func (c *memConn) track(s io.Closer) {
 	c.mu.Unlock()
 }
 
-// Close models QUIC connection teardown: it closes every stream this side handed
-// out (which errors the peer's matching ends) and propagates to the peer so its
-// blocked AcceptStream returns.
 func (c *memConn) Close() error {
 	c.shutdown()
 	if c.peer != nil {

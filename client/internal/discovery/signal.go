@@ -15,19 +15,15 @@ import (
 )
 
 var (
-	// ErrTargetUnavailable is returned by Connect when the target has no live
-	// signaling connection (it is offline); the ladder cannot holepunch it now.
+	// ErrTargetUnavailable is returned by Connect when the target is offline.
 	ErrTargetUnavailable = errors.New("discovery: signal target unavailable")
 	// ErrSignalerClosed is returned when the signaling connection has closed.
 	ErrSignalerClosed = errors.New("discovery: signaler closed")
 )
 
-// incomingBuffer bounds undelivered inbound holepunch requests before they drop.
 const incomingBuffer = 16
 
-// Signaler is a live signaling WebSocket to the Trove server. It brokers holepunch
-// coordination: Connect initiates toward a target and returns its candidates plus a
-// synchronized punch time; Incoming delivers requests from peers punching toward us.
+// Signaler is a live signaling WebSocket to the Trove server brokering holepunches.
 type Signaler struct {
 	ws  *websocket.Conn
 	ctx context.Context
@@ -49,9 +45,7 @@ type signalResult struct {
 	err   error
 }
 
-// Signal opens the signaling WebSocket and sends the opening Hello. The returned
-// Signaler runs a read loop until Close. A separate no-timeout HTTP client is used
-// because the shared client's request timeout would kill the long-lived socket.
+// Signal opens the signaling WebSocket and sends the opening Hello.
 func (c *Client) Signal(ctx context.Context) (*Signaler, error) {
 	hc := &http.Client{
 		Transport: &http.Transport{TLSClientConfig: identity.PinnedClientConfig(c.cert, c.pin)},
@@ -81,9 +75,7 @@ func (c *Client) Signal(ctx context.Context) (*Signaler, error) {
 	return s, nil
 }
 
-// Connect asks the server to broker a holepunch with target, advertising cands. It
-// returns the target's candidates and the shared punch time, ErrTargetUnavailable
-// if the target is offline, or ctx/closed errors.
+// Connect asks the server to broker a holepunch with target, advertising cands.
 func (s *Signaler) Connect(ctx context.Context, target string, cands []disco.Address) (disco.PeerCandidates, error) {
 	ch := make(chan signalResult, 1)
 	s.mu.Lock()
@@ -167,8 +159,6 @@ func (s *Signaler) dispatch(msg disco.SignalMessage) {
 	}
 }
 
-// validCandidates drops server-relayed candidate addresses that fail validation,
-// keeping untrusted-input rejection at ingestion as the rest of the package does.
 func validCandidates(in []disco.Address) []disco.Address {
 	out := make([]disco.Address, 0, len(in))
 	for _, a := range in {

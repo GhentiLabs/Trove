@@ -6,6 +6,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,9 @@ type RateLimit struct {
 type Config struct {
 	PublicListenAddr  string
 	MetricsListenAddr string
+	STUNListenAddr    string
 	AdvertiseAddr     string
+	LogLevel          string
 
 	ServerKeyPath  string
 	ServerCertPath string
@@ -56,6 +59,7 @@ type Config struct {
 	LookupRate    RateLimit
 	AnalyticsRate RateLimit
 	SignalRate    RateLimit
+	STUNRate      RateLimit
 
 	ReadTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
@@ -68,6 +72,8 @@ func defaults() Config {
 	return Config{
 		PublicListenAddr:        "0.0.0.0:8443",
 		MetricsListenAddr:       "127.0.0.1:9090",
+		STUNListenAddr:          "0.0.0.0:8443",
+		LogLevel:                "info",
 		ServerKeyPath:           "server.key",
 		ServerCertPath:          "server.crt",
 		TTLMin:                  1 * time.Minute,
@@ -88,6 +94,7 @@ func defaults() Config {
 		LookupRate:              RateLimit{RPS: 5, Burst: 20},
 		AnalyticsRate:           RateLimit{RPS: 0.2, Burst: 5},
 		SignalRate:              RateLimit{RPS: 5, Burst: 20},
+		STUNRate:                RateLimit{RPS: 200, Burst: 100},
 		ReadTimeout:             10 * time.Second,
 		ReadHeaderTimeout:       5 * time.Second,
 		WriteTimeout:            10 * time.Second,
@@ -105,6 +112,8 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 
 	c.PublicListenAddr = e.str("TROVE_DISCOVERY_LISTEN_ADDR", c.PublicListenAddr)
 	c.MetricsListenAddr = e.str("TROVE_DISCOVERY_METRICS_ADDR", c.MetricsListenAddr)
+	c.STUNListenAddr = e.str("TROVE_DISCOVERY_STUN_ADDR", c.STUNListenAddr)
+	c.LogLevel = e.str("TROVE_DISCOVERY_LOG_LEVEL", c.LogLevel)
 	c.AdvertiseAddr = e.str("TROVE_DISCOVERY_ADVERTISE_ADDR", c.AdvertiseAddr)
 	c.ServerKeyPath = e.str("TROVE_DISCOVERY_SERVER_KEY", c.ServerKeyPath)
 	c.ServerCertPath = e.str("TROVE_DISCOVERY_SERVER_CERT", c.ServerCertPath)
@@ -127,6 +136,7 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	c.LookupRate = e.rate("TROVE_DISCOVERY_RATE_LOOKUP", c.LookupRate)
 	c.AnalyticsRate = e.rate("TROVE_DISCOVERY_RATE_ANALYTICS", c.AnalyticsRate)
 	c.SignalRate = e.rate("TROVE_DISCOVERY_RATE_SIGNAL", c.SignalRate)
+	c.STUNRate = e.rate("TROVE_DISCOVERY_RATE_STUN", c.STUNRate)
 	c.ReadTimeout = e.dur("TROVE_DISCOVERY_READ_TIMEOUT", c.ReadTimeout)
 	c.ReadHeaderTimeout = e.dur("TROVE_DISCOVERY_READ_HEADER_TIMEOUT", c.ReadHeaderTimeout)
 	c.WriteTimeout = e.dur("TROVE_DISCOVERY_WRITE_TIMEOUT", c.WriteTimeout)
@@ -150,6 +160,8 @@ func bindFlags(c *Config, args []string) error {
 	fs := flag.NewFlagSet("trove-server", flag.ContinueOnError)
 	fs.StringVar(&c.PublicListenAddr, "listen-addr", c.PublicListenAddr, "public TLS listen address")
 	fs.StringVar(&c.MetricsListenAddr, "metrics-addr", c.MetricsListenAddr, "localhost-only metrics listen address")
+	fs.StringVar(&c.STUNListenAddr, "stun-addr", c.STUNListenAddr, "public STUN responder listen address (UDP; same port number as -listen-addr by default)")
+	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "log level: debug, info, warn, error")
 	fs.StringVar(&c.AdvertiseAddr, "advertise-addr", c.AdvertiseAddr, "public host or host:port shown in the trove:// connection string")
 	fs.StringVar(&c.ServerKeyPath, "server-key", c.ServerKeyPath, "path to the persistent Ed25519 server key")
 	fs.StringVar(&c.ServerCertPath, "server-cert", c.ServerCertPath, "path to the self-signed server certificate")
@@ -163,12 +175,29 @@ func bindFlags(c *Config, args []string) error {
 	return fs.Parse(args)
 }
 
+// SlogLevel maps the configured log level to a slog.Level, defaulting to Info for
+// an empty or unrecognized value.
+func (c *Config) SlogLevel() slog.Level {
+	switch strings.ToLower(c.LogLevel) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 func (c *Config) validate() error {
 	switch {
 	case c.PublicListenAddr == "":
 		return fmt.Errorf("config: empty listen address")
 	case c.MetricsListenAddr == "":
 		return fmt.Errorf("config: empty metrics address")
+	case c.STUNListenAddr == "":
+		return fmt.Errorf("config: empty stun address")
 	case c.TTLMin <= 0 || c.TTLDefault <= 0 || c.TTLMax <= 0:
 		return fmt.Errorf("config: TTL values must be positive")
 	case c.TTLMin > c.TTLDefault || c.TTLDefault > c.TTLMax:
@@ -196,7 +225,7 @@ func (c *Config) validate() error {
 	case c.ServerKeyPath == "" || c.ServerCertPath == "":
 		return fmt.Errorf("config: server key and cert paths must be set")
 	}
-	for _, r := range []RateLimit{c.AnnounceRate, c.LookupRate, c.AnalyticsRate, c.SignalRate} {
+	for _, r := range []RateLimit{c.AnnounceRate, c.LookupRate, c.AnalyticsRate, c.SignalRate, c.STUNRate} {
 		if r.RPS <= 0 || r.Burst <= 0 {
 			return fmt.Errorf("config: rate limits must be positive")
 		}

@@ -12,8 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// These constants are the frozen cross-node wire contract. Changing any of them is
-// a wire-format break and requires bumping WireFormatVersion.
+// Golden check on the frozen wire constants; changing any is a wire-format break.
 func TestFrozenConstantsGolden(t *testing.T) {
 	if Magic != 0x54524F56 {
 		t.Fatalf("Magic = %#x, want 0x54524F56", Magic)
@@ -37,8 +36,7 @@ func TestFrozenConstantsGolden(t *testing.T) {
 	}
 }
 
-// The Hello envelope layout (magic ‖ uint16 size ‖ body) is byte-pinned; the body
-// is verified by round-trip, not by exact bytes.
+// Golden: the Hello envelope layout (magic ‖ uint16 size ‖ body) is byte-pinned.
 func TestHelloEnvelopeGolden(t *testing.T) {
 	h := &wirepb.Hello{NodeId: "n", WireFormatVersion: WireFormatVersion, Name: "alice"}
 	var buf bytes.Buffer
@@ -75,8 +73,8 @@ func TestReadHelloBadMagic(t *testing.T) {
 	}
 }
 
-// The post-Hello frame layout (uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body)
-// is byte-pinned; bodies are verified by round-trip.
+// Golden: the post-Hello frame layout (uint16 header_len ‖ Header ‖ uint32 msg_len ‖
+// body) is byte-pinned.
 func TestMessageEnvelopeGolden(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteMessage(&buf, &wirepb.Ping{}); err != nil {
@@ -113,7 +111,6 @@ func TestMessageRoundTrip(t *testing.T) {
 			{FolderId: "docs-share", FolderType: wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE},
 			{FolderId: "photos-share", Encrypted: true},
 		},
-		Compression: 1,
 	}
 	var buf bytes.Buffer
 	if err := WriteMessage(&buf, cfg); err != nil {
@@ -159,8 +156,7 @@ func TestReadMessageUnknownType(t *testing.T) {
 	}
 }
 
-// A compressed body within the wire size cap can still decompress to gigabytes; the
-// reader must reject it rather than allocate unboundedly.
+// A small compressed body can decompress to gigabytes; the reader must reject it.
 func TestReadMessageRejectsDecompressionBomb(t *testing.T) {
 	bomb := make([]byte, 2*compression.MaxDecodedSize)
 	codec, payload := compression.Compress(bomb)
@@ -183,9 +179,7 @@ func TestReadMessageRejectsDecompressionBomb(t *testing.T) {
 	}
 }
 
-// Over a synchronous, unbuffered stream (like net.Pipe or an unread QUIC stream),
-// an empty-body message must not stall: the writer must not emit a zero-length body
-// write that the reader skips. Ping and an empty NetworkConfig are the real cases.
+// An empty-body message must not stall over a synchronous, unbuffered stream.
 func TestEmptyBodyOverSynchronousPipe(t *testing.T) {
 	for _, msg := range []proto.Message{&wirepb.Ping{}, &wirepb.NetworkConfig{}} {
 		a, b := net.Pipe()

@@ -1,9 +1,5 @@
-// Package peermgr is the connection manager: it holds N authenticated peer sessions
-// at once, drives the reachability ladder to dial authorized peers (the ladder is
-// injected as Connect so the holepunch/discovery wiring stays out of the core),
-// accepts inbound connections, deduplicates the two connections formed when both
-// sides dial at once, and reconnects with backoff. Session lifecycle is the testable
-// core; the live ladder is glued on at construction.
+// Package peermgr is the connection manager: it holds and maintains authenticated
+// peer sessions, deduplicating and reconnecting as needed.
 package peermgr
 
 import (
@@ -17,44 +13,31 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/session"
 )
 
-// serveResult distinguishes why a connection attempt ended, so the dial loop only
-// grows backoff on a genuine failure, not on a healthy connection that lost dedup.
 type serveResult int
 
 const (
-	serveFailed serveResult = iota // handshake failed
-	serveDedup                     // connection was healthy but lost the tiebreak
-	serveRan                       // session ran to completion
+	serveFailed serveResult = iota
+	serveDedup
+	serveRan
 )
 
 const (
-	defaultMinBackoff = 1 * time.Second
-	defaultMaxBackoff = 1 * time.Minute
-	// maxInboundHandshakes bounds concurrent inbound handshakes so a flood of
-	// connecting-but-stalling peers cannot grow handshake goroutines without limit.
+	defaultMinBackoff    = 1 * time.Second
+	defaultMaxBackoff    = 1 * time.Minute
+	holepunchRetry       = 2 * time.Second
 	maxInboundHandshakes = 64
 )
 
 // Options configures New.
 type Options struct {
-	// Self is this node's id, used for the duplicate-connection tiebreak.
-	Self string
-	// Transport accepts inbound peer connections.
-	Transport netio.Transport
-	// Local is this node's advertised identity and folders for the handshake.
-	Local session.Local
-	// Authorize gates a peer's certificate-derived node id and returns the shared
-	// folder ids granted to it (passed through to the session).
-	Authorize func(nodeID string) (granted []string, ok bool, err error)
-	// Connect is the reachability ladder: it returns an authenticated transport
-	// connection to nodeID (LAN, direct, or holepunch) or an error to retry.
-	Connect func(ctx context.Context, nodeID string) (netio.Conn, error)
-	// Peers are the node ids to actively maintain connections to.
-	Peers []string
-	// MinBackoff/MaxBackoff bound per-peer reconnect backoff.
+	Self                   string
+	Transport              netio.Transport
+	Local                  session.Local
+	Authorize              func(nodeID string) (granted []string, ok bool, err error)
+	Connect                func(ctx context.Context, nodeID string) (netio.Conn, error)
+	Peers                  []string
 	MinBackoff, MaxBackoff time.Duration
-	// Logger receives manager events; nil discards them.
-	Logger *slog.Logger
+	Logger                 *slog.Logger
 }
 
 // Manager holds and maintains the set of active peer sessions.
@@ -101,8 +84,7 @@ func New(opts Options) (*Manager, error) {
 	}, nil
 }
 
-// Run accepts inbound connections and maintains an outbound connection to each
-// configured peer until ctx is cancelled, then tears all sessions down.
+// Run maintains connections to all configured peers until ctx is cancelled.
 func (m *Manager) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	if m.transport != nil {
@@ -116,8 +98,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// acceptLoop tracks each inbound session goroutine in wg so Run does not return
-// while a serve goroutine is still using the transport.
 func (m *Manager) acceptLoop(ctx context.Context, wg *sync.WaitGroup) {
 	sem := make(chan struct{}, maxInboundHandshakes)
 	for {
@@ -152,12 +132,9 @@ func (m *Manager) dialLoop(ctx context.Context, peerID string) {
 		}
 		conn, err := m.connect(ctx, peerID)
 		if err != nil {
-			// errAwaitInbound is the holepunch acceptor's normal outcome: the NAT
-			// probe fired and the connection arrives via the accept loop. Retry at the
-			// base interval to keep the mapping fresh rather than backing off.
-			if errors.Is(err, errAwaitInbound) {
+			if errors.Is(err, errAwaitInbound) || errors.Is(err, errPunchMissed) {
 				backoff = m.minBackoff
-				if !sleep(ctx, m.minBackoff) {
+				if !sleep(ctx, holepunchRetry) {
 					return
 				}
 				continue
@@ -181,8 +158,6 @@ func (m *Manager) dialLoop(ctx context.Context, peerID string) {
 	}
 }
 
-// serve completes the handshake on conn and, if it wins deduplication, runs the
-// session until it ends.
 func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) serveResult {
 	sess, err := session.Handshake(ctx, session.Config{
 		Conn:      conn,
@@ -205,9 +180,6 @@ func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) se
 	return serveRan
 }
 
-// add registers sess for peerID, resolving a duplicate by keeping the session in
-// which the lexicographically smaller node id is the initiator. Both peers compute
-// the same winner, so they converge on a single connection.
 func (m *Manager) add(peerID string, sess *session.Session, initiator bool) bool {
 	m.mu.Lock()
 	existing, ok := m.sessions[peerID]
@@ -217,8 +189,6 @@ func (m *Manager) add(peerID string, sess *session.Session, initiator bool) bool
 	}
 	m.sessions[peerID] = sess
 	m.mu.Unlock()
-	// Evict the losing duplicate outside the lock: its graceful Close can block for
-	// up to the session's close-grace timeout, which must not stall the manager.
 	if ok {
 		_ = existing.Close()
 	}
@@ -267,7 +237,6 @@ func (m *Manager) ActiveCount() int {
 	return len(m.sessions)
 }
 
-// sleep waits for d or until ctx is cancelled, reporting whether it slept fully.
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

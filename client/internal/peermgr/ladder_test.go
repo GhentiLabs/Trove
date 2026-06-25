@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/discovery"
@@ -70,7 +71,7 @@ func TestLadderLookupAndCachesOnSuccess(t *testing.T) {
 	}
 }
 
-func TestLadderHolepunchDialerProbesThenDials(t *testing.T) {
+func TestLadderHolepunchDialerDialsWithoutProbe(t *testing.T) {
 	cache := discovery.NewCache()
 	var probed, dialed atomic.Bool
 	punchAt := time.Now().Add(40 * time.Millisecond).UnixMilli()
@@ -84,9 +85,6 @@ func TestLadderHolepunchDialerProbesThenDials(t *testing.T) {
 		},
 		Probe: func(context.Context, []string) error { probed.Store(true); return nil },
 		Dial: func(_ context.Context, _, nodeID string) (netio.Conn, error) {
-			if !probed.Load() {
-				t.Error("dialed before probing")
-			}
 			dialed.Store(true)
 			return stubConn{id: nodeID}, nil
 		},
@@ -95,9 +93,84 @@ func TestLadderHolepunchDialerProbesThenDials(t *testing.T) {
 	if err != nil || c == nil {
 		t.Fatalf("holepunch dialer Connect = %v, %v", c, err)
 	}
-	if !probed.Load() || !dialed.Load() {
-		t.Fatalf("probed=%v dialed=%v", probed.Load(), dialed.Load())
+	if !dialed.Load() {
+		t.Fatal("dialer did not dial")
 	}
+	if probed.Load() {
+		t.Fatal("dialer sent a raw probe; its QUIC dial should be the only punch packet")
+	}
+}
+
+// TestLadderHolepunchWaitsForPunchTime proves the dialer holds its dial until the
+// server-brokered punch time, so both sides' first packets cross mid-path. synctest
+// gives a virtual clock, so the wait is asserted deterministically with no real
+// sleep and no flakiness.
+func TestLadderHolepunchWaitsForPunchTime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const delay = 5 * time.Second
+		start := time.Now()
+		var dialedAfter time.Duration
+		l := NewLadder(LadderConfig{
+			Self:       lo, // lo < hi, so we are the dialer
+			Cache:      discovery.NewCache(),
+			Candidates: func() []disco.Address { return nil },
+			Lookup:     func(context.Context, string) ([]string, error) { return nil, errors.New("not found") },
+			Signal: func(context.Context, string, []disco.Address) (disco.PeerCandidates, error) {
+				return disco.PeerCandidates{
+					Candidates:    []disco.Address{{IP: "203.0.113.7", Port: 22000, Type: disco.AddressPublic}},
+					PunchAtMillis: time.Now().Add(delay).UnixMilli(),
+				}, nil
+			},
+			Probe: func(context.Context, []string) error { return nil },
+			Dial: func(_ context.Context, _, nodeID string) (netio.Conn, error) {
+				dialedAfter = time.Since(start)
+				return stubConn{id: nodeID}, nil
+			},
+		})
+		if _, err := l.Connect(context.Background(), hi); err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		if dialedAfter < delay {
+			t.Fatalf("dialed after %v, want >= brokered punch delay %v", dialedAfter, delay)
+		}
+	})
+}
+
+// TestLadderHolepunchDialerRetriesBounded proves the dialer makes exactly
+// maxPunchAttempts coordinated rounds, re-signalling once per round (so the acceptor
+// re-probes in lockstep), then gives up with errPunchMissed rather than looping.
+func TestLadderHolepunchDialerRetriesBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var signals, dials atomic.Int32
+		l := NewLadder(LadderConfig{
+			Self:       lo,
+			Cache:      discovery.NewCache(),
+			Candidates: func() []disco.Address { return nil },
+			Lookup:     func(context.Context, string) ([]string, error) { return nil, errors.New("not found") },
+			Signal: func(context.Context, string, []disco.Address) (disco.PeerCandidates, error) {
+				signals.Add(1)
+				return disco.PeerCandidates{
+					Candidates:    []disco.Address{{IP: "203.0.113.7", Port: 22000, Type: disco.AddressPublic}},
+					PunchAtMillis: time.Now().UnixMilli(),
+				}, nil
+			},
+			Probe: func(context.Context, []string) error { return nil },
+			Dial: func(context.Context, string, string) (netio.Conn, error) {
+				dials.Add(1)
+				return nil, errors.New("punch missed")
+			},
+		})
+		_, err := l.Connect(context.Background(), hi)
+		if !errors.Is(err, errPunchMissed) {
+			t.Fatalf("Connect err = %v, want errPunchMissed", err)
+		}
+		if got := signals.Load(); got != maxPunchAttempts {
+			t.Fatalf("signal rounds = %d, want %d (one re-signal per round)", got, maxPunchAttempts)
+		}
+		if got := dials.Load(); got != maxPunchAttempts {
+			t.Fatalf("dial attempts = %d, want %d", got, maxPunchAttempts)
+		}
+	})
 }
 
 func TestLadderHolepunchAcceptorProbesAndAwaitsInbound(t *testing.T) {

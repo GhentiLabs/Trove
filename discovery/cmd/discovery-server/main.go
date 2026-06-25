@@ -22,23 +22,26 @@ import (
 	"github.com/GhentiLabs/Trove/discovery/internal/httpapi"
 	"github.com/GhentiLabs/Trove/discovery/internal/registry"
 	"github.com/GhentiLabs/Trove/discovery/internal/signaling"
+	"github.com/GhentiLabs/Trove/discovery/internal/stun"
 	"github.com/GhentiLabs/Trove/pkg/discovery"
 	"github.com/GhentiLabs/Trove/pkg/identity"
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("component", "discovery-server")
-	if err := run(log); err != nil {
+	level := new(slog.LevelVar)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).With("component", "discovery-server")
+	if err := run(log, level); err != nil {
 		log.Error("discovery server exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger) error {
+func run(log *slog.Logger, level *slog.LevelVar) error {
 	cfg, err := config.Load(os.Args[1:], os.Getenv)
 	if err != nil {
 		return err
 	}
+	level.Set(cfg.SlogLevel())
 	if cfg.HealthCheck {
 		return healthCheck(cfg.MetricsListenAddr)
 	}
@@ -84,6 +87,7 @@ func run(log *slog.Logger) error {
 		WriteTimeout: cfg.WriteTimeout,
 		RatePerSec:   cfg.SignalRate.RPS,
 		RateBurst:    cfg.SignalRate.Burst,
+		Logger:       log,
 		Resolve: func(nodeID string) ([]discovery.Address, bool) {
 			e, ok := reg.Lookup(nodeID)
 			if !ok {
@@ -135,11 +139,28 @@ func run(log *slog.Logger) error {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
-	errCh := make(chan error, 2)
+	stunAddr, err := net.ResolveUDPAddr("udp", cfg.STUNListenAddr)
+	if err != nil {
+		return fmt.Errorf("resolve stun addr: %w", err)
+	}
+	stunConn, err := net.ListenUDP("udp", stunAddr)
+	if err != nil {
+		return fmt.Errorf("listen stun: %w", err)
+	}
+	stunSrv := stun.New(stun.Options{Conn: stunConn, Logger: log, RatePerSec: cfg.STUNRate.RPS, Burst: cfg.STUNRate.Burst})
+	defer func() { _ = stunSrv.Close() }()
+
+	errCh := make(chan error, 3)
 	go serve(log, "metrics", metricsSrv, errCh)
 	go func() {
 		log.Info("listening", "server", "public", "addr", public.Addr, "tls", "1.3")
 		if err := public.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	go func() {
+		log.Info("listening", "server", "stun", "addr", cfg.STUNListenAddr, "proto", "udp")
+		if err := stunSrv.Serve(); err != nil {
 			errCh <- err
 		}
 	}()

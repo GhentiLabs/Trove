@@ -56,8 +56,6 @@ func TestHandshakeReachesActiveAndIntersectsFolders(t *testing.T) {
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	// Each side grants the peer both of its folders; the shared set is the
-	// intersection of what each actually holds ("shared").
 	aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("shared", "only-a"),
 		Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "shared"}, {ShareID: "only-a"}}}}
 	bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("shared", "only-b"),
@@ -79,9 +77,8 @@ func TestHandshakeReachesActiveAndIntersectsFolders(t *testing.T) {
 			t.Fatalf("shared folders = %v, want [shared]", got)
 		}
 	}
-	// These sessions were never Run, so no peer is reading; tear down at the
-	// transport level rather than via Close, whose graceful frame would block on
-	// the unbuffered fake stream (a real QUIC stream buffers the write).
+	// Never Run, so no peer is reading; Close's graceful frame would block on the
+	// unbuffered fake stream. Tear down at the transport level instead.
 	_ = as.Conn().Close()
 	_ = bs.Conn().Close()
 }
@@ -91,9 +88,7 @@ func TestHandshakeOffersOnlyGrantedFolders(t *testing.T) {
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	// A holds folders fa and fb but grants peer B only fa. B holds both and offers
-	// both (claiming fb). A must not include fb in its shared set despite B offering
-	// it — per-peer authorization, not just share-id secrecy.
+	// B offers fb, but A granted B only fa, so A must not include fb.
 	aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("fa"),
 		Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "fa"}, {ShareID: "fb"}}}}
 	bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("fa", "fb"),
@@ -129,7 +124,6 @@ func TestHandshakeUnauthorizedNeverActive(t *testing.T) {
 	if as != nil {
 		t.Fatal("unauthorized peer must not yield a session")
 	}
-	// The rejected side closes the conn, so B must also terminate without a session.
 	if bs != nil || bErr == nil {
 		t.Fatalf("peer must fail cleanly when A rejects: bs=%v bErr=%v", bs, bErr)
 	}
@@ -189,8 +183,7 @@ func TestDuplicateNetworkConfigRejected(t *testing.T) {
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	// Manual peer: complete the handshake, then send a second NetworkConfig, which an
-	// Active session must reject (exactly-once invariant past the handshake).
+	// Manual peer: handshake, then send a second NetworkConfig the session must reject.
 	go func() {
 		ctrl, err := bc.AcceptStream(ctx)
 		if err != nil {
@@ -232,9 +225,8 @@ func TestRunReturnsErrorOnAbruptDrop(t *testing.T) {
 	go func() { bRun <- bs.Run(ctx) }()
 	go func() { _ = as.Run(ctx) }()
 
-	// Drop A's connection abruptly (no graceful Close). B must surface a read error,
-	// not a clean nil return.
-	_ = as.Conn().Close()
+	_ = as.Conn().Close() // abrupt drop, no graceful Close
+
 	select {
 	case err := <-bRun:
 		if err == nil {

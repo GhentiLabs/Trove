@@ -12,56 +12,41 @@ import (
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 )
 
-// ErrUnreachable is returned when every reachability tier fails. There is no relay
-// fallback; the peer simply cannot be reached right now.
+// ErrUnreachable is returned when every reachability tier fails.
 var ErrUnreachable = errors.New("peermgr: peer unreachable")
 
-// errAwaitInbound signals that this node is the holepunch acceptor: it has fired its
-// NAT-opening probe and the connection will arrive via the accept loop, so the dial
-// loop should back off rather than dial.
 var errAwaitInbound = errors.New("peermgr: awaiting inbound holepunch")
 
-// MaxPunchDelay bounds how far in the future a server-supplied punch time may be, so
-// an untrusted signaler cannot park a punch in a long sleep. Both the dialer (here)
-// and the acceptor (node) clamp to this single value so they stay in lockstep.
+var errPunchMissed = errors.New("peermgr: holepunch missed")
+
+// MaxPunchDelay bounds a server-supplied punch time.
 const MaxPunchDelay = 30 * time.Second
 
-// signalTimeout bounds the holepunch signal exchange so a slow or error-only server
-// response fails the attempt fast (the SignalError reply carries no target id and so
-// cannot be routed to the waiter) instead of blocking on the caller's context.
-const signalTimeout = 15 * time.Second
+const (
+	signalTimeout    = 15 * time.Second
+	dialTimeout      = 5 * time.Second
+	maxPunchAttempts = 4
+)
 
-// LadderConfig wires the reachability ladder from discovery and transport. The
-// network-touching operations are injected so the tier logic — including the
-// holepunch role decision — is testable; only real NAT traversal is left to the
-// live integration gate.
+// LadderConfig wires the reachability ladder from discovery and transport.
 type LadderConfig struct {
-	// Self is this node's id, deciding the holepunch dial/accept role.
-	Self string
-	// Cache holds each peer's last working address.
-	Cache *discovery.Cache
-	// Dial opens an authenticated connection to addr, pinned to nodeID.
-	Dial func(ctx context.Context, addr, nodeID string) (netio.Conn, error)
-	// Probe fires NAT-opening datagrams at addrs on the shared socket.
-	Probe func(ctx context.Context, addrs []string) error
-	// Lookup resolves a peer's candidate addresses via Trove.
-	Lookup func(ctx context.Context, nodeID string) ([]string, error)
-	// Signal brokers a holepunch, returning the peer's candidates and punch time.
-	Signal func(ctx context.Context, nodeID string, cands []disco.Address) (disco.PeerCandidates, error)
-	// Candidates returns this node's current advertised candidates.
+	Self       string
+	Cache      *discovery.Cache
+	Dial       func(ctx context.Context, addr, nodeID string) (netio.Conn, error)
+	Probe      func(ctx context.Context, addrs []string) error
+	Lookup     func(ctx context.Context, nodeID string) ([]string, error)
+	Signal     func(ctx context.Context, nodeID string, cands []disco.Address) (disco.PeerCandidates, error)
 	Candidates func() []disco.Address
-	// Logger receives ladder events; nil discards them.
-	Logger *slog.Logger
+	Logger     *slog.Logger
 }
 
-// Ladder resolves a node id to a live connection, cheapest path first: a cached or
-// mDNS-populated address, then a Trove lookup, then a holepunch.
+// Ladder resolves a node id to a live connection, cheapest path first.
 type Ladder struct {
 	cfg LadderConfig
 	log *slog.Logger
 }
 
-// NewLadder builds a Ladder. Its Connect method is the Manager's Connect.
+// NewLadder builds a Ladder.
 func NewLadder(cfg LadderConfig) *Ladder {
 	log := cfg.Logger
 	if log == nil {
@@ -74,6 +59,7 @@ func NewLadder(cfg LadderConfig) *Ladder {
 func (l *Ladder) Connect(ctx context.Context, nodeID string) (netio.Conn, error) {
 	if addr, ok := l.cfg.Cache.Get(nodeID); ok {
 		if c, err := l.cfg.Dial(ctx, addr, nodeID); err == nil {
+			l.log.Info("peermgr: connected", "peer", nodeID, "tier", "cache", "addr", addr)
 			return c, nil
 		}
 		l.cfg.Cache.Remove(nodeID)
@@ -81,7 +67,8 @@ func (l *Ladder) Connect(ctx context.Context, nodeID string) (netio.Conn, error)
 
 	if l.cfg.Lookup != nil {
 		if addrs, err := l.cfg.Lookup(ctx, nodeID); err == nil {
-			if c := l.dialAny(ctx, nodeID, addrs); c != nil {
+			l.log.Debug("peermgr: lookup ok", "peer", nodeID, "candidates", len(addrs))
+			if c := l.dialAny(ctx, nodeID, addrs, "lookup"); c != nil {
 				return c, nil
 			}
 		} else {
@@ -92,12 +79,18 @@ func (l *Ladder) Connect(ctx context.Context, nodeID string) (netio.Conn, error)
 	return l.holepunch(ctx, nodeID)
 }
 
-func (l *Ladder) dialAny(ctx context.Context, nodeID string, addrs []string) netio.Conn {
+func (l *Ladder) dialAny(ctx context.Context, nodeID string, addrs []string, tier string) netio.Conn {
 	for _, a := range addrs {
-		if c, err := l.cfg.Dial(ctx, a, nodeID); err == nil {
-			l.cfg.Cache.Put(nodeID, a)
-			return c
+		dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+		c, err := l.cfg.Dial(dctx, a, nodeID)
+		cancel()
+		if err != nil {
+			l.log.Debug("peermgr: dial failed", "peer", nodeID, "tier", tier, "addr", a, "err", err)
+			continue
 		}
+		l.cfg.Cache.Put(nodeID, a)
+		l.log.Info("peermgr: connected", "peer", nodeID, "tier", tier, "addr", a)
+		return c
 	}
 	return nil
 }
@@ -106,6 +99,30 @@ func (l *Ladder) holepunch(ctx context.Context, nodeID string) (netio.Conn, erro
 	if l.cfg.Signal == nil {
 		return nil, ErrUnreachable
 	}
+	if l.cfg.Self >= nodeID {
+		l.log.Info("peermgr: holepunch", "peer", nodeID, "role", "accept")
+		_, _ = l.punchRound(ctx, nodeID, false)
+		return nil, errAwaitInbound
+	}
+
+	l.log.Info("peermgr: holepunch", "peer", nodeID, "role", "dial")
+	for attempt := range maxPunchAttempts {
+		if c, err := l.punchRound(ctx, nodeID, true); c != nil {
+			return c, nil
+		} else if err != nil {
+			l.log.Debug("peermgr: punch round failed", "peer", nodeID, "attempt", attempt, "err", err)
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if attempt < maxPunchAttempts-1 && !sleep(ctx, holepunchRetry) {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, errPunchMissed
+}
+
+func (l *Ladder) punchRound(ctx context.Context, nodeID string, dial bool) (netio.Conn, error) {
 	sctx, cancel := context.WithTimeout(ctx, signalTimeout)
 	pc, err := l.cfg.Signal(sctx, nodeID, l.cfg.Candidates())
 	cancel()
@@ -121,26 +138,22 @@ func (l *Ladder) holepunch(ctx context.Context, nodeID string) (netio.Conn, erro
 		return nil, ctx.Err()
 	}
 
-	addrs := addrStrings(pc.Candidates)
+	addrs := routableAddrs(pc.Candidates)
+	if dial {
+		return l.dialAny(ctx, nodeID, addrs, "holepunch"), nil
+	}
 	if err := l.cfg.Probe(ctx, addrs); err != nil {
 		l.log.Debug("peermgr: probe failed", "peer", nodeID, "err", err)
 	}
-
-	// Deterministic role: the lexicographically smaller node id dials; the other
-	// has opened its NAT mapping with the probe and accepts the inbound connection.
-	if l.cfg.Self < nodeID {
-		if c := l.dialAny(ctx, nodeID, addrs); c != nil {
-			return c, nil
-		}
-		return nil, ErrUnreachable
-	}
-	return nil, errAwaitInbound
+	return nil, nil
 }
 
-func addrStrings(addrs []disco.Address) []string {
+func routableAddrs(addrs []disco.Address) []string {
 	out := make([]string, 0, len(addrs))
 	for _, a := range addrs {
-		out = append(out, a.String())
+		if a.Routable() {
+			out = append(out, a.String())
+		}
 	}
 	return out
 }

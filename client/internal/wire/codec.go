@@ -22,9 +22,7 @@ const (
 	TypeClose MessageType = 3
 )
 
-// WriteMessage frames m as uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body. The
-// body is protobuf, compressed when that is smaller; the Header records the type
-// and codec so a peer routes and decompresses without parsing the body.
+// WriteMessage frames m as uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body.
 func WriteMessage(w io.Writer, m proto.Message) error {
 	t, ok := typeOf(m)
 	if !ok {
@@ -34,9 +32,6 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 	if err != nil {
 		return fmt.Errorf("wire: marshal body: %w", err)
 	}
-	// Bound the plaintext, not just the compressed payload: the reader caps decoded
-	// size at MaxMessageSize, so an oversize-but-compressible body would frame here
-	// yet be unreadable by any conforming peer. Reject it on the writing side.
 	if len(body) > MaxMessageSize {
 		return ErrMessageTooLarge
 	}
@@ -64,8 +59,6 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 	if _, err := w.Write(mlen[:]); err != nil {
 		return fmt.Errorf("wire: write length: %w", err)
 	}
-	// A zero-length body needs no write; the reader skips a zero-length read in
-	// kind, so writing one would stall a synchronous stream (e.g. an empty Ping).
 	if len(payload) == 0 {
 		return nil
 	}
@@ -75,9 +68,7 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 	return nil
 }
 
-// ReadMessage reads one post-Hello frame, returning its type and decoded body. It
-// returns ErrMessageTooLarge before allocating for an oversize frame and
-// ErrUnknownType for an unregistered type.
+// ReadMessage reads one post-Hello frame, returning its type and decoded body.
 func ReadMessage(r io.Reader) (MessageType, proto.Message, error) {
 	var prefix [2]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {

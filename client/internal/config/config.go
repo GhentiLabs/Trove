@@ -1,7 +1,6 @@
-// Package config is the client's persisted, versioned configuration, stored in
-// its own SQLite database so it never contends with the high-churn chunk index.
-// It holds this node's identity reference and the registry of synced folders,
-// including each encrypted folder's master key. All mutations are transactional.
+// Package config is the client's persisted, versioned configuration in its own
+// SQLite database, holding this node's identity reference and the registry of synced
+// folders (with each encrypted folder's master key). All mutations are transactional.
 package config
 
 import (
@@ -37,8 +36,7 @@ var (
 	ErrFolderExists = errors.New("config: folder already exists")
 	// ErrNoKey is returned when a folder has no master key set.
 	ErrNoKey = errors.New("config: folder has no master key")
-	// ErrKeyExists is returned when minting a key for a folder that already has
-	// one; overwriting it would orphan any data encrypted under the old key.
+	// ErrKeyExists is returned when minting a key for a folder that already has one.
 	ErrKeyExists = errors.New("config: folder already has a key")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
 	ErrSchemaTooNew = errors.New("config: database schema newer than this binary")
@@ -50,8 +48,8 @@ var (
 	ErrPeerNotFound = errors.New("config: peer not found")
 	// ErrInvalidNodeID is returned when a peer node id is not a valid fingerprint.
 	ErrInvalidNodeID = errors.New("config: invalid node id")
-	// ErrUnknownShareID is returned when authorizing a peer for a shared folder id
-	// that no local folder carries; it also rejects the empty share id.
+	// ErrUnknownShareID is returned when authorizing a peer for a shared folder id that
+	// no local folder carries (the empty share id included).
 	ErrUnknownShareID = errors.New("config: unknown shared folder id")
 )
 
@@ -88,8 +86,8 @@ type Folder struct {
 	ID        string
 	Root      string
 	Encrypted bool
-	// ShareID is the cross-node match key agreed at pairing, distinct from the
-	// local ID and from the encryption key. Empty until the folder is paired.
+	// ShareID is the cross-node match key agreed at pairing, distinct from ID and the
+	// encryption key. Empty until the folder is paired.
 	ShareID string
 }
 
@@ -101,10 +99,8 @@ type Store struct {
 
 // Options configures Open.
 type Options struct {
-	// DB is the opened config database.
 	DB *storage.DB
-	// NodeID is this node's identity, e.g. from identity.FingerprintCert. It is
-	// persisted on first open and verified on every subsequent open.
+	// NodeID is persisted on first open and verified on every subsequent open.
 	NodeID string
 }
 
@@ -166,8 +162,7 @@ func checkVersion(ctx context.Context, tx *storage.Tx) error {
 }
 
 // migrate upgrades an older config database to SchemaVersion in place. The schema
-// statement above already creates any wholly new tables (peers, peer_folders);
-// migrate only alters pre-existing tables.
+// statement already creates wholly new tables; migrate only alters existing ones.
 func migrate(ctx context.Context, tx *storage.Tx, from int) error {
 	if from < 2 {
 		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN share_id TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -266,8 +261,7 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 }
 
 // pruneOrphanGrants drops peer_folders rows whose shared folder id is no longer
-// backed by any local folder, keeping the peer registry consistent when a folder's
-// share id is rotated or the folder is removed.
+// backed by any local folder.
 func pruneOrphanGrants(ctx context.Context, tx *storage.Tx) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM peer_folders WHERE folder_id NOT IN (SELECT share_id FROM folders WHERE share_id != '')`); err != nil {
 		return fmt.Errorf("config: prune peer folders: %w", err)
@@ -310,8 +304,8 @@ func (s *Store) DeriveFolderKey(ctx context.Context, id, passphrase string) ([Ma
 	return key, nil
 }
 
-// setKeyIfAbsent writes a key only if the folder exists and has none, checking
-// and writing in one transaction so concurrent callers cannot both succeed.
+// setKeyIfAbsent writes a key only if the folder exists and has none, in one
+// transaction so concurrent callers cannot both succeed.
 func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte, t, m, p *int64) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		var existing []byte

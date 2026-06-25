@@ -3,81 +3,89 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"time"
 
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 	nat "github.com/fd/go-nat"
 )
 
-// mappingTTL is how long a requested external port mapping should live before the
-// gateway may reclaim it; the daemon refreshes well before this.
 const mappingTTL = time.Hour
 
-// PortMap is an active UPnP/NAT-PMP external port mapping. Release removes it.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// PortMap is an active UPnP/NAT-PMP external port mapping.
 type PortMap struct {
 	nat      nat.NAT
 	internal int
-	// External is the mapped external candidate to advertise.
 	External disco.Address
 }
 
-// MapPort discovers a UPnP/NAT-PMP gateway and maps an external UDP port to
-// internalPort, returning an external candidate. It is best-effort: networks
-// without a supporting gateway (or behind CGNAT) return an error the caller is
-// expected to ignore and fall back to holepunching. Gateway discovery is bounded by
-// ctx; if ctx fires first, the discovery goroutine runs on for up to the library's
-// own ~10s timeout before exiting.
+// MapPort maps an external UDP port to internalPort via UPnP/NAT-PMP. Best-effort.
 func MapPort(ctx context.Context, internalPort int) (*PortMap, error) {
 	type result struct {
-		gw  nat.NAT
+		pm  *PortMap
 		err error
 	}
 	ch := make(chan result, 1)
 	go func() {
 		gw, err := nat.DiscoverGateway()
-		ch <- result{gw, err}
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("discovery: no nat gateway: %w", err)}
+			return
+		}
+		ext, err := gw.GetExternalAddress()
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("discovery: external address: %w", err)}
+			return
+		}
+		if !publiclyRoutable(ext) {
+			ch <- result{nil, fmt.Errorf("discovery: external address %s is not publicly routable", ext)}
+			return
+		}
+		extPort, err := gw.AddPortMapping("udp", internalPort, "trove", mappingTTL)
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("discovery: add port mapping: %w", err)}
+			return
+		}
+		ch <- result{&PortMap{
+			nat:      gw,
+			internal: internalPort,
+			External: disco.Address{IP: ext.String(), Port: extPort, Type: disco.AddressPublic},
+		}, nil}
 	}()
 
-	var gw nat.NAT
 	select {
 	case r := <-ch:
-		if r.err != nil {
-			return nil, fmt.Errorf("discovery: no nat gateway: %w", r.err)
-		}
-		gw = r.gw
+		return r.pm, r.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-
-	ext, err := gw.GetExternalAddress()
-	if err != nil {
-		return nil, fmt.Errorf("discovery: external address: %w", err)
-	}
-	if ext.IsPrivate() || ext.IsLoopback() || ext.IsUnspecified() {
-		// Double-NAT / CGNAT: the gateway's WAN address is not Internet-routable, so
-		// advertising it as a public candidate would only mislead remote peers.
-		return nil, fmt.Errorf("discovery: external address %s is not publicly routable", ext)
-	}
-	extPort, err := gw.AddPortMapping("udp", internalPort, "trove", mappingTTL)
-	if err != nil {
-		return nil, fmt.Errorf("discovery: add port mapping: %w", err)
-	}
-	return &PortMap{
-		nat:      gw,
-		internal: internalPort,
-		External: disco.Address{IP: ext.String(), Port: extPort, Type: disco.AddressPublic},
-	}, nil
 }
 
-// Refresh renews the mapping's lease so it does not lapse after mappingTTL. The
-// daemon calls this on an interval well below mappingTTL.
-func (m *PortMap) Refresh() error {
-	extPort, err := m.nat.AddPortMapping("udp", m.internal, "trove", mappingTTL)
-	if err != nil {
-		return fmt.Errorf("discovery: refresh port mapping: %w", err)
+// Refresh renews the mapping's lease, bounded by ctx.
+func (m *PortMap) Refresh(ctx context.Context) error {
+	type result struct {
+		port int
+		err  error
 	}
-	m.External.Port = extPort
-	return nil
+	ch := make(chan result, 1)
+	go func() {
+		port, err := m.nat.AddPortMapping("udp", m.internal, "trove", mappingTTL)
+		ch <- result{port, err}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return fmt.Errorf("discovery: refresh port mapping: %w", r.err)
+		}
+		m.External.Port = r.port
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Release removes the port mapping from the gateway.
@@ -86,4 +94,13 @@ func (m *PortMap) Release() error {
 		return fmt.Errorf("discovery: delete port mapping: %w", err)
 	}
 	return nil
+}
+
+func publiclyRoutable(ip net.IP) bool {
+	return !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !isCGNAT(ip)
+}
+
+func isCGNAT(ip net.IP) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	return ok && cgnat.Contains(a.Unmap())
 }

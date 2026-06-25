@@ -1,8 +1,4 @@
-// Package node composes the M3 networking stack into one runnable peer: it binds a
-// QUIC transport, talks to Trove (announce/lookup/signal), advertises and browses
-// the LAN over mDNS, maps a port via UPnP, and runs the connection manager over the
-// reachability ladder. It is the thin integration layer the live two-machine
-// acceptance gate drives; the daemon control surface (L10) is out of M3 scope.
+// Package node composes the networking stack into one runnable peer.
 package node
 
 import (
@@ -12,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -26,40 +21,38 @@ import (
 )
 
 const (
-	announceTTL      = 10 * time.Minute
-	announceInterval = 5 * time.Minute
-	gatherTimeout    = 5 * time.Second
-	// maxInboundPunches bounds concurrent inbound holepunch probes so an untrusted
-	// signaler streaming requests cannot exhaust goroutines.
-	maxInboundPunches = 32
+	announceTTL           = 10 * time.Minute
+	announceInterval      = 5 * time.Minute
+	gatherTimeout         = 5 * time.Second
+	stunKeepaliveInterval = 20 * time.Second
+	maxInboundPunches     = 32
 )
 
 // Options configures a Service.
 type Options struct {
-	// Cert and NodeID are this node's identity (from pkg/identity).
-	Cert   tls.Certificate
-	NodeID string
-	// Config is the opened config store (peer registry + folders).
-	Config *config.Store
-	// TroveURL is the trove://host:port?id=<fp> discovery server string.
+	Cert     tls.Certificate
+	NodeID   string
+	Config   *config.Store
 	TroveURL string
-	// UDPAddr is the local QUIC bind address, e.g. "0.0.0.0:0".
-	UDPAddr string
-	// Logger receives node events; nil discards them.
-	Logger *slog.Logger
+	UDPAddr  string
+	Logger   *slog.Logger
 }
 
 // Service is a composed, runnable Trove peer.
 type Service struct {
-	opts   Options
-	log    *slog.Logger
-	tr     *transport.Transport
-	client *discovery.Client
-	cache  *discovery.Cache
+	opts     Options
+	log      *slog.Logger
+	tr       *transport.Transport
+	client   *discovery.Client
+	cache    *discovery.Cache
+	stunAddr string
 
-	mu      sync.Mutex
-	cands   []disco.Address
-	portMap *discovery.PortMap
+	gatherMu sync.Mutex
+
+	mu        sync.Mutex
+	cands     []disco.Address
+	reflexive disco.Address
+	portMap   *discovery.PortMap
 }
 
 // New binds the transport and builds the discovery client. Call Run to start.
@@ -77,11 +70,17 @@ func New(opts Options) (*Service, error) {
 		_ = tr.Close()
 		return nil, err
 	}
-	return &Service{opts: opts, log: log, tr: tr, client: client, cache: discovery.NewCache()}, nil
+	return &Service{
+		opts:     opts,
+		log:      log,
+		tr:       tr,
+		client:   client,
+		cache:    discovery.NewCache(),
+		stunAddr: client.ServerAddr(),
+	}, nil
 }
 
-// Run starts discovery, advertising, and the connection manager, blocking until ctx
-// is cancelled.
+// Run starts discovery, advertising, and the connection manager until ctx is cancelled.
 func (s *Service) Run(ctx context.Context) error {
 	defer s.close()
 
@@ -100,8 +99,6 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("node: signal: %w", err)
 	}
-	// Close the signaler before s.close() (LIFO defer order): stopping new inbound
-	// requests first ensures no punchInbound calls Probe on a closed transport.
 	defer func() { _ = sig.Close() }()
 
 	mdns, err := discovery.Advertise(s.opts.NodeID, s.port())
@@ -137,8 +134,11 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
+	s.log.Info("node: started", "node_id", s.opts.NodeID, "listen", s.tr.LocalAddr().String(), "peers", len(peers))
+
 	var wg sync.WaitGroup
 	wg.Go(func() { s.announceLoop(ctx) })
+	wg.Go(func() { s.stunKeepaliveLoop(ctx) })
 	wg.Go(func() { s.browseLoop(ctx) })
 	wg.Go(func() { s.incomingLoop(ctx, sig, &wg) })
 	wg.Go(func() { _ = mgr.Run(ctx) })
@@ -146,7 +146,6 @@ func (s *Service) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// announceLoop refreshes this node's registration before its TTL lapses.
 func (s *Service) announceLoop(ctx context.Context) {
 	t := time.NewTicker(announceInterval)
 	defer t.Stop()
@@ -160,17 +159,13 @@ func (s *Service) announceLoop(ctx context.Context) {
 	}
 }
 
-// browseLoop feeds mDNS-discovered LAN peers into the address cache so the ladder's
-// first tier reaches them without Trove.
 func (s *Service) browseLoop(ctx context.Context) {
 	for peer := range discovery.BrowseLAN(ctx, s.opts.NodeID) {
 		s.cache.Put(peer.NodeID, peer.Addr)
+		s.log.Debug("node: mdns peer", "peer", peer.NodeID, "addr", peer.Addr)
 	}
 }
 
-// incomingLoop opens this node's NAT mapping when a peer punches toward it, so the
-// peer's simultaneous dial reaches the accept loop. Each probe is tracked in wg so
-// Run does not close the transport while a punchInbound is still using it.
 func (s *Service) incomingLoop(ctx context.Context, sig *discovery.Signaler, wg *sync.WaitGroup) {
 	sem := make(chan struct{}, maxInboundPunches)
 	for {
@@ -208,54 +203,117 @@ func (s *Service) punchInbound(ctx context.Context, ir disco.IncomingRequest) {
 	for _, a := range ir.Candidates {
 		addrs = append(addrs, a.String())
 	}
+	s.log.Debug("node: inbound punch probe", "from", ir.FromNodeID, "addrs", addrs)
 	if err := s.tr.Probe(ctx, addrs); err != nil {
 		s.log.Debug("node: inbound probe failed", "from", ir.FromNodeID, "err", err)
 	}
 }
 
-// gather rebuilds the candidate set: local interface addresses, the Trove-observed
-// external address, and a UPnP/NAT-PMP mapping (best-effort). It is called serially
-// (once at startup, then from announceLoop's ticker), so a plain assign under the
-// lock suffices. The mapping is created once and its lease renewed each time so it
-// does not lapse after mappingTTL.
 func (s *Service) gather(ctx context.Context) {
-	gctx, cancel := context.WithTimeout(ctx, gatherTimeout)
-	defer cancel()
+	s.gatherMu.Lock()
+	defer s.gatherMu.Unlock()
 
 	cands, err := discovery.LocalCandidates(s.port())
 	if err != nil {
 		s.log.Warn("node: local candidates", "err", err)
 	}
-	if resp, err := s.client.Announce(gctx, cands, announceTTL); err == nil {
-		if obs := observedAddress(resp.ObservedAddr); obs != nil {
-			cands = append(cands, *obs)
-		}
-	} else {
-		s.log.Warn("node: announce", "err", err)
+
+	ref, refOK := s.reflexiveCandidate(ctx)
+	if refOK {
+		cands = append(cands, ref)
 	}
 
-	if s.portMap == nil {
-		if pm, err := discovery.MapPort(gctx, s.port()); err == nil {
-			s.mu.Lock()
-			s.portMap = pm
-			s.mu.Unlock()
-		}
-	} else if err := s.portMap.Refresh(); err != nil {
-		s.log.Warn("node: upnp refresh", "err", err)
-	}
-	if s.portMap != nil {
-		cands = append(cands, s.portMap.External)
+	cands = append(cands, s.mapPort(ctx)...)
+
+	actx, cancel := context.WithTimeout(ctx, gatherTimeout)
+	_, err = s.client.Announce(actx, cands, announceTTL)
+	cancel()
+	if err != nil {
+		s.log.Warn("node: announce", "err", err)
 	}
 
 	s.mu.Lock()
 	s.cands = cands
+	if refOK {
+		s.reflexive = ref
+	}
 	s.mu.Unlock()
+	s.log.Debug("node: candidates gathered", "count", len(cands), "reflexive", refOK)
+}
+
+func (s *Service) mapPort(ctx context.Context) []disco.Address {
+	if s.portMap == nil {
+		mctx, cancel := context.WithTimeout(ctx, gatherTimeout)
+		pm, err := discovery.MapPort(mctx, s.port())
+		cancel()
+		if err == nil {
+			s.mu.Lock()
+			s.portMap = pm
+			s.mu.Unlock()
+		}
+	} else {
+		rctx, cancel := context.WithTimeout(ctx, gatherTimeout)
+		err := s.portMap.Refresh(rctx)
+		cancel()
+		if err != nil {
+			s.log.Warn("node: upnp refresh", "err", err)
+		}
+	}
+	if s.portMap != nil {
+		return []disco.Address{s.portMap.External}
+	}
+	return nil
+}
+
+func (s *Service) reflexiveCandidate(ctx context.Context) (disco.Address, bool) {
+	if s.stunAddr == "" {
+		return disco.Address{}, false
+	}
+	rctx, cancel := context.WithTimeout(ctx, gatherTimeout)
+	defer cancel()
+	ap, err := s.tr.Reflexive(rctx, s.stunAddr)
+	if err != nil {
+		s.log.Debug("node: stun reflexive", "err", err)
+		return disco.Address{}, false
+	}
+	a := disco.Address{IP: ap.Addr().Unmap().String(), Port: int(ap.Port()), Type: disco.AddressSTUN}
+	if a.Validate() != nil {
+		return disco.Address{}, false
+	}
+	s.log.Debug("node: reflexive", "addr", a.String(), "local_port", s.port())
+	return a, true
+}
+
+func (s *Service) stunKeepaliveLoop(ctx context.Context) {
+	if s.stunAddr == "" {
+		return
+	}
+	t := time.NewTicker(stunKeepaliveInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			ref, ok := s.reflexiveCandidate(ctx)
+			if !ok {
+				continue
+			}
+			s.mu.Lock()
+			changed := s.reflexive != ref
+			s.mu.Unlock()
+			if changed {
+				s.log.Debug("node: reflexive address changed, re-announcing", "addr", ref.String())
+				s.gather(ctx)
+			}
+		}
+	}
 }
 
 func (s *Service) candidates() []disco.Address {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cands
+	return append([]disco.Address(nil), s.cands...)
 }
 
 func (s *Service) lookup(ctx context.Context, nodeID string) ([]string, error) {
@@ -263,9 +321,13 @@ func (s *Service) lookup(ctx context.Context, nodeID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	local := localSubnets()
 	out := make([]string, 0, len(resp.Addresses))
 	for _, a := range resp.Addresses {
-		if a.Validate() != nil { // reject non-routable addresses, like the signal path
+		if a.Type == disco.AddressSTUN {
+			continue
+		}
+		if a.Validate() != nil || !dialable(a, local) {
 			continue
 		}
 		out = append(out, a.String())
@@ -273,8 +335,36 @@ func (s *Service) lookup(ctx context.Context, nodeID string) ([]string, error) {
 	return out, nil
 }
 
-// authorize gates a peer and returns the shared folder ids granted to it from the
-// peer registry, so the session offers only those folders to that peer.
+func dialable(a disco.Address, local []*net.IPNet) bool {
+	ip := net.ParseIP(a.IP)
+	if ip == nil {
+		return false
+	}
+	if !ip.IsPrivate() {
+		return true
+	}
+	for _, n := range local {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func localSubnets() []*net.IPNet {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]*net.IPNet, 0, len(addrs))
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func (s *Service) authorize(nodeID string) ([]string, bool, error) {
 	peer, err := s.opts.Config.GetPeer(context.Background(), nodeID)
 	switch {
@@ -333,27 +423,6 @@ func (s *Service) close() {
 
 func isNotFound(err error) bool {
 	return errors.Is(err, config.ErrPeerNotFound)
-}
-
-func observedAddress(addr string) *disco.Address {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil
-	}
-	// The server-observed source is a STUN-like reflexive address. Skip it when it is
-	// private (the server shares our LAN): LocalCandidates already advertises that.
-	if ip := net.ParseIP(host); ip == nil || ip.IsPrivate() {
-		return nil
-	}
-	a := disco.Address{IP: host, Port: port, Type: disco.AddressSTUN}
-	if a.Validate() != nil {
-		return nil
-	}
-	return &a
 }
 
 var _ netio.Transport = (*transport.Transport)(nil)

@@ -8,6 +8,7 @@ package signaling
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/GhentiLabs/Trove/pkg/discovery"
@@ -58,6 +59,8 @@ type Options struct {
 	// requester where to reach the target. Required.
 	Resolve func(nodeID string) ([]discovery.Address, bool)
 	Metrics Metrics
+	// Logger receives signaling events; nil discards them.
+	Logger *slog.Logger
 }
 
 // Broker tracks live signaling connections and routes control messages.
@@ -66,6 +69,7 @@ type Broker struct {
 	opts    Options
 	clock   func() time.Time
 	metrics Metrics
+	log     *slog.Logger
 }
 
 // New constructs a Broker.
@@ -76,11 +80,16 @@ func New(opts Options) *Broker {
 	if opts.SendBuffer <= 0 {
 		opts.SendBuffer = 16
 	}
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return &Broker{
 		conns:   newConnSet(),
 		opts:    opts,
 		clock:   opts.Clock,
 		metrics: opts.Metrics,
+		log:     log,
 	}
 }
 
@@ -105,12 +114,15 @@ func (b *Broker) Serve(ctx context.Context, ws wsConn, nodeID string) error {
 	if old != nil {
 		old.close()
 		b.metrics.active(-1)
+		b.log.Debug("signaling: replaced stale connection", "node", nodeID)
 	}
 	b.metrics.active(1)
+	b.log.Info("signaling: connected", "node", nodeID, "active", b.conns.len())
 	defer func() {
 		if b.conns.remove(c) {
 			b.metrics.active(-1)
 		}
+		b.log.Debug("signaling: disconnected", "node", nodeID)
 	}()
 
 	go c.writePump(ctx, b.opts.PingInterval, b.opts.WriteTimeout)
@@ -142,6 +154,7 @@ func (b *Broker) route(from *conn, req discovery.ConnectRequest) {
 
 	target, ok := b.conns.get(req.TargetNodeID)
 	if !ok || target == from {
+		b.log.Debug("signaling: target unavailable", "from", from.nodeID, "target", req.TargetNodeID)
 		b.notifyUnavailable(from, req.TargetNodeID)
 		return
 	}
@@ -172,6 +185,8 @@ func (b *Broker) route(from *conn, req discovery.ConnectRequest) {
 		return
 	}
 	b.metrics.match(true)
+	b.log.Info("signaling: holepunch brokered", "from", from.nodeID, "target", req.TargetNodeID,
+		"candidates", len(req.MyCandidates), "punch_at_ms", punchAt)
 }
 
 func (b *Broker) notifyUnavailable(from *conn, targetNodeID string) {

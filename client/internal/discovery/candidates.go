@@ -7,11 +7,7 @@ import (
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 )
 
-// LocalCandidates returns this node's routable interface addresses at port, tagged
-// LAN for private (RFC 1918 / ULA) addresses and Public for globally routable ones.
-// Loopback, link-local, multicast, and unspecified addresses are excluded — they
-// are never valid peer candidates. These are the cheapest reachability tier and the
-// base set extended by the server-observed address (announce) and UPnP.
+// LocalCandidates returns this node's routable interface addresses at port.
 func LocalCandidates(port int) ([]disco.Address, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -36,7 +32,7 @@ func LocalCandidates(port int) ([]disco.Address, error) {
 				continue
 			}
 			typ := disco.AddressPublic
-			if ip.IsPrivate() {
+			if ip.IsPrivate() || isCGNAT(ip) {
 				typ = disco.AddressLAN
 			}
 			out = append(out, disco.Address{IP: ip.String(), Port: port, Type: typ})

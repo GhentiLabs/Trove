@@ -34,7 +34,7 @@ type harness struct {
 	wsURL     string
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, tweaks ...func(*config.Config)) *harness {
 	t.Helper()
 	cfg, err := config.Load(nil, func(string) string { return "" })
 	if err != nil {
@@ -43,6 +43,9 @@ func newHarness(t *testing.T) *harness {
 	cfg.AnalyticsDBPath = filepath.Join(t.TempDir(), "a.db")
 	high := config.RateLimit{RPS: 1e6, Burst: 1e6}
 	cfg.AnnounceRate, cfg.LookupRate, cfg.AnalyticsRate, cfg.SignalRate = high, high, high, high
+	for _, tw := range tweaks {
+		tw(cfg)
+	}
 
 	reg := registry.New(registry.Options{MaxEntries: cfg.RegistryMaxEntries, MaxAddrsPerNode: cfg.RegistryMaxAddrsPerNode})
 	t.Cleanup(reg.Close)
@@ -83,6 +86,11 @@ func newHarness(t *testing.T) *harness {
 	}
 	ts := httptest.NewUnstartedServer(srv.Handler())
 	ts.TLS = identity.ServerTLSConfig(serverCert)
+	// Mirror production's http.Server deadlines so tests see the same socket-timeout
+	// behavior the real listener imposes (main.go), not httptest's no-timeout default.
+	ts.Config.ReadTimeout = cfg.ReadTimeout
+	ts.Config.WriteTimeout = cfg.WriteTimeout
+	ts.Config.IdleTimeout = cfg.IdleTimeout
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
 
@@ -328,6 +336,34 @@ func TestSignalingExchange(t *testing.T) {
 
 	writeSignal(t, connA, discovery.SignalConnectRequest, discovery.ConnectRequest{TargetNodeID: strings.Repeat("a", identity.NodeIDLen)})
 	readSignal(t, connA, discovery.SignalTargetUnavailable, nil)
+}
+
+// TestSignalingSurvivesWriteTimeout guards the long-lived signaling WebSocket
+// against the http.Server's WriteTimeout: brokering must keep working long after
+// the timeout would have elapsed for a normal request. (It holds because hijacking
+// the connection clears the inherited socket deadlines; this test locks that in.)
+func TestSignalingSurvivesWriteTimeout(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.WriteTimeout = 300 * time.Millisecond })
+	certA, _ := genClient(t)
+	certB, idB := genClient(t)
+	h.announce(t, certB, []discovery.Address{{IP: "203.0.113.9", Port: 5000, Type: discovery.AddressPublic}})
+
+	connA := dialSignal(t, h, certA)
+	defer connA.CloseNow()
+	connB := dialSignal(t, h, certB)
+	defer connB.CloseNow()
+	waitActive(t, h.broker, 2)
+
+	// Hold both connections idle well past the server's WriteTimeout.
+	time.Sleep(700 * time.Millisecond)
+
+	// Brokering must still deliver in both directions after the timeout elapsed.
+	writeSignal(t, connA, discovery.SignalConnectRequest, discovery.ConnectRequest{
+		TargetNodeID: idB,
+		MyCandidates: []discovery.Address{{IP: "198.51.100.1", Port: 4000, Type: discovery.AddressPublic}},
+	})
+	readSignal(t, connB, discovery.SignalIncomingRequest, nil)
+	readSignal(t, connA, discovery.SignalPeerCandidates, nil)
 }
 
 func TestHealthHandler(t *testing.T) {

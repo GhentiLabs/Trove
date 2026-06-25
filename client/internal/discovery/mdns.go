@@ -12,22 +12,18 @@ import (
 )
 
 const (
-	mdnsService = "_trove._udp"
-	mdnsDomain  = "local."
-	// mdnsShutdownTimeout bounds Close: zeroconf's Shutdown sends a goodbye over an
-	// undeadlined multicast write that can hang on a constrained interface, so we
-	// never let it stall daemon teardown. Peers expire the stale entry via its TTL.
+	mdnsService         = "_trove._udp"
+	mdnsDomain          = "local."
 	mdnsShutdownTimeout = 2 * time.Second
 )
 
 // LANPeer is a Trove peer discovered on the local network via mDNS.
 type LANPeer struct {
 	NodeID string
-	Addr   string // ip:port
+	Addr   string
 }
 
-// MDNS advertises this node as a Trove service instance on the LAN so peers can
-// find it without Trove. It is the cheapest reachability tier.
+// MDNS advertises this node as a Trove service instance on the LAN.
 type MDNS struct {
 	server *zeroconf.Server
 }
@@ -41,8 +37,7 @@ func Advertise(nodeID string, port int) (*MDNS, error) {
 	return &MDNS{server: srv}, nil
 }
 
-// Close withdraws the advertisement, bounded so a hung multicast write cannot stall
-// daemon teardown.
+// Close withdraws the advertisement, bounded by mdnsShutdownTimeout.
 func (m *MDNS) Close() {
 	if m.server == nil {
 		return
@@ -58,9 +53,7 @@ func (m *MDNS) Close() {
 	}
 }
 
-// BrowseLAN delivers Trove peers seen on the local network until ctx is cancelled,
-// excluding self. The returned channel closes when browsing stops. mDNS is
-// best-effort: a multicast setup failure simply yields no peers.
+// BrowseLAN delivers Trove peers seen on the local network until ctx is cancelled.
 func BrowseLAN(ctx context.Context, self string) <-chan LANPeer {
 	entries := make(chan *zeroconf.ServiceEntry, incomingBuffer)
 	out := make(chan LANPeer, incomingBuffer)
@@ -94,8 +87,6 @@ func BrowseLAN(ctx context.Context, self string) <-chan LANPeer {
 	return out
 }
 
-// mdnsHost returns the entry's host address, preferring IPv4 but falling back to
-// IPv6 so an IPv6-only LAN peer is still reachable.
 func mdnsHost(e *zeroconf.ServiceEntry) string {
 	if len(e.AddrIPv4) > 0 {
 		return e.AddrIPv4[0].String()

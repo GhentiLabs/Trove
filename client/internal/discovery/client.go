@@ -1,7 +1,4 @@
-// Package discovery is the daemon-side client of the Trove discovery server: it
-// announces this node's candidate addresses, looks up peers, and brokers holepunch
-// signaling, all over the existing mTLS+pinning path (pkg/identity, pkg/discovery).
-// Trove only ever learns node_id -> addresses; never folder ids or membership.
+// Package discovery is the client of the Trove discovery server.
 package discovery
 
 import (
@@ -23,26 +20,21 @@ import (
 
 const httpTimeout = 10 * time.Second
 
-// ErrPeerNotFound is returned by Lookup when the target node has no active Trove
-// registration. It is distinct from a transport/server error so the reachability
-// ladder can fall back to signaling rather than backing off.
+// ErrPeerNotFound is returned by Lookup when the target node has no registration.
 var ErrPeerNotFound = errors.New("discovery: peer not found")
 
 // Options configures New.
 type Options struct {
-	// Server is the trove://host:port?id=<fingerprint> connection string.
 	Server string
-	// Cert is this node's identity certificate, presented over mTLS.
-	Cert tls.Certificate
-	// Logger receives client events; nil discards them.
+	Cert   tls.Certificate
 	Logger *slog.Logger
 }
 
 // Client talks to one Trove discovery server.
 type Client struct {
-	base string // https://host:port
-	addr string // host:port
-	pin  string // server SPKI fingerprint
+	base string
+	addr string
+	pin  string
 	cert tls.Certificate
 	http *http.Client
 	log  *slog.Logger
@@ -71,8 +63,7 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
-// Announce publishes this node's candidate addresses and returns the registration,
-// including the server-observed source address (a STUN-like external candidate).
+// Announce publishes this node's candidate addresses and returns the registration.
 func (c *Client) Announce(ctx context.Context, addrs []disco.Address, ttl time.Duration) (disco.AnnounceResponse, error) {
 	var resp disco.AnnounceResponse
 	req := disco.AnnounceRequest{Addresses: addrs, RequestedTTLSecs: int(ttl.Seconds())}
@@ -81,6 +72,9 @@ func (c *Client) Announce(ctx context.Context, addrs []disco.Address, ttl time.D
 	}
 	return resp, nil
 }
+
+// ServerAddr is the discovery server's host:port, also the STUN probe target.
+func (c *Client) ServerAddr() string { return c.addr }
 
 // Lookup resolves a peer's current candidate addresses by node id.
 func (c *Client) Lookup(ctx context.Context, nodeID string) (disco.LookupResponse, error) {
@@ -129,8 +123,6 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	return nil
 }
 
-// parseTroveURL splits a trove://host:port?id=<fingerprint> string into the
-// host:port and the pinned server fingerprint.
 func parseTroveURL(s string) (addr, pin string, err error) {
 	u, err := url.Parse(s)
 	if err != nil {

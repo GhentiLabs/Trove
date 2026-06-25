@@ -2,8 +2,7 @@ package discovery
 
 import "sync"
 
-// Cache remembers each peer's last working address so a reconnect can dial it
-// directly and skip a Trove lookup. It is safe for concurrent use.
+// Cache remembers each peer's last working address. It is safe for concurrent use.
 type Cache struct {
 	mu sync.RWMutex
 	m  map[string]string
@@ -29,7 +28,7 @@ func (c *Cache) Put(nodeID, addr string) {
 	c.m[nodeID] = addr
 }
 
-// Remove forgets nodeID's cached address, e.g. after a dial to it fails.
+// Remove forgets nodeID's cached address.
 func (c *Cache) Remove(nodeID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

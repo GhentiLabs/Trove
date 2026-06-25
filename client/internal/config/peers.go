@@ -11,18 +11,14 @@ import (
 	"github.com/GhentiLabs/Trove/pkg/identity"
 )
 
-// Peer is an authorized remote node identified by its node ID. Folders holds the
-// shared folder ids it participates in.
+// Peer is an authorized remote node and the shared folder ids it participates in.
 type Peer struct {
 	NodeID  string
 	Name    string
 	Folders []string
 }
 
-// AddPeer authorizes a peer. Every entry in Folders must name a shared folder id
-// that a local folder already carries. It returns ErrInvalidNodeID for a malformed
-// node id, ErrUnknownShareID for an unrecognized shared folder id, and ErrPeerExists
-// if the node id is already authorized.
+// AddPeer authorizes a peer; each Folders entry must name an existing share id.
 func (s *Store) AddPeer(ctx context.Context, p Peer) error {
 	if !identity.ValidNodeID(p.NodeID) {
 		return ErrInvalidNodeID

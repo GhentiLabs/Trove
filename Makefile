@@ -1,4 +1,4 @@
-.PHONY: build test race vet lint fmt run tidy deploy proto all
+.PHONY: build test race vet lint fmt run tidy deploy proto nat-matrix all
 
 DISCOVERY_BIN := bin/discovery-server
 DISCOVERY_PKG := ./discovery/cmd/discovery-server
@@ -49,3 +49,10 @@ proto:
 
 deploy:
 	bash discovery/deploy/deploy.sh
+
+# nat-matrix runs the on-demand NAT hole-punch matrix: privileged containers with a
+# Linux netns + nftables topology emulate the NAT types, with the discovery server
+# as coordinator. Cells run in parallel. Not part of CI; run it to validate
+# cross-NAT holepunch end to end. Requires Docker.
+nat-matrix:
+	bash client/test/nat/matrix.sh

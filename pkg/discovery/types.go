@@ -55,6 +55,20 @@ func (a Address) Validate() error {
 	return nil
 }
 
+// Routable reports whether the address is a globally routable unicast endpoint —
+// a valid target for a cross-NAT dial. It rejects loopback, link-local, multicast,
+// unspecified, and RFC1918/ULA private addresses; CGNAT (100.64/10) is treated as
+// routable, since carrier reflexive addresses live there. Holepunch dials only
+// routable candidates: a peer's LAN address is never reachable across NATs.
+func (a Address) Routable() bool {
+	ip, err := netip.ParseAddr(a.IP)
+	if err != nil {
+		return false
+	}
+	return !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() &&
+		!ip.IsMulticast() && !ip.IsUnspecified() && !ip.IsPrivate()
+}
+
 // String renders the address as host:port.
 func (a Address) String() string {
 	return net.JoinHostPort(a.IP, strconv.Itoa(a.Port))

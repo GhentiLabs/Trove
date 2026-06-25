@@ -1,9 +1,6 @@
 // Package wire is the frozen cross-node protocol contract: a hand-rolled two-tier
-// framing around protobuf message bodies. The framing widths, the magic, the
-// maximum message size, and the message type values are golden-pinned and governed
-// by WireFormatVersion; a peer expecting a different layout must fail at Hello
-// rather than silently misparse. Message bodies are protobuf (see wirepb); only the
-// envelope and the bulk data plane (M4) are not.
+// framing around protobuf message bodies, governed by WireFormatVersion. The widths,
+// magic, max size, and type values are golden-pinned; see docs/m3-wire-constants.md.
 package wire
 
 import (
@@ -16,20 +13,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Frozen wire constants. Changing any of these is a wire-format break.
 const (
-	// Magic prefixes the Hello frame: "TROV" big-endian. Distinct from BEP's magic,
-	// it gives instant protocol identification and fast-rejects non-protocol peers.
+	// Magic prefixes the Hello frame: "TROV" big-endian.
 	Magic uint32 = 0x54524F56
 	// WireFormatVersion gates the whole layout; an incompatible peer is rejected.
 	WireFormatVersion uint32 = 1
-	// MaxMessageSize bounds a single post-Hello message body on the wire, sized for
-	// M4's larger index/manifest messages. An oversize frame closes the connection.
+	// MaxMessageSize bounds a single post-Hello message body on the wire.
 	MaxMessageSize = 64 << 20
 
-	// maxHelloSize and maxHeaderSize bound two separate uint16 length fields (the
-	// Hello body and the post-Hello header). They share a value today; keeping them
-	// distinct makes a future divergence a visible change, not a silent misbound.
 	maxHelloSize  = 1<<16 - 1
 	maxHeaderSize = 1<<16 - 1
 )
@@ -67,9 +58,7 @@ func WriteHello(w io.Writer, h *wirepb.Hello) error {
 	return nil
 }
 
-// ReadHello reads and validates a Hello frame, returning ErrBadMagic if the magic
-// does not match. It does not check WireFormatVersion; the session decides that so
-// it can still report who tried before rejecting.
+// ReadHello reads and validates a Hello frame, returning ErrBadMagic on mismatch.
 func ReadHello(r io.Reader) (*wirepb.Hello, error) {
 	var hdr [6]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

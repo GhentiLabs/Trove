@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/GhentiLabs/Trove/client/internal/netio"
@@ -9,8 +10,6 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// closeErrorCode is the QUIC application error code for a normal close; 0 carries
-// no application semantics (RFC 9000).
 const closeErrorCode = 0
 
 type conn struct {
@@ -35,7 +34,7 @@ func (c *conn) OpenStream(ctx context.Context) (netio.Stream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transport: open stream: %w", err)
 	}
-	return s, nil
+	return stream{s}, nil
 }
 
 func (c *conn) AcceptStream(ctx context.Context) (netio.Stream, error) {
@@ -43,9 +42,22 @@ func (c *conn) AcceptStream(ctx context.Context) (netio.Stream, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transport: accept stream: %w", err)
 	}
-	return s, nil
+	return stream{s}, nil
 }
 
 func (c *conn) Close() error {
 	return c.qc.CloseWithError(closeErrorCode, "")
+}
+
+type stream struct {
+	*quic.Stream
+}
+
+func (s stream) Read(p []byte) (int, error) {
+	n, err := s.Stream.Read(p)
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) && appErr.Remote && appErr.ErrorCode == closeErrorCode {
+		return n, netio.ErrPeerClosed
+	}
+	return n, err
 }

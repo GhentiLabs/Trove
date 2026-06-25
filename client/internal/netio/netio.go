@@ -1,21 +1,23 @@
 // Package netio is the transport seam: a multiplexed, authenticated byte-stream
-// connection between two nodes, behind interfaces so a deterministic in-memory
-// transport can be substituted in tests (synctest cannot fake real network I/O).
-// The QUIC implementation lives in the transport package; the wire framing lives
-// above this seam, so streams here are raw byte pipes.
+// connection behind interfaces so an in-memory transport can be substituted in
+// tests. The QUIC implementation lives in the transport package; streams here are
+// raw byte pipes.
 package netio
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 )
 
+// ErrPeerClosed is returned by a Stream read when the peer closed the connection
+// cleanly, as opposed to an abrupt drop, without depending on the concrete transport.
+var ErrPeerClosed = errors.New("netio: peer closed the connection")
+
 // Stream is a bidirectional byte stream within a Conn (one QUIC stream). Close
 // half-closes the write side (sends FIN); the read side stays open until the peer
-// closes its end. This is the QUIC stream contract M4's data plane relies on (one
-// chunk per stream, sender Close = end-of-chunk, receiver reads to EOF). Tear the
-// whole connection down via Conn.Close.
+// closes its end. Tear the whole connection down via Conn.Close.
 type Stream interface {
 	io.Reader
 	io.Writer
@@ -23,8 +25,7 @@ type Stream interface {
 }
 
 // Conn is a multiplexed, mutually-authenticated connection to one peer. Its
-// PeerNodeID is the peer's 52-character base32 SPKI fingerprint, derived from its
-// verified TLS certificate.
+// PeerNodeID is the peer's SPKI fingerprint from its verified TLS certificate.
 type Conn interface {
 	OpenStream(ctx context.Context) (Stream, error)
 	AcceptStream(ctx context.Context) (Stream, error)
@@ -32,16 +33,13 @@ type Conn interface {
 	Close() error
 }
 
-// Dialer opens a Conn to the peer reachable at a UDP address, pinning its identity
-// to nodeID during the TLS handshake: a peer that presents a certificate with a
-// different fingerprint is rejected before any application data. The caller
-// resolves node_id→addr (via discovery) and passes both.
+// Dialer opens a Conn to addr, pinning the peer's identity to nodeID during the TLS
+// handshake. The caller resolves node_id->addr via discovery.
 type Dialer interface {
 	Dial(ctx context.Context, addr, nodeID string) (Conn, error)
 }
 
-// Listener accepts inbound Conns. Authorization (is this node_id in the registry)
-// is the caller's responsibility, applied to each accepted Conn's PeerNodeID.
+// Listener accepts inbound Conns; the caller authorizes each PeerNodeID.
 type Listener interface {
 	Accept(ctx context.Context) (Conn, error)
 	Close() error
@@ -52,12 +50,7 @@ type Listener interface {
 type Transport interface {
 	Dialer
 	Listener
-	// LocalAddr is the local UDP address the transport is bound to. Candidate
-	// gathering advertises it, and it identifies the socket the server-observed
-	// external address maps to.
 	LocalAddr() net.Addr
-	// Probe sends empty datagrams to addrs on the local socket to open this side's
-	// NAT mapping before a simultaneous-open holepunch. A transport without a real
-	// socket (the in-memory fake) treats it as a no-op.
+	// Probe sends empty datagrams to open this side's NAT mapping before a holepunch.
 	Probe(ctx context.Context, addrs []string) error
 }

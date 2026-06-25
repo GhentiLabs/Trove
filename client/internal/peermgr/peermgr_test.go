@@ -122,8 +122,6 @@ func TestManagerRejectsUnauthorized(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() { _ = m.Run(ctx) })
 
-	// The reject path must actually run (dial succeeds, handshake authorization fails)
-	// and never yield a session.
 	waitFor(t, func() bool { return attempts.Load() >= 2 })
 	if m.ActiveCount() != 0 {
 		t.Fatalf("unauthorized peer reached an active session: count=%d", m.ActiveCount())
@@ -213,10 +211,9 @@ func TestManagerDedupConverges(t *testing.T) {
 	wg.Go(func() { _ = ma.Run(ctx) })
 	wg.Go(func() { _ = mb.Run(ctx) })
 
-	// Both dial each other; deduplication must converge each side to exactly one.
 	waitFor(t, func() bool { return ma.ActiveCount() == 1 && mb.ActiveCount() == 1 })
-	// And it must stay converged, not oscillate.
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond) // must stay converged, not oscillate
+
 	if ma.ActiveCount() != 1 || mb.ActiveCount() != 1 {
 		t.Fatalf("dedup did not stay converged: a=%d b=%d", ma.ActiveCount(), mb.ActiveCount())
 	}
