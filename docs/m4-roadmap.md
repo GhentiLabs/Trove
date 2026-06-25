@@ -49,10 +49,11 @@ manifest-level GC pass is a later cleanup.
 
 ## Phase B — multi-source scheduler
 
-`Have` (explicit list; bloom threshold measured later); a global wanted-set + per-peer
-have-set; parallel `Want` across ≥3 peers with a bounded in-flight window; in-flight
-dedup with fastest-source-wins on stall; optional rarest-first. Manifest-delta
-pagination for large folders.
+Design: `docs/m4-multisource-design.md`. **B1** (next): cross-(node,folder) scheduler
+spanning sessions, swarm serving (any peer serves chunks it holds), spread + not-found
+fallback to the owner, fastest-source-wins, in-flight dedup, bounded windows, and
+manifest-delta pagination. **B2** (deferred): `Have`/bloom advertisements as a measured
+optimization; optional rarest-first.
 
 **Accept:** a fresh replica pulls distinct chunks from multiple peers in parallel; a
 corrupt chunk from one source is rejected and transparently refetched from another;
