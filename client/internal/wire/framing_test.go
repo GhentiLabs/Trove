@@ -29,9 +29,9 @@ func TestFrozenConstantsGolden(t *testing.T) {
 	if TypeNetworkConfig != 1 || TypePing != 2 || TypeClose != 3 {
 		t.Fatalf("message type values drifted: nc=%d ping=%d close=%d", TypeNetworkConfig, TypePing, TypeClose)
 	}
-	if TypeFolderSummary != 4 || TypeManifestRequest != 5 || TypeManifestDelta != 6 {
-		t.Fatalf("M4 message type values drifted: summary=%d req=%d delta=%d",
-			TypeFolderSummary, TypeManifestRequest, TypeManifestDelta)
+	if TypeFolderSummary != 4 || TypeManifestRequest != 5 || TypeManifestDelta != 6 || TypeMembershipGossip != 7 {
+		t.Fatalf("M4 message type values drifted: summary=%d req=%d delta=%d gossip=%d",
+			TypeFolderSummary, TypeManifestRequest, TypeManifestDelta, TypeMembershipGossip)
 	}
 	if wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE != 0 ||
 		wirepb.FolderType_FOLDER_TYPE_SEND_ONLY != 1 ||
@@ -153,7 +153,15 @@ func TestSyncMessageRoundTrip(t *testing.T) {
 			}},
 		},
 	}
-	wantTypes := []MessageType{TypeFolderSummary, TypeManifestRequest, TypeManifestDelta}
+	gossip := &wirepb.MembershipGossip{
+		NetworkId: "net",
+		Entries: []*wirepb.MembershipEntry{{
+			NetworkId: "net", NodeId: "n", PublicKey: bytes.Repeat([]byte{0x11}, 32),
+			Role: 1, AddedBy: "n", AddedAtMs: 7, Sig: bytes.Repeat([]byte{0x22}, 64),
+		}},
+	}
+	cases = append(cases, gossip)
+	wantTypes := []MessageType{TypeFolderSummary, TypeManifestRequest, TypeManifestDelta, TypeMembershipGossip}
 	for i, msg := range cases {
 		var buf bytes.Buffer
 		if err := WriteMessage(&buf, msg); err != nil {

@@ -109,6 +109,25 @@ message ManifestDelta {
   bool complete = 5;
 }
 
+// MembershipEntry is one signed roster record on the wire. The signature is over the
+// membership layer's canonical hand-rolled bytes, not these protobuf bytes.
+message MembershipEntry {
+  string network_id = 1;
+  string node_id = 2;
+  bytes public_key = 3;
+  uint32 role = 4;
+  string added_by = 5;
+  int64 added_at_ms = 6;
+  bytes sig = 7;
+}
+
+// MembershipGossip carries a network's roster for anti-entropy convergence; a receiver
+// verifies each entry against its trust root before accepting or re-propagating it.
+message MembershipGossip {
+  string network_id = 1;
+  repeated MembershipEntry entries = 2;
+}
+
 // Ping is the idle-timer keepalive.
 message Ping {}
 
