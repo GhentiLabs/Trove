@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -263,6 +264,44 @@ func (s *Store) Close() error {
 // Has reports whether a chunk with the given identity is stored.
 func (s *Store) Has(ctx context.Context, id hasher.ChunkID) (bool, error) {
 	return s.has(ctx, id)
+}
+
+// HasBulk reports which of ids are already stored, batching into one query per group
+// instead of a round-trip per id. The returned set holds exactly the present ids.
+func (s *Store) HasBulk(ctx context.Context, ids []hasher.ChunkID) (map[hasher.ChunkID]struct{}, error) {
+	present := make(map[hasher.ChunkID]struct{}, len(ids))
+	const batch = 900 // under SQLite's default 999 bound-parameter limit
+	for start := 0; start < len(ids); start += batch {
+		group := ids[start:min(start+batch, len(ids))]
+		args := make([]any, len(group))
+		for i, id := range group {
+			args[i] = id.Bytes()
+		}
+		q := `SELECT chunk_id FROM chunks WHERE chunk_id IN (` + strings.Repeat("?,", len(group)-1) + `?)`
+		rows, err := s.db.Query(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("chunkstore: has bulk: %w", err)
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var b []byte
+				if err := rows.Scan(&b); err != nil {
+					return err
+				}
+				id, err := hasher.FromBytes(b)
+				if err != nil {
+					return err
+				}
+				present[id] = struct{}{}
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, fmt.Errorf("chunkstore: has bulk: %w", err)
+		}
+	}
+	return present, nil
 }
 
 // Put stores a plaintext chunk physically and returns its identity. Storing a

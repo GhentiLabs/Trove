@@ -143,18 +143,25 @@ func (c *Coordinator) pull(ctx context.Context, refs []manifest.ChunkRef, ownerI
 
 func (c *Coordinator) missing(ctx context.Context, refs []manifest.ChunkRef) ([]hasher.ChunkID, error) {
 	seen := make(map[hasher.ChunkID]struct{}, len(refs))
-	var want []hasher.ChunkID
+	ids := make([]hasher.ChunkID, 0, len(refs))
 	for _, ref := range refs {
 		if _, ok := seen[ref.ID]; ok {
 			continue
 		}
 		seen[ref.ID] = struct{}{}
-		has, err := c.chunks.Has(ctx, ref.ID)
-		if err != nil {
-			return nil, fmt.Errorf("syncengine: chunk lookup: %w", err)
-		}
-		if !has {
-			want = append(want, ref.ID)
+		ids = append(ids, ref.ID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	present, err := c.chunks.HasBulk(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("syncengine: chunk lookup: %w", err)
+	}
+	var want []hasher.ChunkID
+	for _, id := range ids {
+		if _, ok := present[id]; !ok {
+			want = append(want, id)
 		}
 	}
 	return want, nil
