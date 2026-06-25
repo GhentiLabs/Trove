@@ -73,6 +73,11 @@ type Local struct {
 	Folders       []Folder
 }
 
+// ControlHandler handles a post-Hello control message the session does not handle
+// itself (anything beyond Ping and Close). Returning an error tears the session
+// down; returning nil continues. Install it with SetControlHandler before Run.
+type ControlHandler func(ctx context.Context, typ wire.MessageType, msg proto.Message) error
+
 // Config drives a single Handshake.
 type Config struct {
 	Conn      netio.Conn
@@ -94,6 +99,8 @@ type Session struct {
 	keepalive  time.Duration
 	started    time.Time
 	log        *slog.Logger
+
+	handler ControlHandler
 
 	state   atomic.Int32
 	closing atomic.Bool
@@ -298,8 +305,16 @@ func (s *Session) SharedFolders() []string { return s.shared }
 // State reports the current lifecycle stage.
 func (s *Session) State() State { return State(s.state.Load()) }
 
-// Conn exposes the underlying connection so M4 can open data streams.
+// Conn returns the underlying connection for opening data streams.
 func (s *Session) Conn() netio.Conn { return s.conn }
+
+// SetControlHandler installs the handler for control messages beyond Ping and
+// Close. It must be called before Run.
+func (s *Session) SetControlHandler(h ControlHandler) { s.handler = h }
+
+// Send writes a control message on the control stream, serialized with keepalive
+// and shutdown writes.
+func (s *Session) Send(m proto.Message) error { return s.writeMessage(m) }
 
 // Run holds the session open until the peer closes, ctx is cancelled, or it fails.
 func (s *Session) Run(ctx context.Context) error {
@@ -312,7 +327,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.shutdown(false)
 
 	for {
-		typ, _, err := wire.ReadControlMessage(s.ctrl)
+		typ, msg, err := wire.ReadControlMessage(s.ctrl)
 		if err != nil {
 			if s.closing.Load() || ctx.Err() != nil || errors.Is(err, netio.ErrPeerClosed) {
 				return nil
@@ -325,7 +340,12 @@ func (s *Session) Run(ctx context.Context) error {
 			s.shutdown(false)
 			return nil
 		default:
-			return fmt.Errorf("%w: type %d", ErrUnexpectedMessage, typ)
+			if s.handler == nil {
+				return fmt.Errorf("%w: type %d", ErrUnexpectedMessage, typ)
+			}
+			if err := s.handler(ctx, typ, msg); err != nil {
+				return fmt.Errorf("session: handle type %d: %w", typ, err)
+			}
 		}
 	}
 }
