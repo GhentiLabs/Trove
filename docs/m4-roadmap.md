@@ -86,7 +86,10 @@ in place from Phase A. Covered by model units, engine-level convergence/repair/o
 catch-up tests, and the NAT matrix's live second round (edit + delete + rename + receipt
 query over real holepunch).
 
-**Accept (the M4 integration gate — human-run):** ≥3 real machines across NAT via
-Trove/holepunch converge a multi-file folder through an edit, a delete, and a rename,
-with one replica offline for part of the run; both ends hold correct SyncReceipts;
-"last synced" is queryable. Procedure in `docs/m4-live-runbook.md`.
+**Accept (the M4 integration gate):** ≥3 machines across NAT via Trove/holepunch
+converge a multi-file folder through an edit, a delete, and a rename, with one replica
+offline for part of the run; both ends hold correct SyncReceipts; "last synced" is
+queryable. **Automated** in containers over real holepunch as the NAT harness's
+`SCENARIO=offline-gate` (3 peers, one offline→repair+catch-up, receipts for both) — runs
+with the matrix via `make nat-matrix`. The human-run version on real machines/NATs is the
+final sign-off; procedure in `docs/m4-live-runbook.md`.

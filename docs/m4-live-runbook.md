@@ -1,11 +1,13 @@
 # M4 live convergence runbook (the integration gate)
 
-The deterministic in-process tests are the gate CI runs; the NAT matrix
-(`make nat-matrix`) proves convergence + edit/delete/rename + receipt queryability
-over real holepunch in containers. This runbook is the **human-run ≥3-machine gate**:
-one owner and two replicas on real machines across NAT converge a multi-file folder
-through an edit, a delete, and a rename — with one replica offline for part of the run —
-and both ends hold correct sync receipts.
+The deterministic in-process tests are the gate CI runs. The NAT matrix
+(`make nat-matrix`) reproduces the **entire gate shape in containers over real
+holepunch**: a `SCENARIO=offline-gate` run stands up an owner and two punchable
+replicas, takes one replica offline while the owner edits, deletes, and renames, then
+reconnects it — asserting startup repair, anti-entropy catch-up with no resurrection,
+and queryable receipts for both replicas. This runbook is the **human-run ≥3-machine
+version on real machines across real NATs**: the final sign-off the container harness
+stands in for.
 
 Prerequisites: `trove-peer` built on every machine (`make build`); a reachable Trove
 discovery server URL `TROVE="trove://host:port?id=<fingerprint>"`.
