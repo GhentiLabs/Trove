@@ -149,6 +149,14 @@ func TestApplyRemoteTombstoneRemovesFromCurrentRoot(t *testing.T) {
 	if got != want {
 		t.Fatalf("CurrentRoot after tombstone = %s, want %s", got, want)
 	}
+	// A tombstone keeps its chunk refs, so identity re-verification still passes.
+	recs, err := s.ListManifests(ctx)
+	if err != nil {
+		t.Fatalf("ListManifests over a tombstone: %v", err)
+	}
+	if len(recs) != 1 || !recs[0].Deleted {
+		t.Fatalf("expected one tombstone record, got %+v", recs)
+	}
 }
 
 func TestFolderEpochStable(t *testing.T) {
@@ -188,5 +196,22 @@ func TestLoadCursorAbsent(t *testing.T) {
 	s := newStore(t)
 	if _, _, ok, err := s.LoadCursor(context.Background(), "fld", nodeB); err != nil || ok {
 		t.Fatalf("absent cursor: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestApplyRemoteRejectsEscapingSymlink(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	for _, target := range []string{"../escape", "/etc/passwd", "a/../../b"} {
+		m := manifest.Manifest{Kind: manifest.KindSymlink, Path: "link", SymlinkTarget: target}
+		rm := RemoteManifest{Manifest: m, ID: m.ID(), Version: manifest.VersionVector{nodeB: 1}, OwnerSeq: 1}
+		if err := s.ApplyRemoteAndAdvance(ctx, []RemoteManifest{rm}, "fld", nodeB, 1, 1); !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("target %q: err = %v, want ErrInvalidManifest", target, err)
+		}
+	}
+	m := manifest.Manifest{Kind: manifest.KindSymlink, Path: "link", SymlinkTarget: "sibling.txt"}
+	rm := RemoteManifest{Manifest: m, ID: m.ID(), Version: manifest.VersionVector{nodeB: 1}, OwnerSeq: 1}
+	if err := s.ApplyRemoteAndAdvance(ctx, []RemoteManifest{rm}, "fld", nodeB, 1, 1); err != nil {
+		t.Fatalf("relative symlink rejected: %v", err)
 	}
 }

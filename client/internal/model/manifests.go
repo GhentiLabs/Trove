@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -277,6 +278,12 @@ func validate(m manifest.Manifest) error {
 		}
 		if len(m.Chunks) != 0 {
 			return fmt.Errorf("%w: symlink with chunks", ErrInvalidManifest)
+		}
+		if filepath.IsAbs(m.SymlinkTarget) {
+			return fmt.Errorf("%w: symlink target escapes root (absolute) %q", ErrInvalidManifest, m.SymlinkTarget)
+		}
+		if c := filepath.Clean(m.SymlinkTarget); c == ".." || strings.HasPrefix(c, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%w: symlink target escapes root %q", ErrInvalidManifest, m.SymlinkTarget)
 		}
 	case manifest.KindDir:
 		if len(m.Chunks) != 0 || m.SymlinkTarget != "" {

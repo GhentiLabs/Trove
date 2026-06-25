@@ -59,7 +59,9 @@ func (s *Store) FolderEpoch(ctx context.Context) (uint64, error) {
 func newEpoch() uint64 {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	if e := binary.BigEndian.Uint64(b[:]); e != 0 {
+	// Keep the high bit clear so the value round-trips through SQLite's signed
+	// INTEGER as a positive number; nonzero distinguishes "unset".
+	if e := binary.BigEndian.Uint64(b[:]) &^ (1 << 63); e != 0 {
 		return e
 	}
 	return 1
@@ -94,12 +96,9 @@ func (s *Store) CurrentRoot(ctx context.Context) (snapshot.Root, error) {
 	return root, nil
 }
 
-// ApplyRemoteAndAdvance applies a batch of owner manifests and advances the
-// (folder, owner) cursor in one transaction: either every manifest commits and the
-// cursor moves to (epoch, highWater), or nothing changes. Each manifest is stored
-// with the owner's path, identity, and version vector verbatim — this node is never
-// added to the vector — and the owner sequence as its local seq. The recomputed
-// identity must match the supplied id, else ErrCorruptModel.
+// ApplyRemoteAndAdvance stores batch and advances the (folder, owner) cursor in one
+// transaction. The owner's version vector is stored verbatim; this node is never
+// added to it. Returns ErrCorruptModel if a manifest does not hash to its supplied id.
 func (s *Store) ApplyRemoteAndAdvance(ctx context.Context, batch []RemoteManifest, folderID, ownerPeerID string, epoch uint64, highWater int64) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		for _, rm := range batch {
