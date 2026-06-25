@@ -195,6 +195,10 @@ run_cell() {
 		if [ "$expect" = fail ] && { [ $attempted -eq 0 ] || [ $alive -eq 0 ]; }; then
 			log "cell ${na}x${nb}: failed but not gracefully (punch attempted=$attempted, peers alive=$alive)  FAIL"
 		else
+			if [ "$result" = success ]; then
+				log "---- how A connected ----"; grep -E "reflexive|holepunch|connected|session active" "$LOG/A" | tail -8
+				log "---- how B connected ----"; grep -E "reflexive|holepunch|connected|session active" "$LOG/B" | tail -8
+			fi
 			log "cell ${na}x${nb}: ${result}${took} (expected ${expect}, graceful)  PASS"
 			return 0
 		fi

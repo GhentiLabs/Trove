@@ -101,6 +101,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.gather(ctx)
 
+	// Connect the signaler before the manager starts so the first holepunch round
+	// is not wasted on a not-yet-connected signaler; signalLoop then maintains it.
+	if sig, err := s.client.Signal(ctx); err != nil {
+		s.log.Warn("node: signal connect", "err", err)
+	} else {
+		s.setSignaler(sig)
+	}
+
 	mdns, err := discovery.Advertise(s.opts.NodeID, s.port())
 	if err != nil {
 		s.log.Warn("node: mdns advertise failed", "err", err)
@@ -176,21 +184,31 @@ func (s *Service) signalLoop(ctx context.Context, wg *sync.WaitGroup) {
 		if ctx.Err() != nil {
 			return
 		}
-		sig, err := s.client.Signal(ctx)
-		if err != nil {
-			s.log.Warn("node: signal connect", "err", err)
-			if !sleep(ctx, backoff) {
-				return
+		sig := s.currentSignaler()
+		if sig == nil {
+			var err error
+			sig, err = s.client.Signal(ctx)
+			if err != nil {
+				s.log.Warn("node: signal connect", "err", err)
+				if !sleep(ctx, backoff) {
+					return
+				}
+				backoff = min(backoff*2, signalReconnectMax)
+				continue
 			}
-			backoff = min(backoff*2, signalReconnectMax)
-			continue
+			s.setSignaler(sig)
 		}
 		backoff = signalReconnectMin
-		s.setSignaler(sig)
 		s.drainIncoming(ctx, sig, sem, wg)
 		s.setSignaler(nil)
 		_ = sig.Close()
 	}
+}
+
+func (s *Service) currentSignaler() *discovery.Signaler {
+	s.sigMu.Lock()
+	defer s.sigMu.Unlock()
+	return s.sig
 }
 
 func (s *Service) drainIncoming(ctx context.Context, sig *discovery.Signaler, sem chan struct{}, wg *sync.WaitGroup) {
