@@ -15,6 +15,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/peermgr"
 	"github.com/GhentiLabs/Trove/client/internal/session"
+	"github.com/GhentiLabs/Trove/client/internal/syncengine"
 	"github.com/GhentiLabs/Trove/client/internal/transport"
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 )
@@ -39,6 +40,13 @@ type Options struct {
 	TroveURL string
 	UDPAddr  string
 	Logger   *slog.Logger
+
+	// StateDir enables one-way sync: per-folder model and chunk stores are opened
+	// beneath it. When empty, the node runs transport and discovery only.
+	StateDir string
+	// SyncRole is this node's direction for its shared folders: owner (send-only,
+	// scans and serves) or replica (receive-only, pulls and applies).
+	SyncRole syncengine.Role
 }
 
 // Service is a composed, runnable Trove peer.
@@ -99,6 +107,15 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
+	var syncRT *syncRuntime
+	if s.opts.StateDir != "" {
+		syncRT, err = s.buildSyncRuntime(ctx)
+		if err != nil {
+			return err
+		}
+		defer syncRT.close()
+	}
+
 	// Connect the signaler before the manager starts so the first holepunch round
 	// is not wasted on a not-yet-connected signaler; signalLoop then maintains it.
 	if sig, err := s.client.Signal(ctx); err != nil {
@@ -127,7 +144,7 @@ func (s *Service) Run(ctx context.Context) error {
 		Candidates: s.candidates,
 		Logger:     s.log,
 	})
-	mgr, err := peermgr.New(peermgr.Options{
+	mgrOpts := peermgr.Options{
 		Self:      s.opts.NodeID,
 		Transport: s.tr,
 		Local:     local,
@@ -135,7 +152,11 @@ func (s *Service) Run(ctx context.Context) error {
 		Connect:   ladder.Connect,
 		Peers:     peers,
 		Logger:    s.log,
-	})
+	}
+	if syncRT != nil {
+		mgrOpts.OnSession = syncRT.onSession(s.log)
+	}
+	mgr, err := peermgr.New(mgrOpts)
 	if err != nil {
 		return err
 	}
@@ -148,6 +169,9 @@ func (s *Service) Run(ctx context.Context) error {
 	wg.Go(func() { s.browseLoop(ctx) })
 	wg.Go(func() { s.signalLoop(ctx, &wg) })
 	wg.Go(func() { _ = mgr.Run(ctx) })
+	if syncRT != nil {
+		wg.Go(func() { syncRT.runScanners(ctx, s.log) })
+	}
 	wg.Wait()
 	return ctx.Err()
 }

@@ -38,6 +38,9 @@ type Options struct {
 	Peers                  []string
 	MinBackoff, MaxBackoff time.Duration
 	Logger                 *slog.Logger
+	// OnSession, if set, is called for each Active session before its Run loop and
+	// must return a stop func invoked when the session ends.
+	OnSession func(ctx context.Context, s *session.Session) (stop func())
 }
 
 // Manager holds and maintains the set of active peer sessions.
@@ -51,6 +54,7 @@ type Manager struct {
 	minBackoff time.Duration
 	maxBackoff time.Duration
 	log        *slog.Logger
+	onSession  func(context.Context, *session.Session) func()
 
 	mu       sync.Mutex
 	sessions map[string]*session.Session
@@ -80,6 +84,7 @@ func New(opts Options) (*Manager, error) {
 		minBackoff: minB,
 		maxBackoff: maxB,
 		log:        log,
+		onSession:  opts.OnSession,
 		sessions:   make(map[string]*session.Session),
 	}, nil
 }
@@ -174,6 +179,10 @@ func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) se
 	if !m.add(peerID, sess, initiator) {
 		_ = sess.Close()
 		return serveDedup
+	}
+	if m.onSession != nil {
+		stop := m.onSession(ctx, sess)
+		defer stop()
 	}
 	_ = sess.Run(ctx)
 	m.remove(peerID, sess)

@@ -16,6 +16,9 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
+// syncStagingDir is the sync engine's staging directory, excluded from ingestion.
+const syncStagingDir = ".trove-tmp"
+
 // scanResult is one path's outcome from a worker.
 type scanResult struct {
 	rel     string
@@ -91,10 +94,13 @@ func (s *Scanner) ingest(ctx context.Context, paths iter.Seq[string]) error {
 // walkPaths yields every folder-relative path under the root, skipping the root
 // itself and unreadable subtrees (logged, not fatal — the rescan retries).
 func (s *Scanner) walkPaths(yield func(string) bool) {
-	_ = filepath.WalkDir(s.root, func(abs string, _ fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(s.root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk", "path", abs, "err", err)
 			return nil
+		}
+		if d.IsDir() && d.Name() == syncStagingDir {
+			return filepath.SkipDir
 		}
 		rel, ok := s.relPath(abs)
 		if !ok {

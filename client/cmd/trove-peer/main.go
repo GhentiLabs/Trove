@@ -15,6 +15,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/node"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
+	"github.com/GhentiLabs/Trove/client/internal/syncengine"
 	"github.com/GhentiLabs/Trove/pkg/identity"
 )
 
@@ -32,9 +33,15 @@ func run() error {
 	root := flag.String("root", "", "local folder root to share (with -share)")
 	share := flag.String("share", "", "shared folder id agreed with the peer")
 	peer := flag.String("peer", "", "authorize this peer node id (participating in -share)")
+	syncRole := flag.String("sync-role", "owner", "one-way sync role: owner (send-only) or replica (receive-only)")
 	debug := flag.Bool("debug", false, "verbose debug logging (per-dial/probe/candidate detail)")
 	logJSON := flag.Bool("log-json", false, "emit structured JSON logs instead of human-readable text")
 	flag.Parse()
+
+	role, err := parseSyncRole(*syncRole)
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(*dir, 0o700); err != nil {
 		return err
@@ -81,7 +88,10 @@ func run() error {
 		handler = slog.NewJSONHandler(os.Stderr, opts)
 	}
 	log := slog.New(handler)
-	svc, err := node.New(node.Options{Cert: cert, NodeID: nodeID, Config: cfg, TroveURL: *trove, UDPAddr: *listen, Logger: log})
+	svc, err := node.New(node.Options{
+		Cert: cert, NodeID: nodeID, Config: cfg, TroveURL: *trove, UDPAddr: *listen, Logger: log,
+		StateDir: *dir, SyncRole: role,
+	})
 	if err != nil {
 		return err
 	}
@@ -117,4 +127,15 @@ func pair(ctx context.Context, cfg *config.Store, root, share, peer string) erro
 
 func isExists(err error) bool {
 	return errors.Is(err, config.ErrFolderExists) || errors.Is(err, config.ErrPeerExists)
+}
+
+func parseSyncRole(s string) (syncengine.Role, error) {
+	switch s {
+	case "owner":
+		return syncengine.RoleOwner, nil
+	case "replica":
+		return syncengine.RoleReplica, nil
+	default:
+		return 0, fmt.Errorf("invalid -sync-role %q (want owner or replica)", s)
+	}
 }
