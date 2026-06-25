@@ -145,6 +145,25 @@ func TestReadMessageTooLarge(t *testing.T) {
 	}
 }
 
+func TestReadControlMessageTooLarge(t *testing.T) {
+	frame := func() *bytes.Buffer {
+		var buf bytes.Buffer
+		hb, _ := proto.Marshal(&wirepb.Header{Type: uint32(TypePing)})
+		_ = binary.Write(&buf, binary.BigEndian, uint16(len(hb)))
+		buf.Write(hb)
+		_ = binary.Write(&buf, binary.BigEndian, uint32(MaxControlMessageSize+1))
+		return &buf
+	}
+	if _, _, err := ReadControlMessage(frame()); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("ReadControlMessage oversize err = %v, want ErrMessageTooLarge", err)
+	}
+	// The same length is within the wire cap, so the full reader rejects it for a
+	// missing body, never on size.
+	if _, _, err := ReadMessage(frame()); errors.Is(err, ErrMessageTooLarge) {
+		t.Fatal("ReadMessage rejected a control-oversize frame on size; want a non-size error")
+	}
+}
+
 func TestReadMessageUnknownType(t *testing.T) {
 	var buf bytes.Buffer
 	hb, _ := proto.Marshal(&wirepb.Header{Type: 9999})

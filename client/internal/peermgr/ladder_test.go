@@ -206,3 +206,17 @@ func TestLadderHolepunchAcceptorProbesAndAwaitsInbound(t *testing.T) {
 		t.Fatal("acceptor did not probe to open its NAT mapping")
 	}
 }
+
+func TestPunchDelay(t *testing.T) {
+	now := time.Now()
+
+	if d, ok := PunchDelay(now.Add(-time.Second).UnixMilli()); !ok || d != 0 {
+		t.Fatalf("past punch time: d=%v ok=%v, want 0, true", d, ok)
+	}
+	if _, ok := PunchDelay(now.Add(2 * MaxPunchDelay).UnixMilli()); ok {
+		t.Fatal("far-future punch time: ok=true, want false")
+	}
+	if d, ok := PunchDelay(now.Add(5 * time.Second).UnixMilli()); !ok || d <= 0 || d > 5*time.Second {
+		t.Fatalf("near-future punch time: d=%v ok=%v, want (0,5s] and true", d, ok)
+	}
+}

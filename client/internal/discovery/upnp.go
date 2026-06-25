@@ -60,6 +60,13 @@ func MapPort(ctx context.Context, internalPort int) (*PortMap, error) {
 	case r := <-ch:
 		return r.pm, r.err
 	case <-ctx.Done():
+		// The worker may still map a port after we give up; release it so the
+		// mapping does not linger on the gateway until its TTL.
+		go func() {
+			if r := <-ch; r.pm != nil {
+				_ = r.pm.Release()
+			}
+		}()
 		return nil, ctx.Err()
 	}
 }
@@ -97,7 +104,8 @@ func (m *PortMap) Release() error {
 }
 
 func publiclyRoutable(ip net.IP) bool {
-	return !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsUnspecified() && !isCGNAT(ip)
+	a, ok := netip.AddrFromSlice(ip)
+	return ok && disco.RoutableIP(a.Unmap()) && !isCGNAT(ip)
 }
 
 func isCGNAT(ip net.IP) bool {

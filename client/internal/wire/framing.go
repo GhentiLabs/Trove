@@ -20,6 +20,11 @@ const (
 	WireFormatVersion uint32 = 1
 	// MaxMessageSize bounds a single post-Hello message body on the wire.
 	MaxMessageSize = 64 << 20
+	// MaxControlMessageSize caps a control-stream frame, on the wire and after
+	// decompression. The handshake carries only small messages, so it stays far
+	// below MaxMessageSize, bounding what an authenticated peer can make the
+	// receiver allocate on the control path.
+	MaxControlMessageSize = 1 << 20
 
 	maxHelloSize  = 1<<16 - 1
 	maxHeaderSize = 1<<16 - 1

@@ -22,6 +22,17 @@ var errPunchMissed = errors.New("peermgr: holepunch missed")
 // MaxPunchDelay bounds a server-supplied punch time.
 const MaxPunchDelay = 30 * time.Second
 
+// PunchDelay reports how long to wait before a holepunch scheduled at atMillis,
+// clamping a time already past to zero. ok is false when the time is implausibly
+// far ahead, in which case the returned duration is the raw lead for logging.
+func PunchDelay(atMillis int64) (time.Duration, bool) {
+	d := time.Until(time.UnixMilli(atMillis))
+	if d > MaxPunchDelay {
+		return d, false
+	}
+	return max(d, 0), true
+}
+
 const (
 	signalTimeout    = 15 * time.Second
 	dialTimeout      = 5 * time.Second
@@ -130,8 +141,8 @@ func (l *Ladder) punchRound(ctx context.Context, nodeID string, dial bool) (neti
 		return nil, fmt.Errorf("peermgr: holepunch signal: %w", err)
 	}
 
-	d := time.Until(time.UnixMilli(pc.PunchAtMillis))
-	if d > MaxPunchDelay {
+	d, ok := PunchDelay(pc.PunchAtMillis)
+	if !ok {
 		return nil, fmt.Errorf("peermgr: implausible punch time %dms ahead", d.Milliseconds())
 	}
 	if d > 0 && !sleep(ctx, d) {

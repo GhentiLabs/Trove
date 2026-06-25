@@ -16,7 +16,7 @@ func TestCompressibleRoundTrip(t *testing.T) {
 	if len(packed) >= len(src) {
 		t.Fatalf("compressed size %d not smaller than %d", len(packed), len(src))
 	}
-	got, err := Decompress(codec, packed)
+	got, err := Decompress(codec, packed, MaxDecodedSize)
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestIncompressibleStoredVerbatim(t *testing.T) {
 	if !bytes.Equal(packed, src) {
 		t.Fatal("CodecNone must pass bytes through unchanged")
 	}
-	got, err := Decompress(codec, packed)
+	got, err := Decompress(codec, packed, MaxDecodedSize)
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
 	}
@@ -47,8 +47,21 @@ func TestIncompressibleStoredVerbatim(t *testing.T) {
 }
 
 func TestUnknownCodec(t *testing.T) {
-	if _, err := Decompress(Codec(99), []byte("x")); err == nil {
+	if _, err := Decompress(Codec(99), []byte("x"), MaxDecodedSize); err == nil {
 		t.Fatal("expected error for unknown codec")
+	}
+}
+
+func TestDecompressRejectsOutputOverLimit(t *testing.T) {
+	codec, packed := Compress(make([]byte, 4<<20)) // 4 MiB of zeros -> tiny zstd payload
+	if codec != CodecZstd {
+		t.Fatalf("codec = %d, want CodecZstd", codec)
+	}
+	if _, err := Decompress(codec, packed, 1<<20); err == nil {
+		t.Fatal("Decompress accepted 4 MiB of output under a 1 MiB limit")
+	}
+	if _, err := Decompress(codec, packed, MaxDecodedSize); err != nil {
+		t.Fatalf("Decompress within the limit: %v", err)
 	}
 }
 
@@ -61,7 +74,7 @@ func TestConcurrentPoolReuse(t *testing.T) {
 		wg.Go(func() {
 			for range 50 {
 				codec, packed := Compress(src)
-				got, err := Decompress(codec, packed)
+				got, err := Decompress(codec, packed, MaxDecodedSize)
 				if err != nil || !bytes.Equal(got, src) {
 					mu.Lock()
 					bad++

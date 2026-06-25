@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/netio"
+	disco "github.com/GhentiLabs/Trove/pkg/discovery"
 	"github.com/GhentiLabs/Trove/pkg/identity"
 	"github.com/quic-go/quic-go"
 )
@@ -105,7 +106,7 @@ func (t *Transport) Probe(ctx context.Context, addrs []string) error {
 	targets := make([]*net.UDPAddr, 0, len(addrs))
 	for _, a := range addrs {
 		ua, err := net.ResolveUDPAddr("udp", a)
-		if err != nil || !routableUnicast(ua.IP) {
+		if err != nil || !disco.RoutableIP(ua.AddrPort().Addr().Unmap()) {
 			continue
 		}
 		targets = append(targets, ua)
@@ -121,15 +122,10 @@ func (t *Transport) Probe(ctx context.Context, addrs []string) error {
 		select {
 		case <-time.After(10*time.Millisecond + time.Duration(rand.IntN(jitter))*time.Millisecond):
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		}
 	}
 	return nil
-}
-
-func routableUnicast(ip net.IP) bool {
-	return ip != nil && !ip.IsLoopback() && !ip.IsMulticast() && !ip.IsUnspecified() &&
-		!ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsPrivate()
 }
 
 // Close tears down the listener, transport, and socket. It is idempotent.

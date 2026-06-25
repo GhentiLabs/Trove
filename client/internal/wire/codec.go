@@ -70,6 +70,16 @@ func WriteMessage(w io.Writer, m proto.Message) error {
 
 // ReadMessage reads one post-Hello frame, returning its type and decoded body.
 func ReadMessage(r io.Reader) (MessageType, proto.Message, error) {
+	return readMessage(r, MaxMessageSize)
+}
+
+// ReadControlMessage reads a control-stream frame, rejecting bodies larger than
+// MaxControlMessageSize.
+func ReadControlMessage(r io.Reader) (MessageType, proto.Message, error) {
+	return readMessage(r, MaxControlMessageSize)
+}
+
+func readMessage(r io.Reader, maxBody uint32) (MessageType, proto.Message, error) {
 	var prefix [2]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
 		return 0, nil, fmt.Errorf("wire: read header length: %w", err)
@@ -87,14 +97,14 @@ func ReadMessage(r io.Reader) (MessageType, proto.Message, error) {
 		return 0, nil, fmt.Errorf("wire: read length: %w", err)
 	}
 	n := binary.BigEndian.Uint32(mlen[:])
-	if n > MaxMessageSize {
+	if n > maxBody {
 		return 0, nil, ErrMessageTooLarge
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return 0, nil, fmt.Errorf("wire: read body: %w", err)
 	}
-	body, err := compression.Decompress(compression.Codec(hdr.GetCompression()), payload)
+	body, err := compression.Decompress(compression.Codec(hdr.GetCompression()), payload, int(maxBody))
 	if err != nil {
 		return 0, nil, err
 	}

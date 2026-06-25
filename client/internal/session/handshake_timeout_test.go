@@ -22,7 +22,7 @@ func TestHandshakeTimesOutOnStalledPeer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected handshake to fail on a stalled peer, got nil")
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("handshake blocked %v, want ~HandshakeTimeout", d)
+	if d := time.Since(start); d < 50*time.Millisecond || d > 1*time.Second {
+		t.Fatalf("handshake returned after %v, want ~100ms (the configured HandshakeTimeout)", d)
 	}
 }

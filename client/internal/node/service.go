@@ -99,8 +99,6 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	s.gather(ctx)
-
 	// Connect the signaler before the manager starts so the first holepunch round
 	// is not wasted on a not-yet-connected signaler; signalLoop then maintains it.
 	if sig, err := s.client.Signal(ctx); err != nil {
@@ -155,6 +153,7 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) announceLoop(ctx context.Context) {
+	s.gather(ctx)
 	t := time.NewTicker(announceInterval)
 	defer t.Stop()
 	for {
@@ -260,8 +259,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 }
 
 func (s *Service) punchInbound(ctx context.Context, ir disco.IncomingRequest) {
-	d := time.Until(time.UnixMilli(ir.PunchAtMillis))
-	if d > peermgr.MaxPunchDelay {
+	d, ok := peermgr.PunchDelay(ir.PunchAtMillis)
+	if !ok {
 		s.log.Debug("node: ignoring implausible punch time", "from", ir.FromNodeID)
 		return
 	}

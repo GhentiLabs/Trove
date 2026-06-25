@@ -188,6 +188,27 @@ func openControl(ctx context.Context, cfg Config) (netio.Stream, error) {
 	return cfg.Conn.AcceptStream(ctx)
 }
 
+// exchange runs one ordered request/response over the control stream: the
+// initiator writes first then reads the peer's message; the responder reads
+// first then writes its own.
+func exchange[T any](initiator bool, write func() error, read func() (T, error)) (T, error) {
+	var zero T
+	if initiator {
+		if err := write(); err != nil {
+			return zero, err
+		}
+		return read()
+	}
+	peer, err := read()
+	if err != nil {
+		return zero, err
+	}
+	if err := write(); err != nil {
+		return zero, err
+	}
+	return peer, nil
+}
+
 func exchangeHello(cfg Config, ctrl netio.Stream) (*wirepb.Hello, error) {
 	mine := &wirepb.Hello{
 		NodeId:            cfg.Local.NodeID,
@@ -195,38 +216,18 @@ func exchangeHello(cfg Config, ctrl netio.Stream) (*wirepb.Hello, error) {
 		ClientName:        cfg.Local.ClientName,
 		ClientVersion:     cfg.Local.ClientVersion,
 	}
-	if cfg.Initiator {
-		if err := wire.WriteHello(ctrl, mine); err != nil {
-			return nil, err
-		}
-		return wire.ReadHello(ctrl)
-	}
-	peer, err := wire.ReadHello(ctrl)
-	if err != nil {
-		return nil, err
-	}
-	if err := wire.WriteHello(ctrl, mine); err != nil {
-		return nil, err
-	}
-	return peer, nil
+	return exchange(cfg.Initiator,
+		func() error { return wire.WriteHello(ctrl, mine) },
+		func() (*wirepb.Hello, error) { return wire.ReadHello(ctrl) },
+	)
 }
 
 func exchangeConfig(initiator bool, ctrl netio.Stream, offered []Folder) (*wirepb.NetworkConfig, error) {
 	mine := buildNetworkConfig(offered)
-	if initiator {
-		if err := wire.WriteMessage(ctrl, mine); err != nil {
-			return nil, err
-		}
-		return readNetworkConfig(ctrl)
-	}
-	peer, err := readNetworkConfig(ctrl)
-	if err != nil {
-		return nil, err
-	}
-	if err := wire.WriteMessage(ctrl, mine); err != nil {
-		return nil, err
-	}
-	return peer, nil
+	return exchange(initiator,
+		func() error { return wire.WriteMessage(ctrl, mine) },
+		func() (*wirepb.NetworkConfig, error) { return readNetworkConfig(ctrl) },
+	)
 }
 
 func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
@@ -261,7 +262,7 @@ func offeredFolders(local []Folder, granted []string) []Folder {
 }
 
 func readNetworkConfig(ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
-	typ, msg, err := wire.ReadMessage(ctrl)
+	typ, msg, err := wire.ReadControlMessage(ctrl)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +312,7 @@ func (s *Session) Run(ctx context.Context) error {
 	defer s.shutdown(false)
 
 	for {
-		typ, _, err := wire.ReadMessage(s.ctrl)
+		typ, _, err := wire.ReadControlMessage(s.ctrl)
 		if err != nil {
 			if s.closing.Load() || ctx.Err() != nil || errors.Is(err, netio.ErrPeerClosed) {
 				return nil

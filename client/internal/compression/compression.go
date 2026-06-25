@@ -4,11 +4,15 @@
 package compression
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// ErrTooLarge is returned when decoded output would exceed the caller's limit.
+var ErrTooLarge = errors.New("compression: decoded size exceeds limit")
 
 // Codec identifies how a chunk's stored bytes were compressed. Values are persisted
 // and must remain stable.
@@ -19,8 +23,9 @@ const (
 	CodecZstd Codec = 1
 )
 
-// MaxDecodedSize bounds zstd output against decompression bombs. It must cover the
-// largest plaintext any caller decodes (the 64 MiB wire control-message cap).
+// MaxDecodedSize is the largest plaintext any caller may decode: the 64 MiB wire
+// message cap (wire.MaxMessageSize). It also bounds the pooled decoder against
+// decompression bombs.
 const MaxDecodedSize = 64 << 20
 
 var (
@@ -53,14 +58,21 @@ func Compress(src []byte) (Codec, []byte) {
 	return CodecNone, src
 }
 
-// Decompress reverses Compress for the given codec.
-func Decompress(codec Codec, data []byte) ([]byte, error) {
+// Decompress reverses Compress for the given codec, rejecting output larger than
+// maxDecoded bytes.
+func Decompress(codec Codec, data []byte, maxDecoded int) ([]byte, error) {
 	switch codec {
 	case CodecNone:
+		if len(data) > maxDecoded {
+			return nil, ErrTooLarge
+		}
 		return data, nil
 	case CodecZstd:
-		dec := decoders.Get().(*zstd.Decoder)
-		defer decoders.Put(dec)
+		dec, release, err := decoderFor(maxDecoded)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 		out, err := dec.DecodeAll(data, nil)
 		if err != nil {
 			return nil, fmt.Errorf("compression: decode: %w", err)
@@ -69,4 +81,19 @@ func Decompress(codec Codec, data []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("compression: unknown codec %d", codec)
 	}
+}
+
+// decoderFor returns a decoder bounded to maxDecoded bytes. The full-size path
+// reuses the pooled decoder; a tighter limit gets a single-use one, which only a
+// compressed control frame — never produced by Compress — reaches.
+func decoderFor(maxDecoded int) (*zstd.Decoder, func(), error) {
+	if maxDecoded >= MaxDecodedSize {
+		dec := decoders.Get().(*zstd.Decoder)
+		return dec, func() { decoders.Put(dec) }, nil
+	}
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(uint64(maxDecoded)))
+	if err != nil {
+		return nil, nil, fmt.Errorf("compression: decoder: %w", err)
+	}
+	return dec, dec.Close, nil
 }
