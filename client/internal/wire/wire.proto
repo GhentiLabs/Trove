@@ -104,6 +104,9 @@ message ManifestDelta {
   uint64 index_epoch_id = 2;
   int64 high_water_sequence = 3;
   repeated RemoteManifest manifests = 4;
+  // complete is false when more manifests remain past high_water_sequence; the
+  // replica then requests the next page with since_sequence = high_water_sequence.
+  bool complete = 6;
 }
 
 // Ping is the idle-timer keepalive.

@@ -35,6 +35,10 @@ const (
 	tmpDirName       = ".trove-tmp"
 	deltaTimeout     = 60 * time.Second
 	announceInterval = 5 * time.Second
+
+	// defaultMaxDeltaBytes caps one ManifestDelta page below the control-frame cap,
+	// leaving headroom for the envelope; larger folders span multiple pages.
+	defaultMaxDeltaBytes = wire.MaxControlMessageSize - 4096
 )
 
 var (
@@ -67,22 +71,25 @@ type FolderConfig struct {
 
 // Options configures an Engine bound to one Active session.
 type Options struct {
-	Session  *session.Session
-	Folders  []FolderConfig
-	Logger   *slog.Logger
-	InFlight int
+	Session       *session.Session
+	Folders       []FolderConfig
+	Logger        *slog.Logger
+	InFlight      int
+	MaxDeltaBytes int
 }
 
 // Engine runs one-way sync for one session's shared folders.
 type Engine struct {
-	sess     *session.Session
-	log      *slog.Logger
-	inflight int
-	folders  map[string]*folderState
-	ownsAny  bool
-	serveSem chan struct{}
+	sess          *session.Session
+	log           *slog.Logger
+	inflight      int
+	maxDeltaBytes int
+	folders       map[string]*folderState
+	ownsAny       bool
+	serveSem      chan struct{}
 
 	servedChunks atomic.Int64
+	servedDeltas atomic.Int64
 }
 
 type folderState struct {
@@ -115,11 +122,16 @@ func New(opts Options) (*Engine, error) {
 	if inflight <= 0 {
 		inflight = DefaultInFlight
 	}
+	maxDelta := opts.MaxDeltaBytes
+	if maxDelta <= 0 {
+		maxDelta = defaultMaxDeltaBytes
+	}
 	e := &Engine{
-		sess:     opts.Session,
-		log:      log,
-		inflight: inflight,
-		folders:  make(map[string]*folderState, len(opts.Folders)),
+		sess:          opts.Session,
+		log:           log,
+		inflight:      inflight,
+		maxDeltaBytes: maxDelta,
+		folders:       make(map[string]*folderState, len(opts.Folders)),
 	}
 	for _, fc := range opts.Folders {
 		if fc.Model == nil || fc.Chunks == nil {
@@ -288,9 +300,13 @@ func (e *Engine) serveManifest(ctx context.Context, fs *folderState, req *wirepb
 	}
 	if err := e.sess.Send(delta); err != nil {
 		e.log.Debug("syncengine: send delta", "folder", fs.cfg.FolderID, "err", err)
+		return
 	}
+	e.servedDeltas.Add(1)
 }
 
+// buildDelta returns one page of manifests with owner_sequence greater than the
+// request cursor, capped at maxDeltaBytes; complete is false when more remain.
 func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.ManifestRequest) (*wirepb.ManifestDelta, error) {
 	epoch, err := fs.cfg.Model.FolderEpoch(ctx)
 	if err != nil {
@@ -304,27 +320,32 @@ func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.Ma
 	if err != nil {
 		return nil, err
 	}
-	hw, err := fs.cfg.Model.HighWater(ctx)
-	if err != nil {
-		return nil, err
-	}
 	manifests := make([]*wirepb.RemoteManifest, 0, len(recs))
+	pageHigh := since
+	complete := true
+	size := 0
 	for _, rec := range recs {
-		manifests = append(manifests, recordToWire(rec))
+		rm := recordToWire(rec)
+		s := proto.Size(rm) + 2
+		if len(manifests) > 0 && size+s > e.maxDeltaBytes {
+			complete = false
+			break
+		}
+		manifests = append(manifests, rm)
+		size += s
+		pageHigh = rec.Seq
 	}
-	delta := &wirepb.ManifestDelta{
+	return &wirepb.ManifestDelta{
 		FolderId:          fs.cfg.FolderID,
 		IndexEpochId:      epoch,
-		HighWaterSequence: hw,
+		HighWaterSequence: pageHigh,
 		Manifests:         manifests,
-	}
-	// Fail rather than send a frame the replica's ReadControlMessage would reject,
-	// which would otherwise reconnect-loop. Large folders need delta pagination.
-	if proto.Size(delta) > wire.MaxControlMessageSize {
-		return nil, fmt.Errorf("syncengine: folder %q delta exceeds control-frame cap (%d manifests); pagination required", fs.cfg.FolderID, len(manifests))
-	}
-	return delta, nil
+		Complete:          complete,
+	}, nil
 }
+
+// DeltasSent is the number of manifest-delta pages this engine has sent as an owner.
+func (e *Engine) DeltasSent() int64 { return e.servedDeltas.Load() }
 
 func recordToWire(rec model.Record) *wirepb.RemoteManifest {
 	chunks := make([]*wirepb.ChunkRef, 0, len(rec.Manifest.Chunks))

@@ -76,21 +76,44 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 		since = hw
 	}
 
+	// Pull the delta a page at a time; each page is a full apply unit that advances
+	// the cursor, so memory stays bounded and a crash resumes mid-folder.
+	for {
+		page, err := fs.applyPage(ctx, a.epoch, since)
+		if err != nil {
+			return err
+		}
+		if page.complete {
+			return nil
+		}
+		since = page.highWater
+	}
+}
+
+type pageResult struct {
+	highWater int64
+	complete  bool
+}
+
+func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since int64) (pageResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, deltaTimeout)
 	defer cancel()
 
-	delta, err := fs.request(ctx, a.epoch, since)
+	delta, err := fs.request(ctx, epoch, since)
 	if err != nil {
-		return err
+		return pageResult{}, err
 	}
 	batch, pull, err := convertManifests(delta.GetManifests())
 	if err != nil {
-		return err
+		return pageResult{}, err
 	}
 	if err := fs.eng.pull(ctx, fs, pull); err != nil {
-		return err
+		return pageResult{}, err
 	}
-	return fs.apply(ctx, batch, delta)
+	if err := fs.apply(ctx, batch, delta); err != nil {
+		return pageResult{}, err
+	}
+	return pageResult{highWater: delta.GetHighWaterSequence(), complete: delta.GetComplete()}, nil
 }
 
 // request registers a one-shot reply sink, sends a ManifestRequest, and waits for

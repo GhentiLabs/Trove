@@ -653,8 +653,11 @@ type ManifestDelta struct {
 	IndexEpochId      uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	HighWaterSequence int64                  `protobuf:"varint,3,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
 	Manifests         []*RemoteManifest      `protobuf:"bytes,4,rep,name=manifests,proto3" json:"manifests,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// complete is false when more manifests remain past high_water_sequence; the
+	// replica then requests the next page with since_sequence = high_water_sequence.
+	Complete      bool `protobuf:"varint,6,opt,name=complete,proto3" json:"complete,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ManifestDelta) Reset() {
@@ -713,6 +716,13 @@ func (x *ManifestDelta) GetManifests() []*RemoteManifest {
 		return x.Manifests
 	}
 	return nil
+}
+
+func (x *ManifestDelta) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
 }
 
 // Ping is the idle-timer keepalive.
@@ -847,12 +857,13 @@ const file_wire_proto_rawDesc = "" +
 	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
 	"\n" +
 	"deleted_ms\x18\n" +
-	" \x01(\x03R\tdeletedMs\"\xbf\x01\n" +
+	" \x01(\x03R\tdeletedMs\"\xdb\x01\n" +
 	"\rManifestDelta\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +
 	"\x13high_water_sequence\x18\x03 \x01(\x03R\x11highWaterSequence\x12;\n" +
-	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\"\x06\n" +
+	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\x12\x1a\n" +
+	"\bcomplete\x18\x06 \x01(\bR\bcomplete\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +
