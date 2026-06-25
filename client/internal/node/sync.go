@@ -98,9 +98,8 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	return rt, nil
 }
 
-// repairReplicas re-materializes any out-of-band-deleted files for each replica folder
-// from its local chunk store. It runs once at startup, before peers attach, so a
-// converged replica self-heals without waiting for the owner's next delta.
+// repairReplicas re-materializes out-of-band-deleted files for each replica folder from
+// its local chunk store, once at startup before peers attach.
 func (rt *syncRuntime) repairReplicas(ctx context.Context, log *slog.Logger) {
 	for _, fc := range rt.folders {
 		if fc.Role != syncengine.RoleReplica {
@@ -182,13 +181,10 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 	}
 }
 
-// tombstoneSweepInterval is how often an owner tries to reap converged, expired
-// deletions. The retention window dwarfs it, so a coarse tick is plenty.
 const tombstoneSweepInterval = time.Hour
 
-// runTombstoneSweeper periodically reaps each owned folder's expired tombstones,
-// gated on every known replica having converged past them (see SweepTombstones). A
-// node that owns no folder returns immediately.
+// runTombstoneSweeper periodically reaps each owned folder's expired, converged
+// tombstones until ctx ends.
 func (rt *syncRuntime) runTombstoneSweeper(ctx context.Context, log *slog.Logger) {
 	ownsAny := false
 	for _, fc := range rt.folders {

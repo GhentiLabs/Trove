@@ -10,16 +10,10 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 )
 
-// RepairFolder re-materializes any of a replica folder's tracked files that have gone
-// missing on disk, sourcing bytes from the local chunk store. A replica physically
-// backs every chunk it references, so repair never touches the network. It runs once at
-// startup so a file deleted out-of-band under the replica is restored without waiting
-// for the owner's next delta.
-//
-// Existing regular files are left untouched: their content is trusted here and a
-// corruption is instead caught by the hash-verified pull path. Repair is best-effort —
-// a single file that cannot be restored is logged and skipped rather than blocking
-// startup; only an enumeration failure is returned.
+// RepairFolder re-materializes a replica folder's tracked files that are missing on
+// disk, reassembling them from the local chunk store (a replica backs every chunk it
+// references, so repair needs no network). Existing files are left as-is. It is
+// best-effort: a file it cannot restore is logged and skipped; only enumeration fails.
 func RepairFolder(ctx context.Context, cfg FolderConfig, log *slog.Logger) error {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -39,7 +33,6 @@ func RepairFolder(ctx context.Context, cfg FolderConfig, log *slog.Logger) error
 		}
 		dest, err := resolveDest(cfg.Root, rec.Manifest.Path)
 		if err != nil {
-			// Our own model should never hold an escaping path; skip defensively.
 			log.Warn("syncengine: repair skip bad path", "folder", cfg.FolderID, "path", rec.Manifest.Path, "err", err)
 			continue
 		}

@@ -94,8 +94,8 @@ func (fs *folderState) stageFile(ctx context.Context, path string, rm model.Remo
 	return stageRegular(ctx, fs.cfg.Chunks, fs.cfg.FolderCtx, path, rm.Manifest)
 }
 
-// stageRegular reassembles m's chunks from the local chunk store into a fresh staging
-// file at path, fsyncs it, and applies its mode. The caller renames it into place.
+// stageRegular reassembles m's chunks into a fresh, fsynced staging file at path with
+// m's mode, for the caller to rename into place.
 func stageRegular(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.FolderContext, path string, m manifest.Manifest) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {

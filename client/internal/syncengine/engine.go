@@ -299,9 +299,9 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 	return nil
 }
 
-// recordReceipt stores a replica's convergence acknowledgement against this owner's
-// folder, stamped with the owner's own clock so "last synced" never depends on a
-// replica's clock. It is ignored unless this node owns the folder.
+// recordReceipt stores a replica's convergence acknowledgement, stamped with the owner's
+// clock so "last synced" never depends on a replica's. Ignored unless this node owns the
+// folder.
 func (e *Engine) recordReceipt(ctx context.Context, rec *wirepb.SyncReceipt) {
 	fs := e.folders[rec.GetFolderId()]
 	if fs == nil || fs.cfg.Role != RoleOwner {

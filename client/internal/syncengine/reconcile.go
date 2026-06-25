@@ -109,10 +109,9 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 	}
 }
 
-// markConverged records that this replica reached root at (epoch, highWater) and
-// reports it to the owner so the owner can answer "last synced" and gate tombstone
-// reaping on convergence. Both writes are best-effort: a dropped receipt is re-sent on
-// the next reconcile, so a transient failure must not fail the reconcile itself.
+// markConverged records that this replica reached root at (epoch, highWater) and reports
+// it to the owner. Both writes are best-effort; a dropped receipt is re-sent on the next
+// reconcile, so it never fails the reconcile.
 func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
 	owner := fs.eng.sess.PeerNodeID()
 	now := time.Now()

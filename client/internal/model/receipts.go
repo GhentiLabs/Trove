@@ -11,9 +11,7 @@ import (
 )
 
 // Receipt records that peer reached snapshot Root at the owner's (Epoch, HighWater)
-// as of SyncedAt. On a replica it is the single proof of how far it has converged to
-// its owner; on an owner it is one row per replica — the basis for "last synced" and
-// for gating tombstone reaping on convergence.
+// as of SyncedAt.
 type Receipt struct {
 	PeerID    string
 	Root      snapshot.Root
@@ -70,10 +68,8 @@ func (s *Store) Receipts(ctx context.Context) ([]Receipt, error) {
 	return out, rows.Err()
 }
 
-// ConvergedHighWater is the minimum high-water across all recorded receipts at epoch,
-// or ok=false if no receipt matches the epoch. It is the sequence below which every
-// replica that has reported in has converged, so a tombstone at or under it can be
-// reaped without risking resurrection on a known replica.
+// ConvergedHighWater is the minimum high-water across receipts at epoch — the sequence
+// every reporting replica has converged past. ok is false if no receipt is at epoch.
 func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64) (hw int64, ok bool, err error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT MIN(high_water) FROM sync_receipts WHERE epoch = ?`, int64(epoch))

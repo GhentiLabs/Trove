@@ -43,12 +43,10 @@ func TestConvergenceReceiptExchanged(t *testing.T) {
 	waitConverged(t, owner, replica)
 
 	want := owner.currentRoot(t)
-	// Replica records its own convergence against the owner.
 	rr := waitReceipt(t, replica, ownerID, want)
 	if rr.HighWater == 0 {
 		t.Fatalf("replica receipt high-water is zero")
 	}
-	// Owner learns the replica reached its root — the "last synced" query.
 	or := waitReceipt(t, owner, replicaID, want)
 	if or.SyncedAt.IsZero() {
 		t.Fatalf("owner receipt has no timestamp")
@@ -70,9 +68,8 @@ func TestStartupRepairRematerializesDeletedFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	startSync(t, ctx, owner, replica)
 	waitConverged(t, owner, replica)
-	cancel() // detach the owner; repair must work offline
+	cancel() // repair must work with the owner detached
 
-	// Out-of-band deletion under the replica.
 	victim := filepath.Join(replica.root, "deep/nested.bin")
 	if err := os.Remove(victim); err != nil {
 		t.Fatalf("remove victim: %v", err)

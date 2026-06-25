@@ -903,11 +903,9 @@ func (x *MembershipGossip) GetEntries() []*MembershipEntry {
 	return nil
 }
 
-// SyncReceipt is a replica's acknowledgement that it has converged a folder to the
-// owner's snapshot_root at (index_epoch_id, high_water_sequence). The owner records one
-// per replica so "last synced" is queryable and tombstone reaping can wait for every
-// replica to pass the deletion. It rides the mutually-authenticated session, so peer
-// identity is the session's, not a field here.
+// SyncReceipt is a replica's acknowledgement that it converged a folder to the owner's
+// snapshot_root at (index_epoch_id, high_water_sequence). Peer identity is the
+// mutually-authenticated session's, not a field here.
 type SyncReceipt struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
