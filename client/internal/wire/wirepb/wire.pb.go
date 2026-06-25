@@ -416,8 +416,11 @@ type ManifestRequest struct {
 	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
 	IndexEpochId  uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	SinceSequence int64                  `protobuf:"varint,3,opt,name=since_sequence,json=sinceSequence,proto3" json:"since_sequence,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// since_chunk_offset resumes a manifest whose chunk list spans pages: the manifest at
+	// the first sequence past since_sequence has had this many chunks delivered already.
+	SinceChunkOffset int64 `protobuf:"varint,4,opt,name=since_chunk_offset,json=sinceChunkOffset,proto3" json:"since_chunk_offset,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ManifestRequest) Reset() {
@@ -467,6 +470,13 @@ func (x *ManifestRequest) GetIndexEpochId() uint64 {
 func (x *ManifestRequest) GetSinceSequence() int64 {
 	if x != nil {
 		return x.SinceSequence
+	}
+	return 0
+}
+
+func (x *ManifestRequest) GetSinceChunkOffset() int64 {
+	if x != nil {
+		return x.SinceChunkOffset
 	}
 	return 0
 }
@@ -540,6 +550,9 @@ type RemoteManifest struct {
 	OwnerSequence int64                  `protobuf:"varint,8,opt,name=owner_sequence,json=ownerSequence,proto3" json:"owner_sequence,omitempty"`
 	Deleted       bool                   `protobuf:"varint,9,opt,name=deleted,proto3" json:"deleted,omitempty"`
 	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
+	// more_chunks is set when this entry carries only a prefix of the file's chunk list and
+	// the remainder continues in the following delta pages (same path and manifest_id).
+	MoreChunks    bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -644,6 +657,13 @@ func (x *RemoteManifest) GetDeletedMs() int64 {
 	return 0
 }
 
+func (x *RemoteManifest) GetMoreChunks() bool {
+	if x != nil {
+		return x.MoreChunks
+	}
+	return false
+}
+
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
 // owner-sequence order, plus the epoch and high-water they were taken at so the
 // replica advances its cursor to exactly what it consumed.
@@ -655,9 +675,12 @@ type ManifestDelta struct {
 	Manifests         []*RemoteManifest      `protobuf:"bytes,4,rep,name=manifests,proto3" json:"manifests,omitempty"`
 	// complete is false when more manifests remain past high_water_sequence; the
 	// replica then requests the next page with since_sequence = high_water_sequence.
-	Complete      bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Complete bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
+	// high_water_chunk_offset is non-zero when the manifest at high_water_sequence is only
+	// partially delivered; the next request resumes it at this chunk offset.
+	HighWaterChunkOffset int64 `protobuf:"varint,6,opt,name=high_water_chunk_offset,json=highWaterChunkOffset,proto3" json:"high_water_chunk_offset,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ManifestDelta) Reset() {
@@ -723,6 +746,13 @@ func (x *ManifestDelta) GetComplete() bool {
 		return x.Complete
 	}
 	return false
+}
+
+func (x *ManifestDelta) GetHighWaterChunkOffset() int64 {
+	if x != nil {
+		return x.HighWaterChunkOffset
+	}
+	return 0
 }
 
 // MembershipEntry is one signed roster record on the wire. The signature is over the
@@ -984,14 +1014,15 @@ const file_wire_proto_rawDesc = "" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"{\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\xa9\x01\n" +
 	"\x0fManifestRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12%\n" +
-	"\x0esince_sequence\x18\x03 \x01(\x03R\rsinceSequence\"=\n" +
+	"\x0esince_sequence\x18\x03 \x01(\x03R\rsinceSequence\x12,\n" +
+	"\x12since_chunk_offset\x18\x04 \x01(\x03R\x10sinceChunkOffset\"=\n" +
 	"\bChunkRef\x12\x19\n" +
 	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x03R\x06length\"\xcc\x02\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xed\x02\n" +
 	"\x0eRemoteManifest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
@@ -1005,13 +1036,16 @@ const file_wire_proto_rawDesc = "" +
 	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
 	"\n" +
 	"deleted_ms\x18\n" +
-	" \x01(\x03R\tdeletedMs\"\xdb\x01\n" +
+	" \x01(\x03R\tdeletedMs\x12\x1f\n" +
+	"\vmore_chunks\x18\v \x01(\bR\n" +
+	"moreChunks\"\x92\x02\n" +
 	"\rManifestDelta\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +
 	"\x13high_water_sequence\x18\x03 \x01(\x03R\x11highWaterSequence\x12;\n" +
 	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\x12\x1a\n" +
-	"\bcomplete\x18\x05 \x01(\bR\bcomplete\"\xc9\x01\n" +
+	"\bcomplete\x18\x05 \x01(\bR\bcomplete\x125\n" +
+	"\x17high_water_chunk_offset\x18\x06 \x01(\x03R\x14highWaterChunkOffset\"\xc9\x01\n" +
 	"\x0fMembershipEntry\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\tR\tnetworkId\x12\x17\n" +

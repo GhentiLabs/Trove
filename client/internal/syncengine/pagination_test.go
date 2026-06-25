@@ -3,23 +3,74 @@ package syncengine
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
-// A single manifest too large for one control frame must fail loudly, not be emitted as
-// an undeliverable page that the replica rejects and re-requests forever.
-func TestBuildDeltaRejectsOversizedManifest(t *testing.T) {
+// A manifest whose chunk list overflows one page is split across pages instead of
+// emitted as an undeliverable frame: the first page carries a prefix with more_chunks set.
+func TestBuildDeltaPagesLargeManifest(t *testing.T) {
 	owner := newPeer(t, ownerID)
-	writeFile(t, owner.root, "f.txt", []byte("content"))
+	buf := make([]byte, 6<<20)
+	rand.New(rand.NewSource(1)).Read(buf)
+	writeFile(t, owner.root, "big.bin", buf)
 	owner.scan(t)
 
-	e := &Engine{maxDeltaBytes: 1}
+	e := &Engine{maxDeltaBytes: 200}
 	fs := &folderState{cfg: FolderConfig{FolderID: folderID, Model: owner.model}}
-	if _, err := e.buildDelta(context.Background(), fs, &wirepb.ManifestRequest{}); err == nil {
-		t.Fatal("buildDelta accepted a manifest larger than the page cap")
+	delta, err := e.buildDelta(context.Background(), fs, &wirepb.ManifestRequest{})
+	if err != nil {
+		t.Fatalf("buildDelta: %v", err)
 	}
+	if len(delta.GetManifests()) != 1 || !delta.GetManifests()[0].GetMoreChunks() {
+		t.Fatalf("expected one partial manifest, got %d (more=%v)", len(delta.GetManifests()),
+			len(delta.GetManifests()) == 1 && delta.GetManifests()[0].GetMoreChunks())
+	}
+	if delta.GetHighWaterChunkOffset() == 0 || delta.GetComplete() {
+		t.Fatalf("expected an incomplete page with a chunk offset, got offset=%d complete=%v",
+			delta.GetHighWaterChunkOffset(), delta.GetComplete())
+	}
+}
+
+// End-to-end: a multi-chunk file converges bit-exact when a tiny delta budget forces its
+// chunk list across many continuation pages — the real large-file path.
+func TestLargeFileConvergesViaIntraManifestPaging(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	replica := newPeer(t, replicaID)
+	buf := make([]byte, 6<<20)
+	rand.New(rand.NewSource(2)).Read(buf)
+	writeFile(t, owner.root, "big.bin", buf)
+	owner.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ownerSess, replicaSess := memSessionPair(t, ctx, owner, replica)
+	ownerEng, err := New(Options{
+		Session: ownerSess, MaxDeltaBytes: 200,
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleOwner, Root: owner.root, Model: owner.model, Chunks: owner.chunks}},
+	})
+	if err != nil {
+		t.Fatalf("owner engine: %v", err)
+	}
+	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
+	replicaEng, err := New(Options{
+		Session: replicaSess,
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
+	})
+	if err != nil {
+		t.Fatalf("replica engine: %v", err)
+	}
+	ownerSess.SetControlHandler(ownerEng.Handle)
+	replicaSess.SetControlHandler(replicaEng.Handle)
+	go func() { _ = ownerSess.Run(ctx) }()
+	go func() { _ = replicaSess.Run(ctx) }()
+	go func() { _ = ownerEng.Drive(ctx) }()
+	go func() { _ = replicaEng.Drive(ctx) }()
+
+	waitConverged(t, owner, replica)
+	assertTreesEqual(t, owner.root, replica.root)
 }
 
 // TestManifestDeltaPagination converges a folder whose full manifest delta exceeds a

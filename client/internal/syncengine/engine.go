@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/session"
@@ -41,6 +42,10 @@ const (
 	// for values below 16 KiB) when budgeting a delta page, so the estimate never
 	// undercounts the wire size.
 	protoRepeatedOverhead = 4
+
+	// chunkRefWireSize over-estimates one ChunkRef on the wire (32-byte id + length +
+	// framing), used to decide how many of a manifest's chunk refs fit in one page.
+	chunkRefWireSize = 48
 
 	// defaultMaxDeltaBytes caps one ManifestDelta page below the control-frame cap,
 	// leaving headroom for the envelope; larger folders span multiple pages.
@@ -350,66 +355,102 @@ func (e *Engine) serveManifest(ctx context.Context, fs *folderState, req *wirepb
 	e.servedDeltas.Add(1)
 }
 
-// buildDelta returns one page of manifests with owner_sequence greater than the
-// request cursor, capped at maxDeltaBytes; complete is false when more remain.
+// buildDelta returns one page of manifests past the request cursor, capped at
+// maxDeltaBytes. The cursor is (since_sequence, since_chunk_offset): a manifest whose
+// chunk list does not fit one page is split across pages, so even a huge file converges.
+// While a manifest is mid-delivery, high_water_sequence holds at the last fully-sent
+// sequence and high_water_chunk_offset counts the chunks delivered; both reset when it
+// completes.
 func (e *Engine) buildDelta(ctx context.Context, fs *folderState, req *wirepb.ManifestRequest) (*wirepb.ManifestDelta, error) {
 	epoch, err := fs.cfg.Model.FolderEpoch(ctx)
 	if err != nil {
 		return nil, err
 	}
 	since := req.GetSinceSequence()
+	offset := req.GetSinceChunkOffset()
 	if req.GetIndexEpochId() != epoch {
-		since = 0
+		since, offset = 0, 0
 	}
 	recs, err := fs.cfg.Model.ManifestsSince(ctx, since)
 	if err != nil {
 		return nil, err
 	}
-	manifests := make([]*wirepb.RemoteManifest, 0, len(recs))
-	pageHigh := since
-	complete := true
+
+	delta := &wirepb.ManifestDelta{FolderId: fs.cfg.FolderID, IndexEpochId: epoch, HighWaterSequence: since}
+
+	// Resuming a manifest whose chunk list spilled across pages: recs[0] is it.
+	if offset > 0 {
+		if len(recs) == 0 { // the in-progress manifest is gone (e.g. epoch change); restart clean.
+			delta.Complete = true
+			return delta, nil
+		}
+		rec := recs[0]
+		rm, delivered, more := sliceManifest(rec, offset, e.maxDeltaBytes)
+		delta.Manifests = []*wirepb.RemoteManifest{rm}
+		if more {
+			delta.HighWaterChunkOffset = delivered
+		} else {
+			delta.HighWaterSequence = rec.Seq
+			delta.Complete = len(recs) == 1
+		}
+		return delta, nil
+	}
+
+	// Normal page: pack whole manifests until the budget is hit. A manifest too large for
+	// an otherwise-empty page begins a continuation.
 	size := 0
 	for _, rec := range recs {
-		rm := recordToWire(rec)
-		s := proto.Size(rm) + protoRepeatedOverhead
+		meta := recordToWireMeta(rec)
+		s := proto.Size(meta) + protoRepeatedOverhead + len(rec.Manifest.Chunks)*chunkRefWireSize
 		if size+s > e.maxDeltaBytes {
-			if len(manifests) == 0 {
-				// A single manifest too large for one control frame would be sent as an
-				// undeliverable page that the replica rejects and re-requests forever.
-				// Fail loudly instead; splitting a manifest's chunk refs across pages is
-				// the real fix (large-file follow-up).
-				return nil, fmt.Errorf("syncengine: manifest %q (%d bytes) exceeds the delta page cap", rec.Manifest.Path, s)
+			if len(delta.Manifests) > 0 {
+				return delta, nil // complete stays false; HighWaterSequence is the last full seq
 			}
-			complete = false
-			break
+			rm, delivered, _ := sliceManifest(rec, 0, e.maxDeltaBytes)
+			delta.Manifests = []*wirepb.RemoteManifest{rm}
+			delta.HighWaterChunkOffset = delivered
+			return delta, nil
 		}
-		manifests = append(manifests, rm)
+		delta.Manifests = append(delta.Manifests, recordToWire(rec))
 		size += s
-		pageHigh = rec.Seq
+		delta.HighWaterSequence = rec.Seq
 	}
-	return &wirepb.ManifestDelta{
-		FolderId:          fs.cfg.FolderID,
-		IndexEpochId:      epoch,
-		HighWaterSequence: pageHigh,
-		Manifests:         manifests,
-		Complete:          complete,
-	}, nil
+	delta.Complete = true
+	return delta, nil
+}
+
+// sliceManifest builds a wire manifest carrying rec's chunks starting at offset, taking
+// as many as fit one page. It returns the entry, the total chunks now delivered, and
+// whether more remain (MoreChunks set accordingly).
+func sliceManifest(rec model.Record, offset int64, budget int) (*wirepb.RemoteManifest, int64, bool) {
+	rm := recordToWireMeta(rec)
+	all := rec.Manifest.Chunks
+	if offset > int64(len(all)) {
+		offset = int64(len(all))
+	}
+	remaining := all[offset:]
+	fit := (budget - proto.Size(rm) - protoRepeatedOverhead) / chunkRefWireSize
+	if fit < 1 {
+		fit = 1
+	}
+	if fit > len(remaining) {
+		fit = len(remaining)
+	}
+	rm.Chunks = wireChunks(remaining[:fit])
+	more := int(offset)+fit < len(all)
+	rm.MoreChunks = more
+	return rm, offset + int64(fit), more
 }
 
 // DeltasSent is the number of manifest-delta pages this engine has sent as an owner.
 func (e *Engine) DeltasSent() int64 { return e.servedDeltas.Load() }
 
-func recordToWire(rec model.Record) *wirepb.RemoteManifest {
-	chunks := make([]*wirepb.ChunkRef, 0, len(rec.Manifest.Chunks))
-	for _, c := range rec.Manifest.Chunks {
-		chunks = append(chunks, &wirepb.ChunkRef{ChunkId: c.ID.Bytes(), Length: c.Length})
-	}
+func recordToWireMeta(rec model.Record) *wirepb.RemoteManifest {
 	rm := &wirepb.RemoteManifest{
 		Kind:          uint32(rec.Manifest.Kind),
 		Path:          rec.Manifest.Path,
 		Mode:          rec.Manifest.Mode,
 		SymlinkTarget: rec.Manifest.SymlinkTarget,
-		Chunks:        chunks,
 		ManifestId:    rec.ID.Bytes(),
 		VersionVector: rec.Version.Canonical(),
 		OwnerSequence: rec.Seq,
@@ -419,4 +460,18 @@ func recordToWire(rec model.Record) *wirepb.RemoteManifest {
 		rm.DeletedMs = rec.DeletedAt.UnixMilli()
 	}
 	return rm
+}
+
+func recordToWire(rec model.Record) *wirepb.RemoteManifest {
+	rm := recordToWireMeta(rec)
+	rm.Chunks = wireChunks(rec.Manifest.Chunks)
+	return rm
+}
+
+func wireChunks(chunks []manifest.ChunkRef) []*wirepb.ChunkRef {
+	out := make([]*wirepb.ChunkRef, len(chunks))
+	for i, c := range chunks {
+		out[i] = &wirepb.ChunkRef{ChunkId: c.ID.Bytes(), Length: c.Length}
+	}
+	return out
 }

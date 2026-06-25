@@ -76,55 +76,105 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 		since = hw
 	}
 
-	// Pull the delta a page at a time. The cursor must strictly advance and the page
-	// count is capped, so a buggy or hostile owner cannot loop the replica forever.
+	// Pull the delta a page at a time. The cursor (sequence, chunk-offset) must strictly
+	// advance and the page count is capped, so a buggy or hostile owner cannot loop the
+	// replica forever. A manifest whose chunk list spans pages is accumulated in carry
+	// and applied only once fully received.
+	var offset int64
+	var carry *carryState
 	for pages := 0; ; pages++ {
 		if pages >= maxDeltaPages {
 			return fmt.Errorf("syncengine: delta exceeded %d pages for %q", maxDeltaPages, fs.cfg.FolderID)
 		}
-		page, err := fs.applyPage(ctx, a.epoch, since)
+		res, err := fs.applyPage(ctx, a.epoch, since, offset, carry)
 		if err != nil {
 			return err
 		}
-		if page.complete {
+		if res.complete {
 			return nil
 		}
-		if page.highWater <= since {
-			return fmt.Errorf("syncengine: delta page cursor did not advance past %d for %q", since, fs.cfg.FolderID)
+		if res.since < since || (res.since == since && res.offset <= offset) {
+			return fmt.Errorf("syncengine: delta cursor did not advance past (%d,%d) for %q", since, offset, fs.cfg.FolderID)
 		}
-		since = page.highWater
+		since, offset, carry = res.since, res.offset, res.carry
 	}
+}
+
+// carryState accumulates the chunk refs of a manifest whose list spans several pages,
+// until the final page completes it.
+type carryState struct {
+	meta   *wirepb.RemoteManifest
+	chunks []*wirepb.ChunkRef
 }
 
 type pageResult struct {
-	highWater int64
-	complete  bool
+	since    int64
+	offset   int64
+	carry    *carryState
+	complete bool
 }
 
-func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since int64) (pageResult, error) {
+func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since, offset int64, carry *carryState) (pageResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, deltaTimeout)
 	defer cancel()
 
-	delta, err := fs.request(ctx, epoch, since)
+	delta, err := fs.request(ctx, epoch, since, offset)
 	if err != nil {
 		return pageResult{}, err
 	}
-	batch, pull, err := convertManifests(delta.GetManifests())
+	wms := delta.GetManifests()
+	newSince := delta.GetHighWaterSequence()
+	owner := fs.eng.sess.PeerNodeID()
+
+	// A continuation page carries the single in-progress manifest's next chunk slice; its
+	// chunks are pulled now but the file is applied only when the manifest completes.
+	if offset > 0 || carry != nil || (len(wms) == 1 && wms[0].GetMoreChunks()) {
+		if len(wms) == 0 {
+			return pageResult{since: newSince, offset: delta.GetHighWaterChunkOffset(), complete: delta.GetComplete()}, nil
+		}
+		wm := wms[0]
+		_, pull, err := convertManifests([]*wirepb.RemoteManifest{wm})
+		if err != nil {
+			return pageResult{}, err
+		}
+		if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
+			return pageResult{}, err
+		}
+		if carry == nil {
+			carry = &carryState{meta: wm}
+		}
+		carry.chunks = append(carry.chunks, wm.GetChunks()...)
+		if wm.GetMoreChunks() {
+			return pageResult{since: newSince, offset: delta.GetHighWaterChunkOffset(), carry: carry, complete: false}, nil
+		}
+		carry.meta.Chunks = carry.chunks
+		carry.meta.MoreChunks = false
+		batch, _, err := convertManifests([]*wirepb.RemoteManifest{carry.meta})
+		if err != nil {
+			return pageResult{}, err
+		}
+		if err := fs.apply(ctx, batch, delta); err != nil {
+			return pageResult{}, err
+		}
+		return pageResult{since: newSince, complete: delta.GetComplete()}, nil
+	}
+
+	batch, pull, err := convertManifests(wms)
 	if err != nil {
 		return pageResult{}, err
 	}
-	if err := fs.cfg.Coord.pull(ctx, pull, fs.eng.sess.PeerNodeID()); err != nil {
+	if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
 		return pageResult{}, err
 	}
 	if err := fs.apply(ctx, batch, delta); err != nil {
 		return pageResult{}, err
 	}
-	return pageResult{highWater: delta.GetHighWaterSequence(), complete: delta.GetComplete()}, nil
+	return pageResult{since: newSince, complete: delta.GetComplete()}, nil
 }
 
 // request registers a one-shot reply sink, sends a ManifestRequest, and waits for
 // the matching ManifestDelta.
-func (fs *folderState) request(ctx context.Context, epoch uint64, since int64) (*wirepb.ManifestDelta, error) {
+func (fs *folderState) request(ctx context.Context, epoch uint64, since, offset int64) (*wirepb.ManifestDelta, error) {
 	ch := make(chan *wirepb.ManifestDelta, 1)
 	fs.mu.Lock()
 	fs.reply = ch
@@ -135,7 +185,7 @@ func (fs *folderState) request(ctx context.Context, epoch uint64, since int64) (
 		fs.mu.Unlock()
 	}()
 
-	req := &wirepb.ManifestRequest{FolderId: fs.cfg.FolderID, IndexEpochId: epoch, SinceSequence: since}
+	req := &wirepb.ManifestRequest{FolderId: fs.cfg.FolderID, IndexEpochId: epoch, SinceSequence: since, SinceChunkOffset: offset}
 	if err := fs.eng.sess.Send(req); err != nil {
 		return nil, fmt.Errorf("syncengine: send manifest request: %w", err)
 	}
