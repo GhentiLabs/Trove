@@ -68,13 +68,25 @@ signatures, reject and don't propagate bad ones; trusted-only.
 **Accept:** a signed roster gossips to all members; a new member learns the full roster
 from any one peer; an invalid-signature entry is rejected and not propagated.
 
-## Phase D — SyncReceipts + deletion lifecycle + offline catch-up + live gate
+## Phase D — SyncReceipts + deletion lifecycle + offline catch-up + live gate (built; live gate pending)
 
 `sync_receipts` table exchanged on folder-sync completion; tombstone deletion applied
 as a consistent snapshot unit (no resurrect on reconnect; reaped after convergence);
 startup fs-reconcile; offline replica catches up via anti-entropy on reconnect.
 
-**Accept (the M4 integration gate):** ≥3 real machines across NAT via Trove/holepunch
-converge a multi-file folder through an edit, a delete, and a rename, with one replica
-offline for part of the run; both ends hold correct SyncReceipts; "last synced" is
-queryable.
+Implemented: the `SyncReceipt` wire message (type 8) and `sync_receipts` table — a
+replica records and reports convergence to its owner's root on each reconcile
+completion; the owner stores one receipt per replica (`trove-peer status` prints them,
+so "last synced" is queryable). `SweepTombstones` is gated on `safeSeq` = the minimum
+high-water across replica receipts, so a deletion is reaped only after every known
+replica has applied it (90-day retention is the backstop); an owner-side hourly sweeper
+computes the gate. `RepairFolder` re-materializes a replica's out-of-band-deleted files
+from local chunks at startup. The deletion-apply and atomic cursor commit were already
+in place from Phase A. Covered by model units, engine-level convergence/repair/offline
+catch-up tests, and the NAT matrix's live second round (edit + delete + rename + receipt
+query over real holepunch).
+
+**Accept (the M4 integration gate — human-run):** ≥3 real machines across NAT via
+Trove/holepunch converge a multi-file folder through an edit, a delete, and a rename,
+with one replica offline for part of the run; both ends hold correct SyncReceipts;
+"last synced" is queryable. Procedure in `docs/m4-live-runbook.md`.

@@ -161,6 +161,7 @@ run_cell() {
 	local SRC="$STATE/A/share" DST="$STATE/B/share" group
 	mkdir -p "$SRC/sub" "$DST"
 	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	head -c 262144 /dev/urandom >"$SRC/movable.bin"
 	printf 'hello trove\n' >"$SRC/sub/note.txt"
 	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" | awk '/group id:/{print $3}')
 	if [ -z "$group" ]; then log "found failed"; kill $coord_pid 2>/dev/null; return 2; fi
@@ -201,8 +202,37 @@ run_cell() {
 		xfer="fail"
 		for j in $(seq 1 30); do
 			if cmp -s "$SRC/big.bin" "$DST/big.bin" 2>/dev/null \
+			   && cmp -s "$SRC/movable.bin" "$DST/movable.bin" 2>/dev/null \
 			   && cmp -s "$SRC/sub/note.txt" "$DST/sub/note.txt" 2>/dev/null; then
 				xfer="ok"; break
+			fi
+			sleep 1
+		done
+	fi
+
+	# Second round over the live holepunched path: the owner edits a file, deletes
+	# another, and renames a third; the replica must converge to the new state —
+	# deletion does not resurrect and a rename moves no chunk data. Then the owner's
+	# receipt for the replica must be queryable ("last synced"). This is the Phase D
+	# convergence shape (edit + delete + rename) the M4 gate requires.
+	local round2="n/a" receipt="n/a"
+	if [ "$xfer" = ok ]; then
+		round2="fail"
+		printf 'edited after first sync\n' >"$SRC/sub/note.txt"
+		rm -f "$SRC/big.bin"
+		mv "$SRC/movable.bin" "$SRC/moved.bin"
+		for j in $(seq 1 30); do
+			if cmp -s "$SRC/sub/note.txt" "$DST/sub/note.txt" 2>/dev/null \
+			   && cmp -s "$SRC/moved.bin" "$DST/moved.bin" 2>/dev/null \
+			   && [ ! -e "$DST/big.bin" ] && [ ! -e "$DST/movable.bin" ]; then
+				round2="ok"; break
+			fi
+			sleep 1
+		done
+		receipt="fail"
+		for j in $(seq 1 15); do
+			if ip netns exec clA trove-peer status -dir "$STATE/A" 2>/dev/null | grep -q "peer ${idB}"; then
+				receipt="ok"; break
 			fi
 			sleep 1
 		done
@@ -212,13 +242,13 @@ run_cell() {
 	wait $pa $pb 2>/dev/null
 
 	local result="fail" took=""
-	if [ $ok -eq 1 ] && [ $stable -eq 1 ] && [ "$xfer" = ok ]; then
+	if [ $ok -eq 1 ] && [ $stable -eq 1 ] && [ "$xfer" = ok ] && [ "$round2" = ok ] && [ "$receipt" = ok ]; then
 		result="success"
-		took=" in ${i}s, files bit-exact"
-	elif [ $ok -eq 1 ] && [ "$xfer" = fail ]; then
-		log "cell ${na}x${nb}: session formed but file transfer FAILED"
-		log "---- A sync ----"; grep -iE "sync|manifest|chunk|scan|folder" "$LOG/A" | tail -15
-		log "---- B sync ----"; grep -iE "sync|manifest|chunk|coordinator|apply|folder" "$LOG/B" | tail -15
+		took=" in ${i}s, bit-exact + edit/delete/rename converged, receipt queryable"
+	elif [ $ok -eq 1 ] && { [ "$xfer" = fail ] || [ "$round2" = fail ] || [ "$receipt" = fail ]; }; then
+		log "cell ${na}x${nb}: session formed but sync FAILED (xfer=$xfer round2=$round2 receipt=$receipt)"
+		log "---- A sync ----"; grep -iE "sync|manifest|chunk|scan|folder|receipt|tombstone" "$LOG/A" | tail -20
+		log "---- B sync ----"; grep -iE "sync|manifest|chunk|coordinator|apply|folder|receipt" "$LOG/B" | tail -20
 	fi
 
 	if [ "$result" = "$expect" ]; then
