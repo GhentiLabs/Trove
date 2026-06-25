@@ -69,12 +69,23 @@ func (s *Store) Receipts(ctx context.Context) ([]Receipt, error) {
 }
 
 // ConvergedHighWater is the minimum high-water across receipts at epoch — the sequence
-// every reporting replica has converged past. ok is false if no receipt is at epoch.
+// every reporting replica has converged past — used as the tombstone-reaping gate. ok is
+// false only when no receipt of any epoch exists, so the caller falls back to retention
+// alone. If any receipt is at a different epoch (a previously-known replica that has not
+// re-confirmed since an owner rebuild, and may still hold un-applied deletions), it
+// returns (0, true) to block reaping until that replica reconnects.
 func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64) (hw int64, ok bool, err error) {
-	row := s.db.QueryRow(ctx,
-		`SELECT MIN(high_water) FROM sync_receipts WHERE epoch = ?`, int64(epoch))
+	var stale int64
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sync_receipts WHERE epoch != ?`, int64(epoch)).Scan(&stale); err != nil {
+		return 0, false, fmt.Errorf("model: stale receipt count: %w", err)
+	}
+	if stale > 0 {
+		return 0, true, nil
+	}
 	var min sql.NullInt64
-	if err := row.Scan(&min); err != nil {
+	if err := s.db.QueryRow(ctx,
+		`SELECT MIN(high_water) FROM sync_receipts WHERE epoch = ?`, int64(epoch)).Scan(&min); err != nil {
 		return 0, false, fmt.Errorf("model: converged high water: %w", err)
 	}
 	if !min.Valid {

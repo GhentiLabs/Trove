@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/model"
+	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
 // waitReceipt polls until p holds a receipt for peerID whose root matches wantRoot.
@@ -54,6 +55,100 @@ func TestConvergenceReceiptExchanged(t *testing.T) {
 	if or.HighWater != rr.HighWater {
 		t.Fatalf("receipt high-water mismatch: owner %d, replica %d", or.HighWater, rr.HighWater)
 	}
+}
+
+// TestReceiptValidationRejectsBadEpochAndCapsHighWater proves the owner trusts a
+// receipt only as far as it can check it: a wrong epoch is rejected outright and an
+// inflated high-water is capped to what the owner has produced, so a hostile replica
+// cannot move the tombstone-reaping gate past a sequence it never reached.
+func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	replica := newPeer(t, replicaID)
+	writeFile(t, owner.root, "a.txt", []byte("hello"))
+	writeFile(t, owner.root, "b.txt", []byte("world"))
+	owner.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ownerEng, _ := startSync(t, ctx, owner, replica)
+	waitConverged(t, owner, replica)
+
+	want := owner.currentRoot(t)
+	base := waitReceipt(t, owner, replicaID, want)
+	bg := context.Background()
+	epoch, err := owner.model.FolderEpoch(bg)
+	if err != nil {
+		t.Fatalf("FolderEpoch: %v", err)
+	}
+	curRoot, err := owner.model.CurrentRoot(bg)
+	if err != nil {
+		t.Fatalf("CurrentRoot: %v", err)
+	}
+	rootBytes := curRoot.Bytes()
+
+	// Wrong epoch: rejected; the genuine receipt is untouched.
+	ownerEng.recordReceipt(bg, &wirepb.SyncReceipt{
+		FolderId: folderID, SnapshotRoot: rootBytes, IndexEpochId: epoch + 999, HighWaterSequence: base.HighWater + 5,
+	})
+	got, _, err := owner.model.Receipt(bg, replicaID)
+	if err != nil {
+		t.Fatalf("Receipt: %v", err)
+	}
+	if got.HighWater != base.HighWater || got.Epoch != epoch {
+		t.Fatalf("wrong-epoch receipt mutated state: %+v (base hw %d, epoch %d)", got, base.HighWater, epoch)
+	}
+
+	// Inflated high-water: capped to the owner's max sequence.
+	ownerMax, err := owner.model.HighWater(bg)
+	if err != nil {
+		t.Fatalf("HighWater: %v", err)
+	}
+	ownerEng.recordReceipt(bg, &wirepb.SyncReceipt{
+		FolderId: folderID, SnapshotRoot: rootBytes, IndexEpochId: epoch, HighWaterSequence: ownerMax + 1_000_000,
+	})
+	got, _, err = owner.model.Receipt(bg, replicaID)
+	if err != nil {
+		t.Fatalf("Receipt: %v", err)
+	}
+	if got.HighWater != ownerMax {
+		t.Fatalf("inflated high-water not capped: got %d, want %d", got.HighWater, ownerMax)
+	}
+}
+
+// TestStartupRepairRestoresDirAndSymlink covers the directory and symlink repair
+// branches: both are recreated when removed out-of-band under the replica.
+func TestStartupRepairRestoresDirAndSymlink(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	replica := newPeer(t, replicaID)
+	if err := os.MkdirAll(filepath.Join(owner.root, "d/sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, owner.root, "d/sub/f.txt", []byte("inside"))
+	if err := os.Symlink("d/sub/f.txt", filepath.Join(owner.root, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	owner.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startSync(t, ctx, owner, replica)
+	waitConverged(t, owner, replica)
+	cancel()
+
+	if err := os.RemoveAll(filepath.Join(replica.root, "d")); err != nil {
+		t.Fatalf("rm dir: %v", err)
+	}
+	if err := os.Remove(filepath.Join(replica.root, "link")); err != nil {
+		t.Fatalf("rm link: %v", err)
+	}
+
+	cfg := FolderConfig{
+		FolderID: folderID, Role: RoleReplica, Root: replica.root,
+		FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks,
+	}
+	if err := RepairFolder(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("RepairFolder: %v", err)
+	}
+	assertTreesEqual(t, owner.root, replica.root)
 }
 
 // TestStartupRepairRematerializesDeletedFile proves a replica restores a file deleted

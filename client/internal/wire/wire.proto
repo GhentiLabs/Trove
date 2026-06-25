@@ -145,7 +145,6 @@ message SyncReceipt {
   bytes snapshot_root = 2;
   uint64 index_epoch_id = 3;
   int64 high_water_sequence = 4;
-  int64 synced_ms = 5;
 }
 
 // Ping is the idle-timer keepalive.

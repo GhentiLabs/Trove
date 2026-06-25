@@ -294,32 +294,46 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 			fs.deliver(d)
 		}
 	case wire.TypeSyncReceipt:
-		e.recordReceipt(ctx, msg.(*wirepb.SyncReceipt))
+		// Off the read loop: the model write can block on the SQLite write lock, and
+		// the receipt is best-effort. The peer re-sends on its next reconcile.
+		go e.recordReceipt(ctx, msg.(*wirepb.SyncReceipt))
 	}
 	return nil
 }
 
 // recordReceipt stores a replica's convergence acknowledgement, stamped with the owner's
-// clock so "last synced" never depends on a replica's. Ignored unless this node owns the
-// folder.
+// clock so "last synced" never depends on a replica's. A receipt is trusted only as far
+// as the owner can check it: its epoch must be the owner's current one and its
+// high-water is capped to what the owner has actually produced, so a buggy or hostile
+// replica cannot move the tombstone-reaping gate past a sequence it never reached.
+// Ignored unless this node owns the folder.
 func (e *Engine) recordReceipt(ctx context.Context, rec *wirepb.SyncReceipt) {
 	fs := e.folders[rec.GetFolderId()]
 	if fs == nil || fs.cfg.Role != RoleOwner {
 		return
 	}
-	root, err := snapshot.RootFromBytes(rec.GetSnapshotRoot())
+	peer := e.sess.PeerNodeID()
+	epoch, err := fs.cfg.Model.FolderEpoch(ctx)
 	if err != nil {
-		e.log.Warn("syncengine: bad receipt root", "folder", rec.GetFolderId(), "peer", e.sess.PeerNodeID(), "err", err)
+		e.log.Warn("syncengine: receipt epoch", "folder", rec.GetFolderId(), "peer", peer, "err", err)
 		return
 	}
+	if rec.GetIndexEpochId() != epoch {
+		return
+	}
+	root, err := snapshot.RootFromBytes(rec.GetSnapshotRoot())
+	if err != nil {
+		e.log.Warn("syncengine: bad receipt root", "folder", rec.GetFolderId(), "peer", peer, "err", err)
+		return
+	}
+	hw := rec.GetHighWaterSequence()
+	if ownerMax, err := fs.cfg.Model.HighWater(ctx); err == nil && hw > ownerMax {
+		hw = ownerMax
+	}
 	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
-		PeerID:    e.sess.PeerNodeID(),
-		Root:      root,
-		Epoch:     rec.GetIndexEpochId(),
-		HighWater: rec.GetHighWaterSequence(),
-		SyncedAt:  time.Now(),
+		PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: time.Now(),
 	}); err != nil {
-		e.log.Warn("syncengine: record peer receipt", "folder", rec.GetFolderId(), "peer", e.sess.PeerNodeID(), "err", err)
+		e.log.Warn("syncengine: record peer receipt", "folder", rec.GetFolderId(), "peer", peer, "err", err)
 	}
 }
 

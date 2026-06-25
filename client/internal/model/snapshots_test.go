@@ -241,11 +241,19 @@ func TestConvergedHighWater(t *testing.T) {
 	}
 	must("p1", 7, 40)
 	must("p2", 7, 25)
-	must("p3", 9, 5) // different epoch, must be ignored
 
+	// All receipts at the queried epoch: the gate is their minimum.
 	hw, ok, err := s.ConvergedHighWater(ctx, 7)
 	if err != nil || !ok || hw != 25 {
 		t.Fatalf("ConvergedHighWater(7) = (%d, %v, %v), want (25, true, nil)", hw, ok, err)
+	}
+
+	// A receipt at a stale epoch (a previously-known replica that has not re-confirmed
+	// since an owner rebuild) blocks reaping at 0 until it reconnects.
+	must("p3", 9, 5)
+	hw, ok, err = s.ConvergedHighWater(ctx, 7)
+	if err != nil || !ok || hw != 0 {
+		t.Fatalf("stale-epoch gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
 	}
 
 	got, ok, err := s.Receipt(ctx, "p2")

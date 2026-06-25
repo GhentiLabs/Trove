@@ -912,7 +912,6 @@ type SyncReceipt struct {
 	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
 	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
-	SyncedMs          int64                  `protobuf:"varint,5,opt,name=synced_ms,json=syncedMs,proto3" json:"synced_ms,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -971,13 +970,6 @@ func (x *SyncReceipt) GetIndexEpochId() uint64 {
 func (x *SyncReceipt) GetHighWaterSequence() int64 {
 	if x != nil {
 		return x.HighWaterSequence
-	}
-	return 0
-}
-
-func (x *SyncReceipt) GetSyncedMs() int64 {
-	if x != nil {
-		return x.SyncedMs
 	}
 	return 0
 }
@@ -1138,13 +1130,12 @@ const file_wire_proto_rawDesc = "" +
 	"\x10MembershipGossip\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\tR\tnetworkId\x128\n" +
-	"\aentries\x18\x02 \x03(\v2\x1e.trove.wire.v1.MembershipEntryR\aentries\"\xc2\x01\n" +
+	"\aentries\x18\x02 \x03(\v2\x1e.trove.wire.v1.MembershipEntryR\aentries\"\xa5\x01\n" +
 	"\vSyncReceipt\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\x12\x1b\n" +
-	"\tsynced_ms\x18\x05 \x01(\x03R\bsyncedMs\"\x06\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +

@@ -226,6 +226,9 @@ func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 		} else if ok {
 			safeSeq = hw
 		}
+		if safeSeq == 0 {
+			log.Debug("node: tombstone reaping gated; awaiting replica convergence", "folder", fc.FolderID)
+		}
 		n, err := fc.Model.SweepTombstones(ctx, now, safeSeq)
 		if err != nil {
 			log.Warn("node: tombstone sweep", "folder", fc.FolderID, "err", err)

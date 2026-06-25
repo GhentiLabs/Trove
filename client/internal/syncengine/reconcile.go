@@ -114,19 +114,16 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 // reconcile, so it never fails the reconcile.
 func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
 	owner := fs.eng.sess.PeerNodeID()
-	now := time.Now()
 	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
-		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: now,
+		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: time.Now(),
 	}); err != nil {
 		fs.eng.log.Warn("syncengine: record receipt", "folder", fs.cfg.FolderID, "err", err)
-		return
 	}
 	if err := fs.eng.sess.Send(&wirepb.SyncReceipt{
 		FolderId:          fs.cfg.FolderID,
 		SnapshotRoot:      root.Bytes(),
 		IndexEpochId:      epoch,
 		HighWaterSequence: highWater,
-		SyncedMs:          now.UnixMilli(),
 	}); err != nil {
 		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", owner, "err", err)
 	}

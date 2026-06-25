@@ -193,8 +193,8 @@ func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([
 		return nil, nil
 	}
 
-	// Persist the verified entries in a short transaction. Add-only with ON CONFLICT DO
-	// NOTHING makes a concurrent write between the read and here harmless.
+	// Add-only with ON CONFLICT DO NOTHING makes a concurrent write between the read and
+	// here harmless.
 	err = s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		for _, e := range added {
 			if err := writeEntry(ctx, tx, e); err != nil {

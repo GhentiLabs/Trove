@@ -67,9 +67,6 @@ func repairOne(ctx context.Context, cfg FolderConfig, stage string, m manifest.M
 		if linkTargetIs(dest, m.SymlinkTarget) {
 			return false, nil
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return false, fmt.Errorf("mkdir parent: %w", err)
-		}
 		if err := materializeSymlink(dest, m.SymlinkTarget); err != nil {
 			return false, err
 		}
