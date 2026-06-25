@@ -90,7 +90,6 @@ type Options struct {
 	Session       *session.Session
 	Folders       []FolderConfig
 	Logger        *slog.Logger
-	InFlight      int
 	MaxDeltaBytes int
 }
 
@@ -98,7 +97,6 @@ type Options struct {
 type Engine struct {
 	sess          *session.Session
 	log           *slog.Logger
-	inflight      int
 	maxDeltaBytes int
 	folders       map[string]*folderState
 	ownsAny       bool
@@ -110,8 +108,9 @@ type Engine struct {
 }
 
 type folderState struct {
-	eng *Engine
-	cfg FolderConfig
+	eng      *Engine
+	cfg      FolderConfig
+	stageDir string
 
 	mu     sync.Mutex
 	busy   bool
@@ -126,6 +125,15 @@ type announce struct {
 	highWater int64
 }
 
+// stageDir is a per-session staging directory, so engines for the same folder on
+// different sessions never clobber each other's in-progress apply.
+func stageDir(root, peer string) string {
+	if len(peer) > 8 {
+		peer = peer[:8]
+	}
+	return filepath.Join(root, tmpDirName+"-"+peer)
+}
+
 // New builds an Engine for the given session and folders.
 func New(opts Options) (*Engine, error) {
 	if opts.Session == nil {
@@ -134,10 +142,6 @@ func New(opts Options) (*Engine, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
-	}
-	inflight := opts.InFlight
-	if inflight <= 0 {
-		inflight = DefaultInFlight
 	}
 	maxDelta := opts.MaxDeltaBytes
 	if maxDelta <= 0 {
@@ -150,7 +154,6 @@ func New(opts Options) (*Engine, error) {
 	e := &Engine{
 		sess:          opts.Session,
 		log:           log,
-		inflight:      inflight,
 		maxDeltaBytes: maxDelta,
 		folders:       make(map[string]*folderState, len(opts.Folders)),
 	}
@@ -167,7 +170,7 @@ func New(opts Options) (*Engine, error) {
 		if fc.Role == RoleOwner && fc.Coord != nil {
 			return nil, fmt.Errorf("syncengine: owner folder %q must not have a coordinator", fc.FolderID)
 		}
-		e.folders[fc.FolderID] = &folderState{eng: e, cfg: fc}
+		e.folders[fc.FolderID] = &folderState{eng: e, cfg: fc, stageDir: stageDir(fc.Root, opts.Session.PeerNodeID())}
 		if fc.Role == RoleOwner {
 			e.ownsAny = true
 		}
@@ -189,7 +192,7 @@ func (e *Engine) Drive(ctx context.Context) error {
 	conn := e.sess.Conn()
 	for _, fs := range e.folders {
 		if fs.cfg.Role == RoleReplica {
-			_ = os.RemoveAll(filepath.Join(fs.cfg.Root, tmpDirName))
+			_ = os.RemoveAll(fs.stageDir)
 		}
 		if fs.cfg.Coord != nil {
 			fs.cfg.Coord.addSource(peer, conn)

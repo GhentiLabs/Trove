@@ -36,7 +36,7 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 		dests[i] = dest
 	}
 
-	stage := filepath.Join(fs.cfg.Root, tmpDirName)
+	stage := fs.stageDir
 	_ = os.RemoveAll(stage) // discard any debris from a previous failed attempt
 	if err := os.MkdirAll(stage, 0o700); err != nil {
 		return fmt.Errorf("syncengine: stage dir: %w", err)

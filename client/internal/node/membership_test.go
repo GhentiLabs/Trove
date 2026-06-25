@@ -53,7 +53,7 @@ func gossipPair(t *testing.T, ctx context.Context, aID, bID string, ga, gb *goss
 	mn := netio.NewMemNet()
 	at := mn.Transport("a", aID)
 	bt := mn.Transport("b", bID)
-	allow := func(string) ([]string, bool, error) { return nil, true, nil }
+	allow := func(context.Context, string) ([]string, bool, error) { return nil, true, nil }
 
 	type res struct {
 		s   *session.Session

@@ -178,51 +178,24 @@ func (s *Store) Add(ctx context.Context, networkID, nodeID string, publicKey []b
 // stores the valid, and returns the newly added entries (for re-gossip). Entries are
 // add-only; an entry whose chain cannot be verified is dropped.
 func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([]Entry, error) {
-	var added []Entry
-	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		known, err := networkKnown(ctx, tx, networkID)
-		if err != nil || !known {
-			return err
-		}
-		roster, err := loadRoster(ctx, tx, networkID)
-		if err != nil {
-			return err
-		}
-		accepted := make(map[string]Entry, len(roster))
-		writers := make(map[string]ed25519.PublicKey, len(roster))
-		for _, e := range roster {
-			accepted[e.NodeID] = e
-			if e.Role == RoleWriter {
-				writers[e.NodeID] = e.PublicKey
-			}
-		}
+	// Read the current roster and verify the additions WITHOUT holding the write lock:
+	// per-entry Ed25519 verification must not stall every other writer of this database.
+	known, err := networkKnown(ctx, s.db, networkID)
+	if err != nil || !known {
+		return nil, err
+	}
+	roster, err := loadRoster(ctx, s.db, networkID)
+	if err != nil {
+		return nil, err
+	}
+	added := verifyAdditions(networkID, roster, entries)
+	if len(added) == 0 {
+		return nil, nil
+	}
 
-		pending := make([]Entry, 0, len(entries))
-		for _, e := range entries {
-			if _, ok := accepted[e.NodeID]; !ok {
-				pending = append(pending, e)
-			}
-		}
-		for {
-			progress := false
-			rest := pending[:0]
-			for _, e := range pending {
-				if verifyChain(networkID, e, writers) {
-					accepted[e.NodeID] = e
-					if e.Role == RoleWriter {
-						writers[e.NodeID] = e.PublicKey
-					}
-					added = append(added, e)
-					progress = true
-				} else {
-					rest = append(rest, e)
-				}
-			}
-			pending = rest
-			if !progress || len(pending) == 0 {
-				break
-			}
-		}
+	// Persist the verified entries in a short transaction. Add-only with ON CONFLICT DO
+	// NOTHING makes a concurrent write between the read and here harmless.
+	err = s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		for _, e := range added {
 			if err := writeEntry(ctx, tx, e); err != nil {
 				return err
@@ -234,6 +207,47 @@ func (s *Store) Merge(ctx context.Context, networkID string, entries []Entry) ([
 		return nil, err
 	}
 	return added, nil
+}
+
+// verifyAdditions returns the entries whose trust chain verifies against the known
+// roster, resolving out-of-order delivery by fixpoint. It performs no I/O.
+func verifyAdditions(networkID string, roster, entries []Entry) []Entry {
+	accepted := make(map[string]struct{}, len(roster))
+	writers := make(map[string]ed25519.PublicKey, len(roster))
+	for _, e := range roster {
+		accepted[e.NodeID] = struct{}{}
+		if e.Role == RoleWriter {
+			writers[e.NodeID] = e.PublicKey
+		}
+	}
+	pending := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if _, ok := accepted[e.NodeID]; !ok {
+			pending = append(pending, e)
+		}
+	}
+	var added []Entry
+	for {
+		progress := false
+		rest := pending[:0]
+		for _, e := range pending {
+			if verifyChain(networkID, e, writers) {
+				accepted[e.NodeID] = struct{}{}
+				if e.Role == RoleWriter {
+					writers[e.NodeID] = e.PublicKey
+				}
+				added = append(added, e)
+				progress = true
+			} else {
+				rest = append(rest, e)
+			}
+		}
+		pending = rest
+		if !progress || len(pending) == 0 {
+			break
+		}
+	}
+	return added
 }
 
 // verifyChain reports whether e is a valid roster entry: the founder's self-signed

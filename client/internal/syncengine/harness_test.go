@@ -20,7 +20,7 @@ import (
 
 const folderID = "demo"
 
-func grant(string) ([]string, bool, error) { return []string{folderID}, true, nil }
+func grant(context.Context, string) ([]string, bool, error) { return []string{folderID}, true, nil }
 
 type peer struct {
 	id     string

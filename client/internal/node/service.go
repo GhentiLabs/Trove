@@ -513,11 +513,10 @@ func (s *Service) gossipLoop(ctx context.Context) {
 // authorize grants a peer the groups (by group id, which is the folder share id) it is a
 // verified member of, plus any group it founded — a member can always reach its founder
 // straight from the group id, which bootstraps the roster.
-func (s *Service) authorize(nodeID string) ([]string, bool, error) {
+func (s *Service) authorize(ctx context.Context, nodeID string) ([]string, bool, error) {
 	if s.members == nil {
 		return nil, false, nil
 	}
-	ctx := context.Background()
 	groups, err := s.members.Networks(ctx)
 	if err != nil {
 		return nil, false, err

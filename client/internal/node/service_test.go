@@ -132,7 +132,7 @@ func TestDialableNoLocalSubnets(t *testing.T) {
 func TestAuthorizeGrantsRosterMembers(t *testing.T) {
 	f := newService(t)
 
-	granted, ok, err := f.svc.authorize(f.peerID)
+	granted, ok, err := f.svc.authorize(context.Background(), f.peerID)
 	if err != nil || !ok {
 		t.Fatalf("authorize(member) = ok %v, err %v, want true, nil", ok, err)
 	}
@@ -141,7 +141,7 @@ func TestAuthorizeGrantsRosterMembers(t *testing.T) {
 	}
 
 	unknown := "cccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	if _, ok, err := f.svc.authorize(unknown); ok || err != nil {
+	if _, ok, err := f.svc.authorize(context.Background(), unknown); ok || err != nil {
 		t.Fatalf("authorize(unknown) = ok %v, err %v, want false, nil", ok, err)
 	}
 }
@@ -198,12 +198,12 @@ func TestAuthorizeFounderBootstrap(t *testing.T) {
 	}
 
 	s := &Service{opts: Options{NodeID: selfID}, members: members}
-	granted, ok, err := s.authorize(founderID)
+	granted, ok, err := s.authorize(context.Background(), founderID)
 	if err != nil || !ok || !slices.Equal(granted, []string{group}) {
 		t.Fatalf("authorize(founder) = %v, ok %v, err %v; want [%s], true, nil", granted, ok, err, group)
 	}
 	stranger := "dddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	if _, ok, _ := s.authorize(stranger); ok {
+	if _, ok, _ := s.authorize(context.Background(), stranger); ok {
 		t.Fatal("a non-founder non-member was authorized")
 	}
 }
