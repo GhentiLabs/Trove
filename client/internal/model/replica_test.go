@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -318,6 +319,75 @@ func TestApplyRemoteConcurrentDifferentContentPicksDeterministicWinner(t *testin
 	}
 	if !rec2.Version.Dominates(manifest.VersionVector{nodeB: 1}) {
 		t.Fatalf("winning local did not absorb the loser's vector: %v", rec2.Version)
+	}
+}
+
+func conflictingEdit(path, author string, counter uint64, atMs int64, content string) RemoteManifest {
+	m := manifest.Manifest{Kind: manifest.KindRegular, Path: path, Mode: 0o644,
+		Chunks: []manifest.ChunkRef{{ID: hasher.Sum([]byte(content)), Length: int64(len(content))}}}
+	return RemoteManifest{
+		Manifest: m, ID: m.ID(), Version: manifest.VersionVector{author: counter},
+		Author: author, AuthoredAt: time.UnixMilli(atMs),
+	}
+}
+
+func TestKeepBothConvergesDeterministically(t *testing.T) {
+	ctx := context.Background()
+	a := conflictingEdit("a.txt", nodeA, 1, 100, "content from A")
+	b := conflictingEdit("a.txt", nodeB, 1, 200, "content from B") // later edit wins
+
+	// Apply the two concurrent edits in both orders; the outcome must be identical.
+	s1 := newStore(t)
+	if err := applyRemote(ctx, s1, nodeA, 1, 1, a); err != nil {
+		t.Fatalf("s1 apply a: %v", err)
+	}
+	if err := applyRemote(ctx, s1, nodeB, 1, 1, b); err != nil {
+		t.Fatalf("s1 apply b: %v", err)
+	}
+
+	s2 := newStore(t)
+	if err := applyRemote(ctx, s2, nodeB, 1, 1, b); err != nil {
+		t.Fatalf("s2 apply b: %v", err)
+	}
+	if err := applyRemote(ctx, s2, nodeA, 1, 1, a); err != nil {
+		t.Fatalf("s2 apply a: %v", err)
+	}
+
+	r1, _ := s1.CurrentRoot(ctx)
+	r2, _ := s2.CurrentRoot(ctx)
+	if r1 != r2 {
+		t.Fatalf("keep-both diverged across apply order: %s vs %s", r1, r2)
+	}
+
+	// The winner (B) holds the path with the joined vector; the loser (A) survives as a
+	// conflict copy carrying A's content and A's vector verbatim.
+	win := mustGet(t, s1, "a.txt")
+	if win.ID != b.ID {
+		t.Fatalf("winner is not B's content: %s", win.ID)
+	}
+	if !win.Version.Dominates(manifest.VersionVector{nodeA: 1}) || !win.Version.Dominates(manifest.VersionVector{nodeB: 1}) {
+		t.Fatalf("winner vector is not the join: %v", win.Version)
+	}
+	ccPath := ConflictPath("a.txt", nodeA, time.UnixMilli(100))
+	cc := mustGet(t, s1, ccPath)
+	if !slices.Equal(cc.Manifest.Chunks, a.Manifest.Chunks) {
+		t.Fatalf("conflict copy does not hold A's content: %+v", cc.Manifest.Chunks)
+	}
+	if !maps.Equal(cc.Version, manifest.VersionVector{nodeA: 1}) {
+		t.Fatalf("conflict copy vector not verbatim: %v", cc.Version)
+	}
+
+	// Idempotent: re-running detection over the resolved state produces nothing new.
+	before, _ := s1.ListManifests(ctx)
+	if err := applyRemote(ctx, s1, nodeA, 1, 1, a); err != nil {
+		t.Fatalf("re-apply a: %v", err)
+	}
+	if err := applyRemote(ctx, s1, nodeB, 1, 1, b); err != nil {
+		t.Fatalf("re-apply b: %v", err)
+	}
+	after, _ := s1.ListManifests(ctx)
+	if len(after) != len(before) {
+		t.Fatalf("resolution not idempotent: %d manifests before, %d after", len(before), len(after))
 	}
 }
 

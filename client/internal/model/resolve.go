@@ -1,6 +1,11 @@
 package model
 
-import "time"
+import (
+	"path"
+	"time"
+
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
+)
 
 // ConflictWinner reports whether the version authored by (aAuthor, aAuthoredAt) is
 // the canonical winner over a concurrent version (bAuthor, bAuthoredAt): later
@@ -11,4 +16,19 @@ func ConflictWinner(aAuthor string, aAuthoredAt time.Time, bAuthor string, bAuth
 		return am > bm
 	}
 	return aAuthor > bAuthor
+}
+
+const conflictTimeLayout = "20060102T150405.000Z"
+
+// ConflictPath is the keep-both copy path for the losing version of a path, derived
+// only from the loser's agreed fields (its edit time and author), so every node names
+// the copy identically. The name carries the loser's own identity, so the copy never
+// collides with the winner or with a different loser.
+func ConflictPath(p, loserAuthor string, loserAuthoredAt time.Time) string {
+	p = manifest.NormalizePath(p)
+	dir, base := path.Split(p)
+	ext := path.Ext(base)
+	stem := base[:len(base)-len(ext)]
+	ts := loserAuthoredAt.UTC().Format(conflictTimeLayout)
+	return dir + stem + ".conflict-" + ts + "-" + loserAuthor + ext
 }
