@@ -30,13 +30,17 @@ type syncRuntime struct {
 	closers []func() error
 }
 
-// folderRole is this node's sync direction for a group: the founder writes (owner,
-// scans and serves); every other member reads (replica, pulls and applies).
-func folderRole(self, groupID string) syncengine.Role {
+// folderRole is this node's tier for a group: a writer originates local edits, a
+// reader only pulls and relays. The founder is always a writer; any other member is a
+// writer iff the roster grants it the writer tier.
+func folderRole(ctx context.Context, store *membership.Store, self, groupID string) syncengine.Role {
 	if founder, ok := membership.Founder(groupID); ok && founder == self {
-		return syncengine.RoleOwner
+		return syncengine.RoleWriter
 	}
-	return syncengine.RoleReplica
+	if role, ok, err := store.RoleOf(ctx, groupID, self); err == nil && ok && role == membership.RoleWriter {
+		return syncengine.RoleWriter
+	}
+	return syncengine.RoleReader
 }
 
 // buildSyncRuntime opens per-folder model and chunk stores under StateDir.
@@ -85,26 +89,21 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 			return nil, fmt.Errorf("node: open chunk store %q: %w", f.ShareID, err)
 		}
 		rt.closers = append(rt.closers, cs.Close)
-		role := folderRole(s.opts.NodeID, f.ShareID)
+		role := folderRole(ctx, s.members, s.opts.NodeID, f.ShareID)
 		fc := syncengine.FolderConfig{
 			FolderID: f.ShareID, Role: role, Root: f.Root, Model: ms, Chunks: cs,
 		}
-		if role == syncengine.RoleReplica {
-			fc.Coord = syncengine.NewCoordinator(f.ShareID, fc.FolderCtx, cs, 0, s.log)
-		}
+		fc.Coord = syncengine.NewCoordinator(f.ShareID, fc.FolderCtx, cs, 0, s.log)
 		rt.folders = append(rt.folders, fc)
 	}
 	ok = true
 	return rt, nil
 }
 
-// repairReplicas re-materializes out-of-band-deleted files for each replica folder from
-// its local chunk store, once at startup before peers attach.
-func (rt *syncRuntime) repairReplicas(ctx context.Context, log *slog.Logger) {
+// repairFolders re-materializes out-of-band-deleted files for each folder from its
+// local chunk store, once at startup before peers attach.
+func (rt *syncRuntime) repairFolders(ctx context.Context, log *slog.Logger) {
 	for _, fc := range rt.folders {
-		if fc.Role != syncengine.RoleReplica {
-			continue
-		}
 		if err := syncengine.RepairFolder(ctx, fc, log); err != nil {
 			log.Warn("node: startup repair", "folder", fc.FolderID, "err", err)
 		}
@@ -188,7 +187,7 @@ const tombstoneSweepInterval = time.Hour
 func (rt *syncRuntime) runTombstoneSweeper(ctx context.Context, log *slog.Logger) {
 	ownsAny := false
 	for _, fc := range rt.folders {
-		if fc.Role == syncengine.RoleOwner {
+		if fc.Role == syncengine.RoleWriter {
 			ownsAny = true
 			break
 		}
@@ -211,7 +210,7 @@ func (rt *syncRuntime) runTombstoneSweeper(ctx context.Context, log *slog.Logger
 func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 	now := time.Now()
 	for _, fc := range rt.folders {
-		if fc.Role != syncengine.RoleOwner {
+		if fc.Role != syncengine.RoleWriter {
 			continue
 		}
 		epoch, err := fc.Model.FolderEpoch(ctx)
@@ -245,7 +244,7 @@ func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 	var wg sync.WaitGroup
 	for _, fc := range rt.folders {
-		if fc.Role != syncengine.RoleOwner {
+		if fc.Role != syncengine.RoleWriter {
 			continue
 		}
 		w, err := watcher.New(fc.Root)

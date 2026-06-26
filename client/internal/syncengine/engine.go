@@ -62,19 +62,21 @@ var (
 	errChunkVerify      = errors.New("syncengine: chunk failed hash verification")
 )
 
-// Role is a folder's one-way direction on a session.
+// Role is a folder's membership tier on this node. Both tiers announce, serve, and
+// pull; only a writer originates local edits (the node scans a writer folder, never a
+// reader folder).
 type Role uint8
 
 const (
-	// RoleOwner serves manifests and chunks and never pulls.
-	RoleOwner Role = iota
-	// RoleReplica pulls and applies and never originates.
-	RoleReplica
+	// RoleWriter originates local edits and participates in two-way sync.
+	RoleWriter Role = iota
+	// RoleReader never originates; it pulls, applies, and relays.
+	RoleReader
 )
 
 // FolderConfig binds one shared folder to its local stores and on-disk root. Coord is
-// the node's per-folder multi-source coordinator, shared across the node's sessions; a
-// replica sets it, an owner leaves it nil.
+// the node's per-folder multi-source coordinator, shared across the node's sessions;
+// every folder has one, since every node both serves and pulls.
 type FolderConfig struct {
 	FolderID  string
 	Role      Role
@@ -93,13 +95,12 @@ type Options struct {
 	MaxDeltaBytes int
 }
 
-// Engine runs one-way sync for one session's shared folders.
+// Engine runs two-way sync for one session's shared folders.
 type Engine struct {
 	sess          *session.Session
 	log           *slog.Logger
 	maxDeltaBytes int
 	folders       map[string]*folderState
-	ownsAny       bool
 	serveSem      chan struct{}
 	manifestSem   chan struct{}
 
@@ -164,47 +165,33 @@ func New(opts Options) (*Engine, error) {
 		if fc.Model == nil || fc.Chunks == nil {
 			return nil, fmt.Errorf("syncengine: folder %q missing stores", fc.FolderID)
 		}
-		if fc.Role == RoleReplica && fc.Coord == nil {
-			return nil, fmt.Errorf("syncengine: replica folder %q missing coordinator", fc.FolderID)
-		}
-		if fc.Role == RoleOwner && fc.Coord != nil {
-			return nil, fmt.Errorf("syncengine: owner folder %q must not have a coordinator", fc.FolderID)
+		if fc.Coord == nil {
+			return nil, fmt.Errorf("syncengine: folder %q missing coordinator", fc.FolderID)
 		}
 		e.folders[fc.FolderID] = &folderState{eng: e, cfg: fc, stageDir: stageDir(fc.Root, opts.Session.PeerNodeID())}
-		if fc.Role == RoleOwner {
-			e.ownsAny = true
-		}
 	}
 	if len(e.folders) > 0 {
 		e.serveSem = make(chan struct{}, maxServeStreams)
-	}
-	if e.ownsAny {
 		e.manifestSem = make(chan struct{}, maxManifestServes)
 	}
 	return e, nil
 }
 
 // Drive runs the sync engine until ctx is cancelled. It registers this session as a
-// source with each folder's coordinator (so a replica can pull from this peer) and
-// serves inbound chunk requests; an owner also announces.
+// source with each folder's coordinator, announces this node's folder state, and
+// serves inbound chunk and manifest requests.
 func (e *Engine) Drive(ctx context.Context) error {
 	peer := e.sess.PeerNodeID()
 	conn := e.sess.Conn()
 	for _, fs := range e.folders {
-		if fs.cfg.Role == RoleReplica {
-			_ = os.RemoveAll(fs.stageDir)
-		}
-		if fs.cfg.Coord != nil {
-			fs.cfg.Coord.addSource(peer, conn)
-			defer fs.cfg.Coord.removeSource(peer, conn)
-		}
+		_ = os.RemoveAll(fs.stageDir)
+		fs.cfg.Coord.addSource(peer, conn)
+		defer fs.cfg.Coord.removeSource(peer, conn)
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { e.serveLoop(ctx) })
-	if e.ownsAny {
-		wg.Go(func() { e.announceLoop(ctx) })
-		e.Announce(ctx)
-	}
+	wg.Go(func() { e.announceLoop(ctx) })
+	e.Announce(ctx)
 	<-ctx.Done()
 	wg.Wait()
 	return ctx.Err()
@@ -223,12 +210,9 @@ func (e *Engine) announceLoop(ctx context.Context) {
 	}
 }
 
-// Announce sends a FolderSummary for every owned folder.
+// Announce sends a FolderSummary for every folder on this session.
 func (e *Engine) Announce(ctx context.Context) {
 	for _, fs := range e.folders {
-		if fs.cfg.Role != RoleOwner {
-			continue
-		}
 		if err := e.announceFolder(ctx, fs); err != nil {
 			e.log.Warn("syncengine: announce", "folder", fs.cfg.FolderID, "err", err)
 		}
@@ -263,7 +247,7 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 	case wire.TypeFolderSummary:
 		sum := msg.(*wirepb.FolderSummary)
 		fs := e.folders[sum.GetFolderId()]
-		if fs == nil || fs.cfg.Role != RoleReplica {
+		if fs == nil {
 			return nil
 		}
 		root, err := snapshot.RootFromBytes(sum.GetSnapshotRoot())
@@ -275,7 +259,7 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 	case wire.TypeManifestRequest:
 		req := msg.(*wirepb.ManifestRequest)
 		fs := e.folders[req.GetFolderId()]
-		if fs == nil || fs.cfg.Role != RoleOwner {
+		if fs == nil {
 			return nil
 		}
 		select {
@@ -301,15 +285,14 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 	return nil
 }
 
-// recordReceipt stores a replica's convergence acknowledgement, stamped with the owner's
-// clock so "last synced" never depends on a replica's. A receipt is trusted only as far
-// as the owner can check it: its epoch must be the owner's current one and its
-// high-water is capped to what the owner has actually produced, so a buggy or hostile
-// replica cannot move the tombstone-reaping gate past a sequence it never reached.
-// Ignored unless this node owns the folder.
+// recordReceipt stores a peer's acknowledgement that it converged this node's lineage,
+// stamped with this node's clock so "last synced" never depends on the peer's. A receipt
+// is trusted only as far as this node can check it: its epoch must be this node's current
+// one and its high-water is capped to what this node has actually produced, so a buggy or
+// hostile peer cannot move the tombstone-reaping gate past a sequence it never reached.
 func (e *Engine) recordReceipt(ctx context.Context, rec *wirepb.SyncReceipt) {
 	fs := e.folders[rec.GetFolderId()]
-	if fs == nil || fs.cfg.Role != RoleOwner {
+	if fs == nil {
 		return
 	}
 	peer := e.sess.PeerNodeID()
@@ -330,7 +313,7 @@ func (e *Engine) recordReceipt(ctx context.Context, rec *wirepb.SyncReceipt) {
 	if ownerMax, err := fs.cfg.Model.HighWater(ctx); err == nil && hw > ownerMax {
 		hw = ownerMax
 	}
-	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
+	if err := fs.cfg.Model.RecordReceipt(ctx, model.InboundAck, model.Receipt{
 		PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: time.Now(),
 	}); err != nil {
 		e.log.Warn("syncengine: record peer receipt", "folder", rec.GetFolderId(), "peer", peer, "err", err)
@@ -496,7 +479,6 @@ func recordToWireMeta(rec model.Record) *wirepb.RemoteManifest {
 		SymlinkTarget: rec.Manifest.SymlinkTarget,
 		ManifestId:    rec.ID.Bytes(),
 		VersionVector: rec.Version.Canonical(),
-		OwnerSequence: rec.Seq,
 		Author:        rec.Author,
 		AuthoredMs:    rec.AuthoredAt.UnixMilli(),
 		Deleted:       rec.Deleted,

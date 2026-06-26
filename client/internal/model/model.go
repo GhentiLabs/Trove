@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/storage"
@@ -96,13 +97,13 @@ CREATE TABLE IF NOT EXISTS counters (
 	name TEXT    PRIMARY KEY,
 	next INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS replica_cursors (
-	folder_id     TEXT    NOT NULL,
-	owner_peer_id TEXT    NOT NULL,
-	epoch         INTEGER NOT NULL,
-	high_water    INTEGER NOT NULL,
-	updated_ms    INTEGER NOT NULL,
-	PRIMARY KEY (folder_id, owner_peer_id)
+CREATE TABLE IF NOT EXISTS peer_cursors (
+	folder_id  TEXT    NOT NULL,
+	peer_id    TEXT    NOT NULL,
+	epoch      INTEGER NOT NULL,
+	high_water INTEGER NOT NULL,
+	updated_ms INTEGER NOT NULL,
+	PRIMARY KEY (folder_id, peer_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS folder_epoch (
 	id         INTEGER PRIMARY KEY CHECK (id = 1),
@@ -110,11 +111,13 @@ CREATE TABLE IF NOT EXISTS folder_epoch (
 	created_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_receipts (
-	peer_id       TEXT PRIMARY KEY,
+	peer_id       TEXT    NOT NULL,
+	direction     INTEGER NOT NULL,
 	snapshot_root BLOB    NOT NULL,
 	epoch         INTEGER NOT NULL,
 	high_water    INTEGER NOT NULL,
-	synced_ms     INTEGER NOT NULL
+	synced_ms     INTEGER NOT NULL,
+	PRIMARY KEY (peer_id, direction)
 ) WITHOUT ROWID;`
 
 // querier is the read surface shared by *storage.DB and *storage.Tx, so load
@@ -128,6 +131,10 @@ type querier interface {
 type Store struct {
 	db   *storage.DB
 	node string
+
+	// applyMu serializes a remote apply against local origination so a concurrent
+	// scan cannot change a path's version between the resolve and the commit.
+	applyMu sync.Mutex
 }
 
 // Options configures Open.

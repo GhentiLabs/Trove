@@ -10,8 +10,21 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 )
 
-// Receipt records that peer reached snapshot Root at the owner's (Epoch, HighWater)
-// as of SyncedAt.
+// ReceiptKind is the direction of a convergence receipt. A node holds both kinds per
+// peer once sync is two-way, so they are stored separately.
+type ReceiptKind int
+
+const (
+	// InboundAck records that a peer reported converging this node's lineage. It drives
+	// the tombstone-reaping gate.
+	InboundAck ReceiptKind = iota
+	// LocalSync records that this node converged a peer's lineage. It drives "last synced"
+	// reporting.
+	LocalSync
+)
+
+// Receipt records that peer reached snapshot Root at (Epoch, HighWater) of the acked
+// lineage as of SyncedAt.
 type Receipt struct {
 	PeerID    string
 	Root      snapshot.Root
@@ -20,25 +33,25 @@ type Receipt struct {
 	SyncedAt  time.Time
 }
 
-// RecordReceipt upserts a convergence receipt for one peer.
-func (s *Store) RecordReceipt(ctx context.Context, r Receipt) error {
+// RecordReceipt upserts a convergence receipt of the given kind for one peer.
+func (s *Store) RecordReceipt(ctx context.Context, kind ReceiptKind, r Receipt) error {
 	if _, err := s.db.Exec(ctx,
-		`INSERT INTO sync_receipts (peer_id, snapshot_root, epoch, high_water, synced_ms)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(peer_id) DO UPDATE SET
+		`INSERT INTO sync_receipts (peer_id, direction, snapshot_root, epoch, high_water, synced_ms)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(peer_id, direction) DO UPDATE SET
 			snapshot_root=excluded.snapshot_root, epoch=excluded.epoch,
 			high_water=excluded.high_water, synced_ms=excluded.synced_ms`,
-		r.PeerID, r.Root.Bytes(), int64(r.Epoch), r.HighWater, r.SyncedAt.UnixMilli()); err != nil {
+		r.PeerID, int(kind), r.Root.Bytes(), int64(r.Epoch), r.HighWater, r.SyncedAt.UnixMilli()); err != nil {
 		return fmt.Errorf("model: record receipt: %w", err)
 	}
 	return nil
 }
 
-// Receipt returns the stored receipt for peer; ok is false if none exists.
-func (s *Store) Receipt(ctx context.Context, peerID string) (r Receipt, ok bool, err error) {
+// Receipt returns the stored receipt of kind for peer; ok is false if none exists.
+func (s *Store) Receipt(ctx context.Context, kind ReceiptKind, peerID string) (r Receipt, ok bool, err error) {
 	row := s.db.QueryRow(ctx,
-		`SELECT peer_id, snapshot_root, epoch, high_water, synced_ms FROM sync_receipts WHERE peer_id = ?`,
-		peerID)
+		`SELECT peer_id, snapshot_root, epoch, high_water, synced_ms FROM sync_receipts WHERE peer_id = ? AND direction = ?`,
+		peerID, int(kind))
 	r, err = scanReceipt(row)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -49,10 +62,11 @@ func (s *Store) Receipt(ctx context.Context, peerID string) (r Receipt, ok bool,
 	return r, true, nil
 }
 
-// Receipts returns every stored receipt, ordered by peer.
-func (s *Store) Receipts(ctx context.Context) ([]Receipt, error) {
+// Receipts returns every stored receipt of kind, ordered by peer.
+func (s *Store) Receipts(ctx context.Context, kind ReceiptKind) ([]Receipt, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT peer_id, snapshot_root, epoch, high_water, synced_ms FROM sync_receipts ORDER BY peer_id`)
+		`SELECT peer_id, snapshot_root, epoch, high_water, synced_ms FROM sync_receipts WHERE direction = ? ORDER BY peer_id`,
+		int(kind))
 	if err != nil {
 		return nil, fmt.Errorf("model: list receipts: %w", err)
 	}
@@ -68,16 +82,16 @@ func (s *Store) Receipts(ctx context.Context) ([]Receipt, error) {
 	return out, rows.Err()
 }
 
-// ConvergedHighWater is the minimum high-water across receipts at epoch — the sequence
-// every reporting replica has converged past — used as the tombstone-reaping gate. ok is
-// false only when no receipt of any epoch exists, so the caller falls back to retention
-// alone. If any receipt is at a different epoch (a previously-known replica that has not
-// re-confirmed since an owner rebuild, and may still hold un-applied deletions), it
-// returns (0, true) to block reaping until that replica reconnects.
+// ConvergedHighWater is the minimum high-water across inbound acks at epoch — the sequence
+// every reporting peer has converged past — used as the tombstone-reaping gate. ok is
+// false only when no inbound ack of any epoch exists, so the caller falls back to retention
+// alone. If any inbound ack is at a different epoch (a previously-known peer that has not
+// re-confirmed since an epoch rebuild, and may still hold un-applied deletions), it returns
+// (0, true) to block reaping until that peer reconnects.
 func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64) (hw int64, ok bool, err error) {
 	var stale int64
 	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sync_receipts WHERE epoch != ?`, int64(epoch)).Scan(&stale); err != nil {
+		`SELECT COUNT(*) FROM sync_receipts WHERE direction = ? AND epoch != ?`, int(InboundAck), int64(epoch)).Scan(&stale); err != nil {
 		return 0, false, fmt.Errorf("model: stale receipt count: %w", err)
 	}
 	if stale > 0 {
@@ -85,7 +99,7 @@ func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64) (hw int64,
 	}
 	var min sql.NullInt64
 	if err := s.db.QueryRow(ctx,
-		`SELECT MIN(high_water) FROM sync_receipts WHERE epoch = ?`, int64(epoch)).Scan(&min); err != nil {
+		`SELECT MIN(high_water) FROM sync_receipts WHERE direction = ? AND epoch = ?`, int(InboundAck), int64(epoch)).Scan(&min); err != nil {
 		return 0, false, fmt.Errorf("model: converged high water: %w", err)
 	}
 	if !min.Valid {

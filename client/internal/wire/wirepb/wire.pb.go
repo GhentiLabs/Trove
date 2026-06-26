@@ -547,7 +547,6 @@ type RemoteManifest struct {
 	Chunks        []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
 	ManifestId    []byte                 `protobuf:"bytes,6,opt,name=manifest_id,json=manifestId,proto3" json:"manifest_id,omitempty"`
 	VersionVector []byte                 `protobuf:"bytes,7,opt,name=version_vector,json=versionVector,proto3" json:"version_vector,omitempty"`
-	OwnerSequence int64                  `protobuf:"varint,8,opt,name=owner_sequence,json=ownerSequence,proto3" json:"owner_sequence,omitempty"`
 	Deleted       bool                   `protobuf:"varint,9,opt,name=deleted,proto3" json:"deleted,omitempty"`
 	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
 	// more_chunks is set when this entry carries only a prefix of the file's chunk list and
@@ -638,13 +637,6 @@ func (x *RemoteManifest) GetVersionVector() []byte {
 		return x.VersionVector
 	}
 	return nil
-}
-
-func (x *RemoteManifest) GetOwnerSequence() int64 {
-	if x != nil {
-		return x.OwnerSequence
-	}
-	return 0
 }
 
 func (x *RemoteManifest) GetDeleted() bool {
@@ -1111,7 +1103,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x12since_chunk_offset\x18\x04 \x01(\x03R\x10sinceChunkOffset\"=\n" +
 	"\bChunkRef\x12\x19\n" +
 	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x03R\x06length\"\xa6\x03\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xff\x02\n" +
 	"\x0eRemoteManifest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
@@ -1120,8 +1112,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x06chunks\x18\x05 \x03(\v2\x17.trove.wire.v1.ChunkRefR\x06chunks\x12\x1f\n" +
 	"\vmanifest_id\x18\x06 \x01(\fR\n" +
 	"manifestId\x12%\n" +
-	"\x0eversion_vector\x18\a \x01(\fR\rversionVector\x12%\n" +
-	"\x0eowner_sequence\x18\b \x01(\x03R\rownerSequence\x12\x18\n" +
+	"\x0eversion_vector\x18\a \x01(\fR\rversionVector\x12\x18\n" +
 	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
 	"\n" +
 	"deleted_ms\x18\n" +

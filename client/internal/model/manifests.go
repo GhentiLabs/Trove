@@ -80,6 +80,8 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 	}
 	id := m.ID()
 
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		prior, ok, err := loadRow(ctx, tx, m.Path)
 		if err != nil {
@@ -118,6 +120,8 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 func (s *Store) DeleteManifest(ctx context.Context, path string) (manifest.ID, error) {
 	path = manifest.NormalizePath(path)
 	var id manifest.ID
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		prior, ok, err := loadRow(ctx, tx, path)
 		if err != nil {

@@ -281,6 +281,15 @@ func (s *Store) IsMember(ctx context.Context, networkID, nodeID string) (bool, e
 	return e != nil, err
 }
 
+// RoleOf returns nodeID's tier in networkID. ok is false if nodeID is not a member.
+func (s *Store) RoleOf(ctx context.Context, networkID, nodeID string) (role Role, ok bool, err error) {
+	e, err := loadEntry(ctx, s.db, networkID, nodeID)
+	if err != nil || e == nil {
+		return 0, false, err
+	}
+	return e.Role, true, nil
+}
+
 // Groups returns the ids of every group this node belongs to.
 func (s *Store) Groups(ctx context.Context) ([]string, error) {
 	rows, err := s.db.Query(ctx, `SELECT network_id FROM networks ORDER BY network_id`)

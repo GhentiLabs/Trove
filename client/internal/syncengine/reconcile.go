@@ -63,7 +63,7 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 			return err
 		}
 		if !ok || ep != a.epoch || hw != a.highWater {
-			if err := m.ApplyRemoteAndAdvance(ctx, nil, fs.cfg.FolderID, owner, a.epoch, a.highWater); err != nil {
+			if err := m.AdvanceCursor(ctx, fs.cfg.FolderID, owner, a.epoch, a.highWater); err != nil {
 				return err
 			}
 		}
@@ -114,7 +114,7 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 // reconcile, so it never fails the reconcile.
 func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
 	owner := fs.eng.sess.PeerNodeID()
-	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
+	if err := fs.cfg.Model.RecordReceipt(ctx, model.LocalSync, model.Receipt{
 		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: time.Now(),
 	}); err != nil {
 		fs.eng.log.Warn("syncengine: record receipt", "folder", fs.cfg.FolderID, "err", err)
@@ -273,7 +273,6 @@ func convertManifests(wms []*wirepb.RemoteManifest) ([]model.RemoteManifest, []m
 			Manifest:   m,
 			ID:         id,
 			Version:    vv,
-			OwnerSeq:   wm.GetOwnerSequence(),
 			Author:     wm.GetAuthor(),
 			AuthoredAt: time.UnixMilli(wm.GetAuthoredMs()),
 			Deleted:    wm.GetDeleted(),

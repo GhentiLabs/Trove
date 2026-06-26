@@ -8,7 +8,6 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
-	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
 func TestDestPathRejectsEscape(t *testing.T) {
@@ -41,7 +40,7 @@ func TestApplyRejectsRootDeletion(t *testing.T) {
 	fs := &folderState{cfg: FolderConfig{Root: root}}
 
 	batch := []model.RemoteManifest{{Deleted: true, Manifest: manifest.Manifest{Path: "."}}}
-	if err := fs.apply(context.Background(), batch, &wirepb.ManifestDelta{}); err == nil {
+	if err := fs.materializeBatch(context.Background(), batch); err == nil {
 		t.Fatal("apply accepted a root-deletion tombstone")
 	}
 	if _, err := os.Stat(keep); err != nil {
@@ -59,7 +58,7 @@ func TestApplyRejectsEscapingSymlink(t *testing.T) {
 		batch := []model.RemoteManifest{{Manifest: manifest.Manifest{
 			Path: "link", Kind: manifest.KindSymlink, SymlinkTarget: target,
 		}}}
-		if err := fs.apply(context.Background(), batch, &wirepb.ManifestDelta{}); err == nil {
+		if err := fs.materializeBatch(context.Background(), batch); err == nil {
 			t.Fatalf("apply accepted an escaping symlink target %q", target)
 		}
 		if _, err := os.Lstat(filepath.Join(root, "link")); !os.IsNotExist(err) {

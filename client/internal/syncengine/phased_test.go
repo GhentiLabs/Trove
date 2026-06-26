@@ -11,12 +11,12 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
-// waitReceipt polls until p holds a receipt for peerID whose root matches wantRoot.
-func waitReceipt(t *testing.T, p peer, peerID, wantRoot string) model.Receipt {
+// waitReceipt polls until p holds a receipt of kind for peerID whose root matches wantRoot.
+func waitReceipt(t *testing.T, p peer, kind model.ReceiptKind, peerID, wantRoot string) model.Receipt {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r, ok, err := p.model.Receipt(context.Background(), peerID)
+		r, ok, err := p.model.Receipt(context.Background(), kind, peerID)
 		if err != nil {
 			t.Fatalf("Receipt(%s): %v", peerID, err)
 		}
@@ -44,11 +44,11 @@ func TestConvergenceReceiptExchanged(t *testing.T) {
 	waitConverged(t, owner, replica)
 
 	want := owner.currentRoot(t)
-	rr := waitReceipt(t, replica, ownerID, want)
+	rr := waitReceipt(t, replica, model.LocalSync, ownerID, want)
 	if rr.HighWater == 0 {
 		t.Fatalf("replica receipt high-water is zero")
 	}
-	or := waitReceipt(t, owner, replicaID, want)
+	or := waitReceipt(t, owner, model.InboundAck, replicaID, want)
 	if or.SyncedAt.IsZero() {
 		t.Fatalf("owner receipt has no timestamp")
 	}
@@ -74,7 +74,7 @@ func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
 	waitConverged(t, owner, replica)
 
 	want := owner.currentRoot(t)
-	base := waitReceipt(t, owner, replicaID, want)
+	base := waitReceipt(t, owner, model.InboundAck, replicaID, want)
 	bg := context.Background()
 	epoch, err := owner.model.FolderEpoch(bg)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
 	ownerEng.recordReceipt(bg, &wirepb.SyncReceipt{
 		FolderId: folderID, SnapshotRoot: rootBytes, IndexEpochId: epoch + 999, HighWaterSequence: base.HighWater + 5,
 	})
-	got, _, err := owner.model.Receipt(bg, replicaID)
+	got, _, err := owner.model.Receipt(bg, model.InboundAck, replicaID)
 	if err != nil {
 		t.Fatalf("Receipt: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
 	ownerEng.recordReceipt(bg, &wirepb.SyncReceipt{
 		FolderId: folderID, SnapshotRoot: rootBytes, IndexEpochId: epoch, HighWaterSequence: ownerMax + 1_000_000,
 	})
-	got, _, err = owner.model.Receipt(bg, replicaID)
+	got, _, err = owner.model.Receipt(bg, model.InboundAck, replicaID)
 	if err != nil {
 		t.Fatalf("Receipt: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestStartupRepairRestoresDirAndSymlink(t *testing.T) {
 	}
 
 	cfg := FolderConfig{
-		FolderID: folderID, Role: RoleReplica, Root: replica.root,
+		FolderID: folderID, Role: RoleReader, Root: replica.root,
 		FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks,
 	}
 	if err := RepairFolder(context.Background(), cfg, nil); err != nil {
@@ -174,7 +174,7 @@ func TestStartupRepairRematerializesDeletedFile(t *testing.T) {
 	}
 
 	cfg := FolderConfig{
-		FolderID: folderID, Role: RoleReplica, Root: replica.root,
+		FolderID: folderID, Role: RoleReader, Root: replica.root,
 		FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks,
 	}
 	if err := RepairFolder(context.Background(), cfg, nil); err != nil {
@@ -198,7 +198,7 @@ func TestOfflineCatchUpThroughEditDeleteRename(t *testing.T) {
 	startSync(t, ctx1, owner, replica)
 	waitConverged(t, owner, replica)
 	firstRoot := owner.currentRoot(t)
-	waitReceipt(t, owner, replicaID, firstRoot)
+	waitReceipt(t, owner, model.InboundAck, replicaID, firstRoot)
 	cancel1() // replica goes offline
 
 	// Owner mutates the folder while the replica is disconnected.
@@ -228,8 +228,8 @@ func TestOfflineCatchUpThroughEditDeleteRename(t *testing.T) {
 	assertLeafSetsEqual(t, owner, replica)
 
 	// Receipts reflect the caught-up state on both ends.
-	rr := waitReceipt(t, replica, ownerID, secondRoot)
-	or := waitReceipt(t, owner, replicaID, secondRoot)
+	rr := waitReceipt(t, replica, model.LocalSync, ownerID, secondRoot)
+	or := waitReceipt(t, owner, model.InboundAck, replicaID, secondRoot)
 	if rr.HighWater != or.HighWater {
 		t.Fatalf("post-catch-up receipt mismatch: owner %d, replica %d", or.HighWater, rr.HighWater)
 	}

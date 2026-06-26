@@ -282,7 +282,7 @@ func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string) erro
 	if err != nil {
 		return err
 	}
-	receipts, err := ms.Receipts(ctx)
+	receipts, err := ms.Receipts(ctx, model.LocalSync)
 	if err != nil {
 		return err
 	}

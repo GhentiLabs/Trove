@@ -149,7 +149,6 @@ func TestSyncMessageRoundTrip(t *testing.T) {
 				Chunks:        []*wirepb.ChunkRef{{ChunkId: cid, Length: 1024}},
 				ManifestId:    mid,
 				VersionVector: []byte{0x01, 0x02},
-				OwnerSequence: 12,
 				Author:        "node-a",
 				AuthoredMs:    1700000000000,
 			}},

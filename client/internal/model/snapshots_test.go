@@ -235,7 +235,7 @@ func TestConvergedHighWater(t *testing.T) {
 
 	now := time.Now()
 	must := func(peer string, epoch uint64, hw int64) {
-		if err := s.RecordReceipt(ctx, Receipt{PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: now}); err != nil {
+		if err := s.RecordReceipt(ctx, InboundAck, Receipt{PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: now}); err != nil {
 			t.Fatalf("RecordReceipt: %v", err)
 		}
 	}
@@ -256,11 +256,11 @@ func TestConvergedHighWater(t *testing.T) {
 		t.Fatalf("stale-epoch gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
 	}
 
-	got, ok, err := s.Receipt(ctx, "p2")
+	got, ok, err := s.Receipt(ctx, InboundAck, "p2")
 	if err != nil || !ok || got.HighWater != 25 || got.Root != root {
 		t.Fatalf("Receipt(p2) = (%+v, %v, %v), want hw=25 root match", got, ok, err)
 	}
-	all, err := s.Receipts(ctx)
+	all, err := s.Receipts(ctx, InboundAck)
 	if err != nil || len(all) != 3 {
 		t.Fatalf("Receipts len=%d err=%v, want 3", len(all), err)
 	}

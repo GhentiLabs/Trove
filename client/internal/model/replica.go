@@ -14,14 +14,14 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
 
-// RemoteManifest is an owner's manifest to be applied verbatim on a replica: its
-// content, the owner's identity and version vector, the owner sequence that drives
-// the replica's cursor, and the tombstone state.
+// RemoteManifest is a peer's manifest to be reconciled into the local model: its
+// content, the authoring node's version vector and edit stamp, and the tombstone
+// state. Its version vector decides causality against the local version; the local
+// sequence number is assigned on commit, not carried from the peer.
 type RemoteManifest struct {
 	Manifest   manifest.Manifest
 	ID         manifest.ID
 	Version    manifest.VersionVector
-	OwnerSeq   int64
 	Author     string
 	AuthoredAt time.Time
 	Deleted    bool
@@ -98,47 +98,153 @@ func (s *Store) CurrentRoot(ctx context.Context) (snapshot.Root, error) {
 	return root, nil
 }
 
-// ApplyRemoteAndAdvance stores batch and advances the (folder, owner) cursor in one
-// transaction. The owner's version vector is stored verbatim; this node is never
-// added to it. Returns ErrCorruptModel if a manifest does not hash to its supplied id.
-func (s *Store) ApplyRemoteAndAdvance(ctx context.Context, batch []RemoteManifest, folderID, ownerPeerID string, epoch uint64, highWater int64) error {
+// ApplyRemote reconciles a peer's delta into the local model. Under the folder's
+// apply lock it resolves each incoming manifest against the local version (fast
+// forward, ignore, or merge concurrent edits), invokes materialize so the caller can
+// stage the winners to disk, then writes them with fresh local sequence numbers and
+// advances the (folder, peer) cursor. Incoming version vectors are stored verbatim.
+// materialize must durably place the winners before it returns, since the model
+// commit follows it and is the point of no return.
+func (s *Store) ApplyRemote(ctx context.Context, folderID, peerID string, epoch uint64, highWater int64, batch []RemoteManifest, materialize func(apply []RemoteManifest) error) error {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+
+	apply, err := s.resolveRemote(ctx, batch)
+	if err != nil {
+		return err
+	}
+	if err := materialize(apply); err != nil {
+		return err
+	}
+	return s.commitRemote(ctx, folderID, peerID, epoch, highWater, apply)
+}
+
+// resolveRemote compares each incoming manifest to the local version and returns the
+// manifests to actually apply, with their final version vectors. It performs no
+// writes; the caller holds applyMu so the local state cannot change underneath it.
+func (s *Store) resolveRemote(ctx context.Context, batch []RemoteManifest) ([]RemoteManifest, error) {
+	out := make([]RemoteManifest, 0, len(batch))
+	for _, rm := range batch {
+		rm.Manifest.Path = manifest.NormalizePath(rm.Manifest.Path)
+		rm.Manifest.SymlinkTarget = manifest.NormalizePath(rm.Manifest.SymlinkTarget)
+		if err := ValidateManifest(rm.Manifest); err != nil {
+			return nil, err
+		}
+		if rm.Manifest.ID() != rm.ID {
+			return nil, fmt.Errorf("%w: path %q", ErrCorruptModel, rm.Manifest.Path)
+		}
+		local, ok, err := loadRow(ctx, s.db, rm.Manifest.Path)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			out = append(out, rm)
+			continue
+		}
+		switch local.Version.Compare(rm.Version) {
+		case manifest.Less:
+			out = append(out, rm)
+		case manifest.Greater, manifest.Equal:
+		case manifest.Concurrent:
+			resolved, err := s.resolveConcurrent(ctx, local, rm)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved)
+		}
+	}
+	return out, nil
+}
+
+// resolveConcurrent picks the surviving version for a path two nodes edited without
+// seeing each other. Identical content is not a conflict: the vectors merge and the
+// content stays. Otherwise the deterministic winner keeps the path with the joined
+// vector so it dominates the loser everywhere and re-detection is idempotent.
+func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteManifest) (RemoteManifest, error) {
+	joined := manifest.Join(local.Version, rm.Version)
+	if local.ID == rm.ID {
+		rm.Version = joined
+		if ConflictWinner(local.Author, local.AuthoredAt, rm.Author, rm.AuthoredAt) {
+			rm.Author, rm.AuthoredAt = local.Author, local.AuthoredAt
+		}
+		return rm, nil
+	}
+	if ConflictWinner(rm.Author, rm.AuthoredAt, local.Author, local.AuthoredAt) {
+		rm.Version = joined
+		return rm, nil
+	}
+	return s.localAsRemote(ctx, local, joined)
+}
+
+// localAsRemote rebuilds the local record as a RemoteManifest carrying vv, so a
+// winning local version is rewritten with the joined vector and re-announced.
+func (s *Store) localAsRemote(ctx context.Context, local Record, vv manifest.VersionVector) (RemoteManifest, error) {
+	chunks, err := loadChunks(ctx, s.db, local.ID)
+	if err != nil {
+		return RemoteManifest{}, err
+	}
+	m := local.Manifest
+	m.Chunks = chunks
+	return RemoteManifest{
+		Manifest:   m,
+		ID:         local.ID,
+		Version:    vv,
+		Author:     local.Author,
+		AuthoredAt: local.AuthoredAt,
+		Deleted:    local.Deleted,
+		DeletedAt:  local.DeletedAt,
+		Metadata:   local.Metadata,
+	}, nil
+}
+
+func (s *Store) commitRemote(ctx context.Context, folderID, peerID string, epoch uint64, highWater int64, apply []RemoteManifest) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		for _, rm := range batch {
-			m := rm.Manifest
-			m.Path = manifest.NormalizePath(m.Path)
-			m.SymlinkTarget = manifest.NormalizePath(m.SymlinkTarget)
-			if err := ValidateManifest(m); err != nil {
+		for _, rm := range apply {
+			seq, err := allocate(ctx, tx, counterManifestSeq)
+			if err != nil {
 				return err
 			}
-			if m.ID() != rm.ID {
-				return fmt.Errorf("%w: path %q", ErrCorruptModel, m.Path)
-			}
-			if err := writeRow(ctx, tx, m, rm.Metadata, rm.ID, rm.Version, rm.OwnerSeq, rm.Author, rm.AuthoredAt, rm.Deleted, rm.DeletedAt); err != nil {
+			if err := writeRow(ctx, tx, rm.Manifest, rm.Metadata, rm.ID, rm.Version, seq, rm.Author, rm.AuthoredAt, rm.Deleted, rm.DeletedAt); err != nil {
 				return err
 			}
-			if err := writeChunks(ctx, tx, rm.ID, m.Chunks); err != nil {
+			if err := writeChunks(ctx, tx, rm.ID, rm.Manifest.Chunks); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO replica_cursors (folder_id, owner_peer_id, epoch, high_water, updated_ms)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT(folder_id, owner_peer_id) DO UPDATE SET
-				epoch=excluded.epoch, high_water=excluded.high_water, updated_ms=excluded.updated_ms`,
-			folderID, ownerPeerID, int64(epoch), highWater, time.Now().UnixMilli()); err != nil {
-			return fmt.Errorf("model: save cursor: %w", err)
-		}
-		return nil
+		return saveCursor(ctx, tx, folderID, peerID, epoch, highWater)
 	})
 }
 
-// LoadCursor returns the consumed (epoch, high_water) for a (folder, owner). ok is
-// false if the replica has never applied from that owner for that folder.
-func (s *Store) LoadCursor(ctx context.Context, folderID, ownerPeerID string) (epoch uint64, highWater int64, ok bool, err error) {
+// AdvanceCursor records that this node consumed peer's lineage up to (epoch,
+// highWater) with no manifest to apply, so an already-converged folder still records
+// its progress.
+func (s *Store) AdvanceCursor(ctx context.Context, folderID, peerID string, epoch uint64, highWater int64) error {
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		return saveCursor(ctx, tx, folderID, peerID, epoch, highWater)
+	})
+}
+
+func saveCursor(ctx context.Context, tx *storage.Tx, folderID, peerID string, epoch uint64, highWater int64) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO peer_cursors (folder_id, peer_id, epoch, high_water, updated_ms)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(folder_id, peer_id) DO UPDATE SET
+			epoch=excluded.epoch, high_water=excluded.high_water, updated_ms=excluded.updated_ms`,
+		folderID, peerID, int64(epoch), highWater, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("model: save cursor: %w", err)
+	}
+	return nil
+}
+
+// LoadCursor returns the consumed (epoch, high_water) for a (folder, peer). ok is
+// false if this node has never applied from that peer for that folder.
+func (s *Store) LoadCursor(ctx context.Context, folderID, peerID string) (epoch uint64, highWater int64, ok bool, err error) {
 	var ep int64
 	err = s.db.QueryRow(ctx,
-		`SELECT epoch, high_water FROM replica_cursors WHERE folder_id = ? AND owner_peer_id = ?`,
-		folderID, ownerPeerID).Scan(&ep, &highWater)
+		`SELECT epoch, high_water FROM peer_cursors WHERE folder_id = ? AND peer_id = ?`,
+		folderID, peerID).Scan(&ep, &highWater)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, 0, false, nil

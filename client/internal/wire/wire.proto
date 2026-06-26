@@ -94,7 +94,6 @@ message RemoteManifest {
   repeated ChunkRef chunks = 5;
   bytes manifest_id = 6;
   bytes version_vector = 7;
-  int64 owner_sequence = 8;
   bool deleted = 9;
   int64 deleted_ms = 10;
   // more_chunks is set when this entry carries only a prefix of the file's chunk list and
