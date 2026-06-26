@@ -44,6 +44,17 @@ func FingerprintCert(cert *x509.Certificate) string {
 	return fingerprintSPKI(cert.RawSubjectPublicKeyInfo)
 }
 
+// FingerprintKey derives a node identifier directly from an Ed25519 public key,
+// yielding the same value as FingerprintCert for that key's certificate. It lets a
+// signed payload (e.g. a membership entry) bind a public key to its node id.
+func FingerprintKey(pub ed25519.PublicKey) (string, error) {
+	spki, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", fmt.Errorf("identity: marshal public key: %w", err)
+	}
+	return fingerprintSPKI(spki), nil
+}
+
 // PeerFingerprint derives the node identifier of the connection's peer.
 func PeerFingerprint(state *tls.ConnectionState) (string, error) {
 	if state == nil || len(state.PeerCertificates) == 0 {

@@ -20,7 +20,15 @@ cell() {
 	return "${PIPESTATUS[0]}"
 }
 
-echo "running NAT matrix (cells in parallel)..."
+# gate runs the 3-peer Phase D offline acceptance scenario in its own container.
+gate() {
+	docker run --rm --privileged \
+		-e SCENARIO=offline-gate \
+		trove-nat-matrix 2>&1 | sed "s/^/[offline-gate] /"
+	return "${PIPESTATUS[0]}"
+}
+
+echo "running NAT matrix + offline gate (in parallel)..."
 cell prc prc success &
 p1=$!
 cell prc sym fail &
@@ -29,12 +37,15 @@ cell sym sym fail &
 p3=$!
 cell prc blk fail &
 p4=$!
+gate &
+p5=$!
 
 rc=0
 wait $p1 || rc=1
 wait $p2 || rc=1
 wait $p3 || rc=1
 wait $p4 || rc=1
+wait $p5 || rc=1
 
 if [ $rc -eq 0 ]; then
 	echo "NAT matrix: ALL CELLS PASS"

@@ -106,7 +106,14 @@ CREATE TABLE IF NOT EXISTS folder_epoch (
 	id         INTEGER PRIMARY KEY CHECK (id = 1),
 	epoch      INTEGER NOT NULL,
 	created_ms INTEGER NOT NULL
-);`
+);
+CREATE TABLE IF NOT EXISTS sync_receipts (
+	peer_id       TEXT PRIMARY KEY,
+	snapshot_root BLOB    NOT NULL,
+	epoch         INTEGER NOT NULL,
+	high_water    INTEGER NOT NULL,
+	synced_ms     INTEGER NOT NULL
+) WITHOUT ROWID;`
 
 // querier is the read surface shared by *storage.DB and *storage.Tx, so load
 // helpers can run both inside and outside a transaction.

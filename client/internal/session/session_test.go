@@ -17,10 +17,10 @@ const (
 	idB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
-func allow(string) ([]string, bool, error) { return nil, true, nil }
+func allow(context.Context, string) ([]string, bool, error) { return nil, true, nil }
 
-func grant(ids ...string) func(string) ([]string, bool, error) {
-	return func(string) ([]string, bool, error) { return ids, true, nil }
+func grant(ids ...string) func(context.Context, string) ([]string, bool, error) {
+	return func(context.Context, string) ([]string, bool, error) { return ids, true, nil }
 }
 
 // connPair returns two connected netio.Conns whose PeerNodeIDs are each other's id.
@@ -113,7 +113,7 @@ func TestHandshakeUnauthorizedNeverActive(t *testing.T) {
 	defer cancel()
 	ac, bc := connPair(t, idA, idB)
 
-	deny := func(string) ([]string, bool, error) { return nil, false, nil }
+	deny := func(context.Context, string) ([]string, bool, error) { return nil, false, nil }
 	aCfg := Config{Conn: ac, Initiator: true, Authorize: deny, Local: Local{NodeID: idA}}
 	bCfg := Config{Conn: bc, Initiator: false, Authorize: allow, Local: Local{NodeID: idB}}
 

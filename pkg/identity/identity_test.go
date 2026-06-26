@@ -170,3 +170,22 @@ func TestPeerFingerprintNoCert(t *testing.T) {
 		t.Fatal("expected error for nil connection state")
 	}
 }
+
+func TestFingerprintKeyMatchesCert(t *testing.T) {
+	pub, key := mustKey(t)
+	cert, err := NewCertificate(key)
+	if err != nil {
+		t.Fatalf("NewCertificate: %v", err)
+	}
+	want := FingerprintCert(cert.Leaf)
+	got, err := FingerprintKey(pub)
+	if err != nil {
+		t.Fatalf("FingerprintKey: %v", err)
+	}
+	if got != want {
+		t.Fatalf("FingerprintKey = %q, FingerprintCert = %q", got, want)
+	}
+	if !ValidNodeID(got) {
+		t.Fatalf("FingerprintKey produced an invalid node id: %q", got)
+	}
+}

@@ -33,7 +33,7 @@ type Options struct {
 	Self                   string
 	Transport              netio.Transport
 	Local                  session.Local
-	Authorize              func(nodeID string) (granted []string, ok bool, err error)
+	Authorize              func(ctx context.Context, nodeID string) (granted []string, ok bool, err error)
 	Connect                func(ctx context.Context, nodeID string) (netio.Conn, error)
 	Peers                  []string
 	MinBackoff, MaxBackoff time.Duration
@@ -48,7 +48,7 @@ type Manager struct {
 	self       string
 	transport  netio.Transport
 	local      session.Local
-	authorize  func(string) ([]string, bool, error)
+	authorize  func(context.Context, string) ([]string, bool, error)
 	connect    func(context.Context, string) (netio.Conn, error)
 	peers      []string
 	minBackoff time.Duration

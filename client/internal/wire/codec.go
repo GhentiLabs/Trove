@@ -26,6 +26,10 @@ const (
 	TypeManifestRequest MessageType = 5
 	// TypeManifestDelta carries the requested manifest delta back to a replica.
 	TypeManifestDelta MessageType = 6
+	// TypeMembershipGossip carries a network roster for anti-entropy convergence.
+	TypeMembershipGossip MessageType = 7
+	// TypeSyncReceipt acknowledges that a replica has converged a folder to an owner's root.
+	TypeSyncReceipt MessageType = 8
 )
 
 // WriteMessage frames m as uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body.
@@ -139,6 +143,10 @@ func typeOf(m proto.Message) (MessageType, bool) {
 		return TypeManifestRequest, true
 	case *wirepb.ManifestDelta:
 		return TypeManifestDelta, true
+	case *wirepb.MembershipGossip:
+		return TypeMembershipGossip, true
+	case *wirepb.SyncReceipt:
+		return TypeSyncReceipt, true
 	default:
 		return 0, false
 	}
@@ -158,6 +166,10 @@ func newMessage(t MessageType) (proto.Message, bool) {
 		return &wirepb.ManifestRequest{}, true
 	case TypeManifestDelta:
 		return &wirepb.ManifestDelta{}, true
+	case TypeMembershipGossip:
+		return &wirepb.MembershipGossip{}, true
+	case TypeSyncReceipt:
+		return &wirepb.SyncReceipt{}, true
 	default:
 		return nil, false
 	}

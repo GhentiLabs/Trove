@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
@@ -17,8 +19,26 @@ import (
 // place, then commit the model. The destination is never written directly, and a
 // crash before the commit re-applies idempotently on restart.
 func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, delta *wirepb.ManifestDelta) error {
-	stage := filepath.Join(fs.cfg.Root, tmpDirName)
-	_ = os.RemoveAll(stage) // discard any debris from a previous failed attempt
+	// Validate the whole batch against the folder boundary before touching the
+	// filesystem: a hostile owner must not be able to delete the root, escape it, or
+	// plant an escaping symlink. The model commit re-validates, but only after the disk
+	// is mutated, so this guard has to run first.
+	dests := make([]string, len(batch))
+	for i, rm := range batch {
+		dest, err := fs.destPath(rm.Manifest.Path)
+		if err != nil {
+			return err
+		}
+		if !rm.Deleted {
+			if err := model.ValidateManifest(rm.Manifest); err != nil {
+				return fmt.Errorf("syncengine: reject manifest: %w", err)
+			}
+		}
+		dests[i] = dest
+	}
+
+	stage := fs.stageDir
+	_ = os.RemoveAll(stage)
 	if err := os.MkdirAll(stage, 0o700); err != nil {
 		return fmt.Errorf("syncengine: stage dir: %w", err)
 	}
@@ -36,11 +56,12 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 	}
 
 	parents := make(map[string]struct{}, len(batch))
-	for _, rm := range batch {
-		if err := fs.materialize(rm, staged); err != nil {
+	for i, rm := range batch {
+		dest := dests[i]
+		if err := fs.materialize(rm, dest, staged); err != nil {
 			return err
 		}
-		parents[filepath.Dir(filepath.Join(fs.cfg.Root, filepath.FromSlash(rm.Manifest.Path)))] = struct{}{}
+		parents[filepath.Dir(dest)] = struct{}{}
 	}
 	// Fsync touched directories so the renames are durable before the model commit
 	// makes them visible; otherwise a power loss could lose a converged file.
@@ -70,32 +91,72 @@ func syncDir(dir string) error {
 }
 
 func (fs *folderState) stageFile(ctx context.Context, path string, rm model.RemoteManifest) error {
+	return stageRegular(ctx, fs.cfg.Chunks, fs.cfg.FolderCtx, path, rm.Manifest)
+}
+
+// stageRegular reassembles m's chunks into a fresh, fsynced staging file at path with
+// m's mode, for the caller to rename into place.
+func stageRegular(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.FolderContext, path string, m manifest.Manifest) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("syncengine: create temp: %w", err)
 	}
-	if err := fs.cfg.Chunks.Reassemble(ctx, fs.cfg.FolderCtx, chunkIDs(rm.Manifest.Chunks), f); err != nil {
+	if err := chunks.Reassemble(ctx, fc, chunkIDs(m.Chunks), f); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: reassemble %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: reassemble %q: %w", m.Path, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: fsync %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: fsync %q: %w", m.Path, err)
 	}
-	if err := f.Chmod(fileMode(rm.Manifest.Mode)); err != nil {
+	if err := f.Chmod(fileMode(m.Mode)); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("syncengine: chmod %q: %w", rm.Manifest.Path, err)
+		return fmt.Errorf("syncengine: chmod %q: %w", m.Path, err)
 	}
 	return f.Close()
 }
 
-func (fs *folderState) materialize(rm model.RemoteManifest, staged map[string]string) error {
-	dest := filepath.Join(fs.cfg.Root, filepath.FromSlash(rm.Manifest.Path))
+// destPath resolves a folder-relative path to an absolute path under the folder root,
+// rejecting any path that escapes the root (defends against a hostile owner on every OS).
+func (fs *folderState) destPath(rel string) (string, error) {
+	return resolveDest(fs.cfg.Root, rel)
+}
+
+func resolveDest(root, rel string) (string, error) {
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	r, err := filepath.Rel(root, p)
+	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("syncengine: path escapes folder root: %q", rel)
+	}
+	return p, nil
+}
+
+// clearTypeConflict removes an existing entry at dest whose kind (dir vs non-dir)
+// differs from the target, so a file→dir or dir→file change at a path applies cleanly
+// instead of failing MkdirAll/Rename forever.
+func clearTypeConflict(dest string, kind manifest.Kind) error {
+	fi, err := os.Lstat(dest)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() == (kind == manifest.KindDir) {
+		return nil
+	}
+	return os.RemoveAll(dest)
+}
+
+func (fs *folderState) materialize(rm model.RemoteManifest, dest string, staged map[string]string) error {
 	if rm.Deleted {
-		if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.RemoveAll(dest); err != nil {
 			return fmt.Errorf("syncengine: remove %q: %w", rm.Manifest.Path, err)
 		}
 		return nil
+	}
+	if err := clearTypeConflict(dest, rm.Manifest.Kind); err != nil {
+		return fmt.Errorf("syncengine: clear %q: %w", rm.Manifest.Path, err)
 	}
 	switch rm.Manifest.Kind {
 	case manifest.KindDir:
@@ -106,10 +167,14 @@ func (fs *folderState) materialize(rm model.RemoteManifest, staged map[string]st
 	case manifest.KindSymlink:
 		return materializeSymlink(dest, rm.Manifest.SymlinkTarget)
 	case manifest.KindRegular:
+		sp, ok := staged[rm.Manifest.Path]
+		if !ok {
+			return fmt.Errorf("syncengine: no staged file for %q", rm.Manifest.Path)
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return fmt.Errorf("syncengine: mkdir parent of %q: %w", rm.Manifest.Path, err)
 		}
-		if err := os.Rename(staged[rm.Manifest.Path], dest); err != nil {
+		if err := os.Rename(sp, dest); err != nil {
 			return fmt.Errorf("syncengine: rename %q: %w", rm.Manifest.Path, err)
 		}
 		return nil

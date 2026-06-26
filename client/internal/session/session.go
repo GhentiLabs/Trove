@@ -83,7 +83,7 @@ type Config struct {
 	Conn      netio.Conn
 	Initiator bool
 	Local     Local
-	Authorize func(nodeID string) (granted []string, ok bool, err error)
+	Authorize func(ctx context.Context, nodeID string) (granted []string, ok bool, err error)
 
 	KeepaliveInterval time.Duration
 	HandshakeTimeout  time.Duration
@@ -150,9 +150,9 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 
 	authorize := cfg.Authorize
 	if authorize == nil {
-		authorize = func(string) ([]string, bool, error) { return nil, false, nil }
+		authorize = func(context.Context, string) ([]string, bool, error) { return nil, false, nil }
 	}
-	granted, ok, err := authorize(peerID)
+	granted, ok, err := authorize(ctx, peerID)
 	if err != nil {
 		_ = cfg.Conn.Close()
 		return nil, fmt.Errorf("session: authorize: %w", err)

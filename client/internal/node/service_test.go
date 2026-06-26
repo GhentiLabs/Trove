@@ -11,37 +11,80 @@ import (
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 	disco "github.com/GhentiLabs/Trove/pkg/discovery"
+	"github.com/GhentiLabs/Trove/pkg/identity"
 )
 
-const (
-	selfID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	peerID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-)
+// serviceFixture is a Service whose roster has one peer (a reader) admitted to a folder's
+// group, plus an unpaired local folder.
+type serviceFixture struct {
+	svc    *Service
+	group  string
+	peerID string
+}
 
-func newService(t *testing.T) *Service {
+func newService(t *testing.T) serviceFixture {
 	t.Helper()
-	db, err := storage.Open(storage.Options{Path: filepath.Join(t.TempDir(), "c.db"), MaxOpenConns: 1})
+	ctx := context.Background()
+
+	pub, key, err := identity.GenerateKey()
 	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
+		t.Fatalf("GenerateKey: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	store, err := config.Open(config.Options{DB: db, NodeID: selfID})
+	selfID, err := identity.FingerprintKey(pub)
+	if err != nil {
+		t.Fatalf("FingerprintKey: %v", err)
+	}
+
+	cdb, err := storage.Open(storage.Options{Path: filepath.Join(t.TempDir(), "c.db"), MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("storage.Open config: %v", err)
+	}
+	t.Cleanup(func() { _ = cdb.Close() })
+	store, err := config.Open(config.Options{DB: cdb, NodeID: selfID})
 	if err != nil {
 		t.Fatalf("config.Open: %v", err)
 	}
-	ctx := context.Background()
-	if err := store.AddFolder(ctx, config.Folder{ID: "docs", Root: "/docs", ShareID: "docs-share"}); err != nil {
+
+	mdb, err := storage.Open(storage.Options{Path: filepath.Join(t.TempDir(), "m.db"), MaxOpenConns: 4})
+	if err != nil {
+		t.Fatalf("storage.Open membership: %v", err)
+	}
+	t.Cleanup(func() { _ = mdb.Close() })
+	members, err := membership.Open(membership.Options{DB: mdb, NodeID: selfID, Key: key})
+	if err != nil {
+		t.Fatalf("membership.Open: %v", err)
+	}
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+
+	ppub, _, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey peer: %v", err)
+	}
+	peerID, err := identity.FingerprintKey(ppub)
+	if err != nil {
+		t.Fatalf("FingerprintKey peer: %v", err)
+	}
+	if _, err := members.Add(ctx, group, peerID, ppub, membership.RoleReader); err != nil {
+		t.Fatalf("Add peer: %v", err)
+	}
+
+	if err := store.AddFolder(ctx, config.Folder{ID: "docs", Root: "/docs", ShareID: group}); err != nil {
 		t.Fatalf("AddFolder shared: %v", err)
 	}
 	if err := store.AddFolder(ctx, config.Folder{ID: "scratch", Root: "/scratch"}); err != nil {
 		t.Fatalf("AddFolder unpaired: %v", err)
 	}
-	if err := store.AddPeer(ctx, config.Peer{NodeID: peerID, Name: "laptop", Folders: []string{"docs-share"}}); err != nil {
-		t.Fatalf("AddPeer: %v", err)
+	return serviceFixture{
+		svc:    &Service{opts: Options{Config: store, NodeID: selfID}, members: members},
+		group:  group,
+		peerID: peerID,
 	}
-	return &Service{opts: Options{Config: store, NodeID: selfID}}
 }
 
 func mustCIDR(t *testing.T, s string) *net.IPNet {
@@ -86,46 +129,93 @@ func TestDialableNoLocalSubnets(t *testing.T) {
 	}
 }
 
-func TestAuthorizeGrantsConfiguredFolders(t *testing.T) {
-	s := newService(t)
+func TestAuthorizeGrantsRosterMembers(t *testing.T) {
+	f := newService(t)
 
-	granted, ok, err := s.authorize(peerID)
+	granted, ok, err := f.svc.authorize(context.Background(), f.peerID)
 	if err != nil || !ok {
-		t.Fatalf("authorize(known) = ok %v, err %v, want true, nil", ok, err)
+		t.Fatalf("authorize(member) = ok %v, err %v, want true, nil", ok, err)
 	}
-	if !slices.Equal(granted, []string{"docs-share"}) {
-		t.Fatalf("granted = %v, want [docs-share]", granted)
+	if !slices.Equal(granted, []string{f.group}) {
+		t.Fatalf("granted = %v, want [%s]", granted, f.group)
 	}
 
 	unknown := "cccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	if _, ok, err := s.authorize(unknown); ok || err != nil {
+	if _, ok, err := f.svc.authorize(context.Background(), unknown); ok || err != nil {
 		t.Fatalf("authorize(unknown) = ok %v, err %v, want false, nil", ok, err)
 	}
 }
 
 func TestLocalConfigOffersOnlyPairedFolders(t *testing.T) {
-	s := newService(t)
+	f := newService(t)
 
-	local, err := s.localConfig(context.Background())
+	local, err := f.svc.localConfig(context.Background())
 	if err != nil {
 		t.Fatalf("localConfig: %v", err)
 	}
-	if local.NodeID != selfID {
-		t.Fatalf("NodeID = %q, want %q", local.NodeID, selfID)
+	if local.NodeID != f.svc.opts.NodeID {
+		t.Fatalf("NodeID = %q, want %q", local.NodeID, f.svc.opts.NodeID)
 	}
-	if len(local.Folders) != 1 || local.Folders[0].ShareID != "docs-share" {
-		t.Fatalf("offered folders = %+v, want only docs-share (scratch is unpaired)", local.Folders)
+	if len(local.Folders) != 1 || local.Folders[0].ShareID != f.group {
+		t.Fatalf("offered folders = %+v, want only the group folder (scratch is unpaired)", local.Folders)
 	}
 }
 
-func TestPeerIDsListsAuthorizedPeers(t *testing.T) {
-	s := newService(t)
+// A node that has only joined a group (empty roster) still authorizes the group's
+// founder, derived from the group id — the bootstrap that lets it pull the roster.
+func TestAuthorizeFounderBootstrap(t *testing.T) {
+	ctx := context.Background()
 
-	ids, err := s.peerIDs(context.Background())
+	pub, key, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	selfID, err := identity.FingerprintKey(pub)
+	if err != nil {
+		t.Fatalf("FingerprintKey: %v", err)
+	}
+	mdb, err := storage.Open(storage.Options{Path: filepath.Join(t.TempDir(), "m.db"), MaxOpenConns: 4})
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = mdb.Close() })
+	members, err := membership.Open(membership.Options{DB: mdb, NodeID: selfID, Key: key})
+	if err != nil {
+		t.Fatalf("membership.Open: %v", err)
+	}
+
+	fpub, _, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey founder: %v", err)
+	}
+	founderID, err := identity.FingerprintKey(fpub)
+	if err != nil {
+		t.Fatalf("FingerprintKey founder: %v", err)
+	}
+	group := founderID + ".0123456789abcdef"
+	if err := members.Join(ctx, group); err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+
+	s := &Service{opts: Options{NodeID: selfID}, members: members}
+	granted, ok, err := s.authorize(context.Background(), founderID)
+	if err != nil || !ok || !slices.Equal(granted, []string{group}) {
+		t.Fatalf("authorize(founder) = %v, ok %v, err %v; want [%s], true, nil", granted, ok, err, group)
+	}
+	stranger := "dddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if _, ok, _ := s.authorize(context.Background(), stranger); ok {
+		t.Fatal("a non-founder non-member was authorized")
+	}
+}
+
+func TestPeerIDsListsRosterMembers(t *testing.T) {
+	f := newService(t)
+
+	ids, err := f.svc.peerIDs(context.Background())
 	if err != nil {
 		t.Fatalf("peerIDs: %v", err)
 	}
-	if !slices.Equal(ids, []string{peerID}) {
-		t.Fatalf("peerIDs = %v, want [%s]", ids, peerID)
+	if !slices.Equal(ids, []string{f.peerID}) {
+		t.Fatalf("peerIDs = %v, want [%s]", ids, f.peerID)
 	}
 }

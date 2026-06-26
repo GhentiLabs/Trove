@@ -105,7 +105,7 @@ func (s *Store) ApplyRemoteAndAdvance(ctx context.Context, batch []RemoteManifes
 			m := rm.Manifest
 			m.Path = manifest.NormalizePath(m.Path)
 			m.SymlinkTarget = manifest.NormalizePath(m.SymlinkTarget)
-			if err := validate(m); err != nil {
+			if err := ValidateManifest(m); err != nil {
 				return err
 			}
 			if m.ID() != rm.ID {

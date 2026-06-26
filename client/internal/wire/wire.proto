@@ -71,6 +71,9 @@ message ManifestRequest {
   string folder_id = 1;
   uint64 index_epoch_id = 2;
   int64 since_sequence = 3;
+  // since_chunk_offset resumes a manifest whose chunk list spans pages: the manifest at
+  // the first sequence past since_sequence has had this many chunks delivered already.
+  int64 since_chunk_offset = 4;
 }
 
 // ChunkRef is one ordered chunk reference within a manifest: the chunk identity and
@@ -94,6 +97,9 @@ message RemoteManifest {
   int64 owner_sequence = 8;
   bool deleted = 9;
   int64 deleted_ms = 10;
+  // more_chunks is set when this entry carries only a prefix of the file's chunk list and
+  // the remainder continues in the following delta pages (same path and manifest_id).
+  bool more_chunks = 11;
 }
 
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
@@ -104,6 +110,41 @@ message ManifestDelta {
   uint64 index_epoch_id = 2;
   int64 high_water_sequence = 3;
   repeated RemoteManifest manifests = 4;
+  // complete is false when more manifests remain past high_water_sequence; the
+  // replica then requests the next page with since_sequence = high_water_sequence.
+  bool complete = 5;
+  // high_water_chunk_offset is non-zero when the manifest at high_water_sequence is only
+  // partially delivered; the next request resumes it at this chunk offset.
+  int64 high_water_chunk_offset = 6;
+}
+
+// MembershipEntry is one signed roster record on the wire. The signature is over the
+// membership layer's canonical hand-rolled bytes, not these protobuf bytes.
+message MembershipEntry {
+  string network_id = 1;
+  string node_id = 2;
+  bytes public_key = 3;
+  uint32 role = 4;
+  string added_by = 5;
+  int64 added_at_ms = 6;
+  bytes sig = 7;
+}
+
+// MembershipGossip carries a network's roster for anti-entropy convergence; a receiver
+// verifies each entry against its trust root before accepting or re-propagating it.
+message MembershipGossip {
+  string network_id = 1;
+  repeated MembershipEntry entries = 2;
+}
+
+// SyncReceipt is a replica's acknowledgement that it converged a folder to the owner's
+// snapshot_root at (index_epoch_id, high_water_sequence). Peer identity is the
+// mutually-authenticated session's, not a field here.
+message SyncReceipt {
+  string folder_id = 1;
+  bytes snapshot_root = 2;
+  uint64 index_epoch_id = 3;
+  int64 high_water_sequence = 4;
 }
 
 // Ping is the idle-timer keepalive.

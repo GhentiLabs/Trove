@@ -28,6 +28,12 @@ func FuzzReadMessage(f *testing.F) {
 	buf.Reset()
 	_ = WriteMessage(&buf, &wirepb.ManifestDelta{FolderId: "x", Manifests: []*wirepb.RemoteManifest{{Path: "a"}}})
 	f.Add(buf.Bytes())
+	buf.Reset()
+	_ = WriteMessage(&buf, &wirepb.MembershipGossip{NetworkId: "x", Entries: []*wirepb.MembershipEntry{{NodeId: "n", Sig: make([]byte, 64)}}})
+	f.Add(buf.Bytes())
+	buf.Reset()
+	_ = WriteMessage(&buf, &wirepb.SyncReceipt{FolderId: "x", SnapshotRoot: make([]byte, 32), IndexEpochId: 1, HighWaterSequence: 5})
+	f.Add(buf.Bytes())
 	f.Add([]byte{})
 	f.Add([]byte{0x00})
 

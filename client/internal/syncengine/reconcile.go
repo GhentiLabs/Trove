@@ -8,6 +8,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
+	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
@@ -62,8 +63,11 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 			return err
 		}
 		if !ok || ep != a.epoch || hw != a.highWater {
-			return m.ApplyRemoteAndAdvance(ctx, nil, fs.cfg.FolderID, owner, a.epoch, a.highWater)
+			if err := m.ApplyRemoteAndAdvance(ctx, nil, fs.cfg.FolderID, owner, a.epoch, a.highWater); err != nil {
+				return err
+			}
 		}
+		fs.markConverged(ctx, cur, a.epoch, a.highWater)
 		return nil
 	}
 
@@ -76,26 +80,130 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 		since = hw
 	}
 
+	// Pull the delta a page at a time. The cursor (sequence, chunk-offset) must strictly
+	// advance and the page count is capped, so a buggy or hostile owner cannot loop the
+	// replica forever. A manifest whose chunk list spans pages is accumulated in carry
+	// and applied only once fully received.
+	var offset int64
+	var carry *carryState
+	for pages := 0; ; pages++ {
+		if pages >= maxDeltaPages {
+			return fmt.Errorf("syncengine: delta exceeded %d pages for %q", maxDeltaPages, fs.cfg.FolderID)
+		}
+		res, err := fs.applyPage(ctx, a.epoch, since, offset, carry)
+		if err != nil {
+			return err
+		}
+		if res.complete {
+			root, err := m.CurrentRoot(ctx)
+			if err != nil {
+				return err
+			}
+			fs.markConverged(ctx, root, a.epoch, res.since)
+			return nil
+		}
+		if res.since < since || (res.since == since && res.offset <= offset) {
+			return fmt.Errorf("syncengine: delta cursor did not advance past (%d,%d) for %q", since, offset, fs.cfg.FolderID)
+		}
+		since, offset, carry = res.since, res.offset, res.carry
+	}
+}
+
+// markConverged records that this replica reached root at (epoch, highWater) and reports
+// it to the owner. Both writes are best-effort; a dropped receipt is re-sent on the next
+// reconcile, so it never fails the reconcile.
+func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
+	owner := fs.eng.sess.PeerNodeID()
+	if err := fs.cfg.Model.RecordReceipt(ctx, model.Receipt{
+		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: time.Now(),
+	}); err != nil {
+		fs.eng.log.Warn("syncengine: record receipt", "folder", fs.cfg.FolderID, "err", err)
+	}
+	if err := fs.eng.sess.Send(&wirepb.SyncReceipt{
+		FolderId:          fs.cfg.FolderID,
+		SnapshotRoot:      root.Bytes(),
+		IndexEpochId:      epoch,
+		HighWaterSequence: highWater,
+	}); err != nil {
+		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", owner, "err", err)
+	}
+}
+
+// carryState accumulates the chunk refs of a manifest whose list spans several pages,
+// until the final page completes it.
+type carryState struct {
+	meta   *wirepb.RemoteManifest
+	chunks []*wirepb.ChunkRef
+}
+
+type pageResult struct {
+	since    int64
+	offset   int64
+	carry    *carryState
+	complete bool
+}
+
+func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since, offset int64, carry *carryState) (pageResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, deltaTimeout)
 	defer cancel()
 
-	delta, err := fs.request(ctx, a.epoch, since)
+	delta, err := fs.request(ctx, epoch, since, offset)
 	if err != nil {
-		return err
+		return pageResult{}, err
 	}
-	batch, pull, err := convertManifests(delta.GetManifests())
+	wms := delta.GetManifests()
+	newSince := delta.GetHighWaterSequence()
+	owner := fs.eng.sess.PeerNodeID()
+
+	// A continuation page carries the single in-progress manifest's next chunk slice; its
+	// chunks are pulled now but the file is applied only when the manifest completes.
+	if offset > 0 || carry != nil || (len(wms) == 1 && wms[0].GetMoreChunks()) {
+		if len(wms) == 0 {
+			return pageResult{since: newSince, offset: delta.GetHighWaterChunkOffset(), complete: delta.GetComplete()}, nil
+		}
+		wm := wms[0]
+		_, pull, err := convertManifests([]*wirepb.RemoteManifest{wm})
+		if err != nil {
+			return pageResult{}, err
+		}
+		if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
+			return pageResult{}, err
+		}
+		if carry == nil {
+			carry = &carryState{meta: wm}
+		}
+		carry.chunks = append(carry.chunks, wm.GetChunks()...)
+		if wm.GetMoreChunks() {
+			return pageResult{since: newSince, offset: delta.GetHighWaterChunkOffset(), carry: carry, complete: false}, nil
+		}
+		carry.meta.Chunks = carry.chunks
+		carry.meta.MoreChunks = false
+		batch, _, err := convertManifests([]*wirepb.RemoteManifest{carry.meta})
+		if err != nil {
+			return pageResult{}, err
+		}
+		if err := fs.apply(ctx, batch, delta); err != nil {
+			return pageResult{}, err
+		}
+		return pageResult{since: newSince, complete: delta.GetComplete()}, nil
+	}
+
+	batch, pull, err := convertManifests(wms)
 	if err != nil {
-		return err
+		return pageResult{}, err
 	}
-	if err := fs.eng.pull(ctx, fs, pull); err != nil {
-		return err
+	if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
+		return pageResult{}, err
 	}
-	return fs.apply(ctx, batch, delta)
+	if err := fs.apply(ctx, batch, delta); err != nil {
+		return pageResult{}, err
+	}
+	return pageResult{since: newSince, complete: delta.GetComplete()}, nil
 }
 
 // request registers a one-shot reply sink, sends a ManifestRequest, and waits for
 // the matching ManifestDelta.
-func (fs *folderState) request(ctx context.Context, epoch uint64, since int64) (*wirepb.ManifestDelta, error) {
+func (fs *folderState) request(ctx context.Context, epoch uint64, since, offset int64) (*wirepb.ManifestDelta, error) {
 	ch := make(chan *wirepb.ManifestDelta, 1)
 	fs.mu.Lock()
 	fs.reply = ch
@@ -106,7 +214,7 @@ func (fs *folderState) request(ctx context.Context, epoch uint64, since int64) (
 		fs.mu.Unlock()
 	}()
 
-	req := &wirepb.ManifestRequest{FolderId: fs.cfg.FolderID, IndexEpochId: epoch, SinceSequence: since}
+	req := &wirepb.ManifestRequest{FolderId: fs.cfg.FolderID, IndexEpochId: epoch, SinceSequence: since, SinceChunkOffset: offset}
 	if err := fs.eng.sess.Send(req); err != nil {
 		return nil, fmt.Errorf("syncengine: send manifest request: %w", err)
 	}

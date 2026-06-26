@@ -416,8 +416,11 @@ type ManifestRequest struct {
 	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
 	IndexEpochId  uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	SinceSequence int64                  `protobuf:"varint,3,opt,name=since_sequence,json=sinceSequence,proto3" json:"since_sequence,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// since_chunk_offset resumes a manifest whose chunk list spans pages: the manifest at
+	// the first sequence past since_sequence has had this many chunks delivered already.
+	SinceChunkOffset int64 `protobuf:"varint,4,opt,name=since_chunk_offset,json=sinceChunkOffset,proto3" json:"since_chunk_offset,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ManifestRequest) Reset() {
@@ -467,6 +470,13 @@ func (x *ManifestRequest) GetIndexEpochId() uint64 {
 func (x *ManifestRequest) GetSinceSequence() int64 {
 	if x != nil {
 		return x.SinceSequence
+	}
+	return 0
+}
+
+func (x *ManifestRequest) GetSinceChunkOffset() int64 {
+	if x != nil {
+		return x.SinceChunkOffset
 	}
 	return 0
 }
@@ -540,6 +550,9 @@ type RemoteManifest struct {
 	OwnerSequence int64                  `protobuf:"varint,8,opt,name=owner_sequence,json=ownerSequence,proto3" json:"owner_sequence,omitempty"`
 	Deleted       bool                   `protobuf:"varint,9,opt,name=deleted,proto3" json:"deleted,omitempty"`
 	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
+	// more_chunks is set when this entry carries only a prefix of the file's chunk list and
+	// the remainder continues in the following delta pages (same path and manifest_id).
+	MoreChunks    bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -644,6 +657,13 @@ func (x *RemoteManifest) GetDeletedMs() int64 {
 	return 0
 }
 
+func (x *RemoteManifest) GetMoreChunks() bool {
+	if x != nil {
+		return x.MoreChunks
+	}
+	return false
+}
+
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
 // owner-sequence order, plus the epoch and high-water they were taken at so the
 // replica advances its cursor to exactly what it consumed.
@@ -653,8 +673,14 @@ type ManifestDelta struct {
 	IndexEpochId      uint64                 `protobuf:"varint,2,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	HighWaterSequence int64                  `protobuf:"varint,3,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
 	Manifests         []*RemoteManifest      `protobuf:"bytes,4,rep,name=manifests,proto3" json:"manifests,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// complete is false when more manifests remain past high_water_sequence; the
+	// replica then requests the next page with since_sequence = high_water_sequence.
+	Complete bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
+	// high_water_chunk_offset is non-zero when the manifest at high_water_sequence is only
+	// partially delivered; the next request resumes it at this chunk offset.
+	HighWaterChunkOffset int64 `protobuf:"varint,6,opt,name=high_water_chunk_offset,json=highWaterChunkOffset,proto3" json:"high_water_chunk_offset,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ManifestDelta) Reset() {
@@ -715,6 +741,239 @@ func (x *ManifestDelta) GetManifests() []*RemoteManifest {
 	return nil
 }
 
+func (x *ManifestDelta) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
+}
+
+func (x *ManifestDelta) GetHighWaterChunkOffset() int64 {
+	if x != nil {
+		return x.HighWaterChunkOffset
+	}
+	return 0
+}
+
+// MembershipEntry is one signed roster record on the wire. The signature is over the
+// membership layer's canonical hand-rolled bytes, not these protobuf bytes.
+type MembershipEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NetworkId     string                 `protobuf:"bytes,1,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
+	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	PublicKey     []byte                 `protobuf:"bytes,3,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	Role          uint32                 `protobuf:"varint,4,opt,name=role,proto3" json:"role,omitempty"`
+	AddedBy       string                 `protobuf:"bytes,5,opt,name=added_by,json=addedBy,proto3" json:"added_by,omitempty"`
+	AddedAtMs     int64                  `protobuf:"varint,6,opt,name=added_at_ms,json=addedAtMs,proto3" json:"added_at_ms,omitempty"`
+	Sig           []byte                 `protobuf:"bytes,7,opt,name=sig,proto3" json:"sig,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MembershipEntry) Reset() {
+	*x = MembershipEntry{}
+	mi := &file_wire_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MembershipEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MembershipEntry) ProtoMessage() {}
+
+func (x *MembershipEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MembershipEntry.ProtoReflect.Descriptor instead.
+func (*MembershipEntry) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *MembershipEntry) GetNetworkId() string {
+	if x != nil {
+		return x.NetworkId
+	}
+	return ""
+}
+
+func (x *MembershipEntry) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *MembershipEntry) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *MembershipEntry) GetRole() uint32 {
+	if x != nil {
+		return x.Role
+	}
+	return 0
+}
+
+func (x *MembershipEntry) GetAddedBy() string {
+	if x != nil {
+		return x.AddedBy
+	}
+	return ""
+}
+
+func (x *MembershipEntry) GetAddedAtMs() int64 {
+	if x != nil {
+		return x.AddedAtMs
+	}
+	return 0
+}
+
+func (x *MembershipEntry) GetSig() []byte {
+	if x != nil {
+		return x.Sig
+	}
+	return nil
+}
+
+// MembershipGossip carries a network's roster for anti-entropy convergence; a receiver
+// verifies each entry against its trust root before accepting or re-propagating it.
+type MembershipGossip struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NetworkId     string                 `protobuf:"bytes,1,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
+	Entries       []*MembershipEntry     `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MembershipGossip) Reset() {
+	*x = MembershipGossip{}
+	mi := &file_wire_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MembershipGossip) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MembershipGossip) ProtoMessage() {}
+
+func (x *MembershipGossip) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MembershipGossip.ProtoReflect.Descriptor instead.
+func (*MembershipGossip) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *MembershipGossip) GetNetworkId() string {
+	if x != nil {
+		return x.NetworkId
+	}
+	return ""
+}
+
+func (x *MembershipGossip) GetEntries() []*MembershipEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+// SyncReceipt is a replica's acknowledgement that it converged a folder to the owner's
+// snapshot_root at (index_epoch_id, high_water_sequence). Peer identity is the
+// mutually-authenticated session's, not a field here.
+type SyncReceipt struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
+	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SyncReceipt) Reset() {
+	*x = SyncReceipt{}
+	mi := &file_wire_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncReceipt) ProtoMessage() {}
+
+func (x *SyncReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncReceipt.ProtoReflect.Descriptor instead.
+func (*SyncReceipt) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SyncReceipt) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *SyncReceipt) GetSnapshotRoot() []byte {
+	if x != nil {
+		return x.SnapshotRoot
+	}
+	return nil
+}
+
+func (x *SyncReceipt) GetIndexEpochId() uint64 {
+	if x != nil {
+		return x.IndexEpochId
+	}
+	return 0
+}
+
+func (x *SyncReceipt) GetHighWaterSequence() int64 {
+	if x != nil {
+		return x.HighWaterSequence
+	}
+	return 0
+}
+
 // Ping is the idle-timer keepalive.
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -724,7 +983,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +995,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[9]
+	mi := &file_wire_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +1008,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{9}
+	return file_wire_proto_rawDescGZIP(), []int{12}
 }
 
 // Close requests a graceful shutdown.
@@ -762,7 +1021,7 @@ type Close struct {
 
 func (x *Close) Reset() {
 	*x = Close{}
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -774,7 +1033,7 @@ func (x *Close) String() string {
 func (*Close) ProtoMessage() {}
 
 func (x *Close) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[10]
+	mi := &file_wire_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -787,7 +1046,7 @@ func (x *Close) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Close.ProtoReflect.Descriptor instead.
 func (*Close) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{10}
+	return file_wire_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Close) GetReason() string {
@@ -826,14 +1085,15 @@ const file_wire_proto_rawDesc = "" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"{\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\xa9\x01\n" +
 	"\x0fManifestRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12%\n" +
-	"\x0esince_sequence\x18\x03 \x01(\x03R\rsinceSequence\"=\n" +
+	"\x0esince_sequence\x18\x03 \x01(\x03R\rsinceSequence\x12,\n" +
+	"\x12since_chunk_offset\x18\x04 \x01(\x03R\x10sinceChunkOffset\"=\n" +
 	"\bChunkRef\x12\x19\n" +
 	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x03R\x06length\"\xcc\x02\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xed\x02\n" +
 	"\x0eRemoteManifest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
@@ -847,12 +1107,35 @@ const file_wire_proto_rawDesc = "" +
 	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
 	"\n" +
 	"deleted_ms\x18\n" +
-	" \x01(\x03R\tdeletedMs\"\xbf\x01\n" +
+	" \x01(\x03R\tdeletedMs\x12\x1f\n" +
+	"\vmore_chunks\x18\v \x01(\bR\n" +
+	"moreChunks\"\x92\x02\n" +
 	"\rManifestDelta\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +
 	"\x13high_water_sequence\x18\x03 \x01(\x03R\x11highWaterSequence\x12;\n" +
-	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\"\x06\n" +
+	"\tmanifests\x18\x04 \x03(\v2\x1d.trove.wire.v1.RemoteManifestR\tmanifests\x12\x1a\n" +
+	"\bcomplete\x18\x05 \x01(\bR\bcomplete\x125\n" +
+	"\x17high_water_chunk_offset\x18\x06 \x01(\x03R\x14highWaterChunkOffset\"\xc9\x01\n" +
+	"\x0fMembershipEntry\x12\x1d\n" +
+	"\n" +
+	"network_id\x18\x01 \x01(\tR\tnetworkId\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x03 \x01(\fR\tpublicKey\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\rR\x04role\x12\x19\n" +
+	"\badded_by\x18\x05 \x01(\tR\aaddedBy\x12\x1e\n" +
+	"\vadded_at_ms\x18\x06 \x01(\x03R\taddedAtMs\x12\x10\n" +
+	"\x03sig\x18\a \x01(\fR\x03sig\"k\n" +
+	"\x10MembershipGossip\x12\x1d\n" +
+	"\n" +
+	"network_id\x18\x01 \x01(\tR\tnetworkId\x128\n" +
+	"\aentries\x18\x02 \x03(\v2\x1e.trove.wire.v1.MembershipEntryR\aentries\"\xa5\x01\n" +
+	"\vSyncReceipt\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
+	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
+	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +
@@ -876,31 +1159,35 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_wire_proto_goTypes = []any{
-	(FolderType)(0),         // 0: trove.wire.v1.FolderType
-	(*Hello)(nil),           // 1: trove.wire.v1.Hello
-	(*Header)(nil),          // 2: trove.wire.v1.Header
-	(*Folder)(nil),          // 3: trove.wire.v1.Folder
-	(*NetworkConfig)(nil),   // 4: trove.wire.v1.NetworkConfig
-	(*FolderSummary)(nil),   // 5: trove.wire.v1.FolderSummary
-	(*ManifestRequest)(nil), // 6: trove.wire.v1.ManifestRequest
-	(*ChunkRef)(nil),        // 7: trove.wire.v1.ChunkRef
-	(*RemoteManifest)(nil),  // 8: trove.wire.v1.RemoteManifest
-	(*ManifestDelta)(nil),   // 9: trove.wire.v1.ManifestDelta
-	(*Ping)(nil),            // 10: trove.wire.v1.Ping
-	(*Close)(nil),           // 11: trove.wire.v1.Close
+	(FolderType)(0),          // 0: trove.wire.v1.FolderType
+	(*Hello)(nil),            // 1: trove.wire.v1.Hello
+	(*Header)(nil),           // 2: trove.wire.v1.Header
+	(*Folder)(nil),           // 3: trove.wire.v1.Folder
+	(*NetworkConfig)(nil),    // 4: trove.wire.v1.NetworkConfig
+	(*FolderSummary)(nil),    // 5: trove.wire.v1.FolderSummary
+	(*ManifestRequest)(nil),  // 6: trove.wire.v1.ManifestRequest
+	(*ChunkRef)(nil),         // 7: trove.wire.v1.ChunkRef
+	(*RemoteManifest)(nil),   // 8: trove.wire.v1.RemoteManifest
+	(*ManifestDelta)(nil),    // 9: trove.wire.v1.ManifestDelta
+	(*MembershipEntry)(nil),  // 10: trove.wire.v1.MembershipEntry
+	(*MembershipGossip)(nil), // 11: trove.wire.v1.MembershipGossip
+	(*SyncReceipt)(nil),      // 12: trove.wire.v1.SyncReceipt
+	(*Ping)(nil),             // 13: trove.wire.v1.Ping
+	(*Close)(nil),            // 14: trove.wire.v1.Close
 }
 var file_wire_proto_depIdxs = []int32{
-	0, // 0: trove.wire.v1.Folder.folder_type:type_name -> trove.wire.v1.FolderType
-	3, // 1: trove.wire.v1.NetworkConfig.folders:type_name -> trove.wire.v1.Folder
-	7, // 2: trove.wire.v1.RemoteManifest.chunks:type_name -> trove.wire.v1.ChunkRef
-	8, // 3: trove.wire.v1.ManifestDelta.manifests:type_name -> trove.wire.v1.RemoteManifest
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: trove.wire.v1.Folder.folder_type:type_name -> trove.wire.v1.FolderType
+	3,  // 1: trove.wire.v1.NetworkConfig.folders:type_name -> trove.wire.v1.Folder
+	7,  // 2: trove.wire.v1.RemoteManifest.chunks:type_name -> trove.wire.v1.ChunkRef
+	8,  // 3: trove.wire.v1.ManifestDelta.manifests:type_name -> trove.wire.v1.RemoteManifest
+	10, // 4: trove.wire.v1.MembershipGossip.entries:type_name -> trove.wire.v1.MembershipEntry
+	5,  // [5:5] is the sub-list for method output_type
+	5,  // [5:5] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_wire_proto_init() }
@@ -914,7 +1201,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   11,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

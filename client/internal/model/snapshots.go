@@ -200,15 +200,18 @@ func (s *Store) Forget(ctx context.Context, root snapshot.Root) error {
 	})
 }
 
-// SweepTombstones removes tombstones whose retention has expired as of now,
-// dropping them from the current state. Retained snapshots keep their historical
-// record of the deletion. It returns the number of tombstones removed.
-func (s *Store) SweepTombstones(ctx context.Context, now time.Time) (int, error) {
+// SweepTombstones removes tombstones whose retention has expired as of now and whose
+// sequence is at or below safeSeq, dropping them from the current state; retained
+// snapshots keep their record of the deletion. safeSeq is the convergence gate — the
+// minimum high-water across replica receipts — so a deletion is reaped only after every
+// known replica has applied it; pass math.MaxInt64 to gate on retention alone. Returns
+// the number removed.
+func (s *Store) SweepTombstones(ctx context.Context, now time.Time, safeSeq int64) (int, error) {
 	var n int64
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		res, err := tx.Exec(ctx,
-			`DELETE FROM manifests WHERE deleted = 1 AND expires_ms IS NOT NULL AND expires_ms <= ?`,
-			now.UnixMilli())
+			`DELETE FROM manifests WHERE deleted = 1 AND expires_ms IS NOT NULL AND expires_ms <= ? AND seq <= ?`,
+			now.UnixMilli(), safeSeq)
 		if err != nil {
 			return fmt.Errorf("model: sweep tombstones: %w", err)
 		}

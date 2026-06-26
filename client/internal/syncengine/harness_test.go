@@ -20,7 +20,7 @@ import (
 
 const folderID = "demo"
 
-func grant(string) ([]string, bool, error) { return []string{folderID}, true, nil }
+func grant(context.Context, string) ([]string, bool, error) { return []string{folderID}, true, nil }
 
 type peer struct {
 	id     string
@@ -89,6 +89,14 @@ func (p peer) currentRoot(t *testing.T) string {
 // until ctx is cancelled. It returns both engines.
 func startSync(t *testing.T, ctx context.Context, owner, replica peer, wrap ...func(netio.Conn) netio.Conn) (ownerEng, replicaEng *Engine) {
 	t.Helper()
+	os, rs := memSessionPair(t, ctx, owner, replica, wrap...)
+	return wireEngines(t, ctx, os, rs, owner, replica)
+}
+
+// memSessionPair establishes two Active sessions over MemNet (owner accepts, replica
+// dials), optionally wrapping the replica's conn for fault injection.
+func memSessionPair(t *testing.T, ctx context.Context, owner, replica peer, wrap ...func(netio.Conn) netio.Conn) (ownerSess, replicaSess *session.Session) {
+	t.Helper()
 	mn := netio.NewMemNet()
 	ot := mn.Transport("owner", owner.id)
 	rt := mn.Transport("replica", replica.id)
@@ -128,7 +136,7 @@ func startSync(t *testing.T, ctx context.Context, owner, replica peer, wrap ...f
 	if or.err != nil {
 		t.Fatalf("owner handshake: %v", or.err)
 	}
-	return wireEngines(t, ctx, or.s, rs, owner, replica)
+	return or.s, rs
 }
 
 // wireEngines builds an owner and replica engine on two Active sessions, installs
@@ -141,8 +149,9 @@ func wireEngines(t *testing.T, ctx context.Context, ownerSess, replicaSess *sess
 	if err != nil {
 		t.Fatalf("owner engine: %v", err)
 	}
+	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err = New(Options{Session: replicaSess, Folders: []FolderConfig{{
-		FolderID: folderID, Role: RoleReplica, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks,
+		FolderID: folderID, Role: RoleReplica, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks, Coord: coord,
 	}}})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)
