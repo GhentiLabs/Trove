@@ -229,38 +229,42 @@ func TestConvergedHighWater(t *testing.T) {
 		t.Fatalf("CurrentRoot: %v", err)
 	}
 
-	if _, ok, err := s.ConvergedHighWater(ctx, 7); err != nil || ok {
-		t.Fatalf("empty receipts: ok=%v err=%v, want ok=false", ok, err)
+	if _, ok, err := s.ConvergedHighWater(ctx, 7, nil); err != nil || ok {
+		t.Fatalf("no members: ok=%v err=%v, want ok=false", ok, err)
 	}
 
 	now := time.Now()
 	must := func(peer string, epoch uint64, hw int64) {
-		if err := s.RecordReceipt(ctx, Receipt{PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: now}); err != nil {
+		if err := s.RecordReceipt(ctx, InboundAck, Receipt{PeerID: peer, Root: root, Epoch: epoch, HighWater: hw, SyncedAt: now}); err != nil {
 			t.Fatalf("RecordReceipt: %v", err)
 		}
 	}
 	must("p1", 7, 40)
 	must("p2", 7, 25)
 
-	// All receipts at the queried epoch: the gate is their minimum.
-	hw, ok, err := s.ConvergedHighWater(ctx, 7)
+	// A member with no receipt yet blocks reaping outright.
+	if hw, ok, err := s.ConvergedHighWater(ctx, 7, []string{"p1", "p2", "p3"}); err != nil || !ok || hw != 0 {
+		t.Fatalf("unacked member gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
+	}
+
+	// All members acked at the queried epoch: the gate is their minimum.
+	hw, ok, err := s.ConvergedHighWater(ctx, 7, []string{"p1", "p2"})
 	if err != nil || !ok || hw != 25 {
 		t.Fatalf("ConvergedHighWater(7) = (%d, %v, %v), want (25, true, nil)", hw, ok, err)
 	}
 
-	// A receipt at a stale epoch (a previously-known replica that has not re-confirmed
-	// since an owner rebuild) blocks reaping at 0 until it reconnects.
+	// A member at a stale epoch (not re-confirmed since an epoch rebuild) blocks reaping.
 	must("p3", 9, 5)
-	hw, ok, err = s.ConvergedHighWater(ctx, 7)
+	hw, ok, err = s.ConvergedHighWater(ctx, 7, []string{"p1", "p2", "p3"})
 	if err != nil || !ok || hw != 0 {
 		t.Fatalf("stale-epoch gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
 	}
 
-	got, ok, err := s.Receipt(ctx, "p2")
+	got, ok, err := s.Receipt(ctx, InboundAck, "p2")
 	if err != nil || !ok || got.HighWater != 25 || got.Root != root {
 		t.Fatalf("Receipt(p2) = (%+v, %v, %v), want hw=25 root match", got, ok, err)
 	}
-	all, err := s.Receipts(ctx)
+	all, err := s.Receipts(ctx, InboundAck)
 	if err != nil || len(all) != 3 {
 		t.Fatalf("Receipts len=%d err=%v, want 3", len(all), err)
 	}

@@ -172,6 +172,7 @@ func cmdInvite(args []string) error {
 	group := fs.String("group", "", "group id you own")
 	nodeID := fs.String("node", "", "member node id to admit")
 	keyHex := fs.String("key", "", "member public key in hex (from their `identity`)")
+	writer := fs.Bool("writer", false, "admit as a writer (two-way sync) instead of a reader")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -182,15 +183,19 @@ func cmdInvite(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invite: bad -key: %w", err)
 	}
+	role, tier := membership.RoleReader, "reader"
+	if *writer {
+		role, tier = membership.RoleWriter, "writer"
+	}
 	p, err := openPeer(*dir)
 	if err != nil {
 		return err
 	}
 	defer p.close()
-	if _, err := p.members.Add(context.Background(), *group, *nodeID, pub, membership.RoleReader); err != nil {
+	if _, err := p.members.Add(context.Background(), *group, *nodeID, pub, role); err != nil {
 		return err
 	}
-	fmt.Printf("admitted %s as a reader of %s\n", *nodeID, *group)
+	fmt.Printf("admitted %s as a %s of %s\n", *nodeID, tier, *group)
 	return nil
 }
 
@@ -282,7 +287,7 @@ func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string) erro
 	if err != nil {
 		return err
 	}
-	receipts, err := ms.Receipts(ctx)
+	receipts, err := ms.Receipts(ctx, model.LocalSync)
 	if err != nil {
 		return err
 	}

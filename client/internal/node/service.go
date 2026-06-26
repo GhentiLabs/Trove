@@ -121,7 +121,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return err
 		}
 		defer syncRT.close()
-		syncRT.repairReplicas(ctx, s.log)
+		syncRT.repairFolders(ctx, s.log)
 	}
 
 	peers, err := s.peerIDs(ctx)

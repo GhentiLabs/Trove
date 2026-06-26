@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/storage"
@@ -17,7 +18,7 @@ import (
 
 // SchemaVersion is the current sync-state database layout. Open refuses a database
 // written by a newer binary.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // TombstoneLifetime is how long a deletion is retained before SweepTombstones may
 // remove it. It must exceed the longest plausible offline window so a peer cannot
@@ -39,6 +40,9 @@ var (
 	ErrCorruptModel = errors.New("model: stored manifest fails identity verification")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
 	ErrSchemaTooNew = errors.New("model: database schema newer than this binary")
+	// ErrSchemaOutdated is returned when the database predates this binary's schema. There
+	// are no migrations pre-release; the folder state must be deleted and resynced.
+	ErrSchemaOutdated = errors.New("model: database schema older than this binary")
 	// ErrNodeMismatch is returned when the database belongs to a different node.
 	ErrNodeMismatch = errors.New("model: database belongs to a different node")
 	// ErrInvalidManifest is returned when a manifest is not well-formed for its kind.
@@ -61,6 +65,8 @@ CREATE TABLE IF NOT EXISTS manifests (
 	inode       INTEGER NOT NULL DEFAULT 0,
 	version_vec BLOB    NOT NULL,
 	seq         INTEGER NOT NULL,
+	author      TEXT    NOT NULL DEFAULT '',
+	authored_ms INTEGER NOT NULL DEFAULT 0,
 	deleted     INTEGER NOT NULL DEFAULT 0,
 	deleted_ms  INTEGER,
 	expires_ms  INTEGER
@@ -94,13 +100,13 @@ CREATE TABLE IF NOT EXISTS counters (
 	name TEXT    PRIMARY KEY,
 	next INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS replica_cursors (
-	folder_id     TEXT    NOT NULL,
-	owner_peer_id TEXT    NOT NULL,
-	epoch         INTEGER NOT NULL,
-	high_water    INTEGER NOT NULL,
-	updated_ms    INTEGER NOT NULL,
-	PRIMARY KEY (folder_id, owner_peer_id)
+CREATE TABLE IF NOT EXISTS peer_cursors (
+	folder_id  TEXT    NOT NULL,
+	peer_id    TEXT    NOT NULL,
+	epoch      INTEGER NOT NULL,
+	high_water INTEGER NOT NULL,
+	updated_ms INTEGER NOT NULL,
+	PRIMARY KEY (folder_id, peer_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS folder_epoch (
 	id         INTEGER PRIMARY KEY CHECK (id = 1),
@@ -108,11 +114,13 @@ CREATE TABLE IF NOT EXISTS folder_epoch (
 	created_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_receipts (
-	peer_id       TEXT PRIMARY KEY,
+	peer_id       TEXT    NOT NULL,
+	direction     INTEGER NOT NULL,
 	snapshot_root BLOB    NOT NULL,
 	epoch         INTEGER NOT NULL,
 	high_water    INTEGER NOT NULL,
-	synced_ms     INTEGER NOT NULL
+	synced_ms     INTEGER NOT NULL,
+	PRIMARY KEY (peer_id, direction)
 ) WITHOUT ROWID;`
 
 // querier is the read surface shared by *storage.DB and *storage.Tx, so load
@@ -126,6 +134,30 @@ type querier interface {
 type Store struct {
 	db   *storage.DB
 	node string
+
+	// applyMu serializes a remote apply against local origination, so a concurrent scan
+	// cannot change a path's version between the resolve and the commit.
+	applyMu sync.Mutex
+
+	hookMu   sync.Mutex
+	onChange func()
+}
+
+// SetChangeHook registers a callback invoked after each committed state change. It must
+// not block and must not call back into the store synchronously.
+func (s *Store) SetChangeHook(fn func()) {
+	s.hookMu.Lock()
+	s.onChange = fn
+	s.hookMu.Unlock()
+}
+
+func (s *Store) notifyChange() {
+	s.hookMu.Lock()
+	fn := s.onChange
+	s.hookMu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // Options configures Open.
@@ -181,6 +213,9 @@ func (s *Store) validateVersion(got string) error {
 	}
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, v, SchemaVersion)
+	}
+	if v < SchemaVersion {
+		return fmt.Errorf("%w: found %d, this binary writes %d; delete the folder state and resync", ErrSchemaOutdated, v, SchemaVersion)
 	}
 	return nil
 }

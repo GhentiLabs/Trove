@@ -13,6 +13,9 @@ import (
 // engineOn builds and drives one engine for a session over p's stores.
 func engineOn(t *testing.T, ctx context.Context, sess *session.Session, p peer, role Role, coord *Coordinator) *Engine {
 	t.Helper()
+	if coord == nil {
+		coord = NewCoordinator(folderID, p.fc, p.chunks, 0, nil)
+	}
 	e, err := New(Options{Session: sess, Folders: []FolderConfig{{
 		FolderID: folderID, Role: role, Root: p.root, FolderCtx: p.fc, Model: p.model, Chunks: p.chunks, Coord: coord,
 	}}})
@@ -52,9 +55,9 @@ func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
 	//    owner session — A now holds a.bin's chunks and nothing newer.
 	ctxA, cancelA := context.WithCancel(context.Background())
 	oaO, oaA := memSessionPair(t, ctxA, owner, a)
-	engineOn(t, ctxA, oaO, owner, RoleOwner, nil)
+	engineOn(t, ctxA, oaO, owner, RoleWriter, nil)
 	ca := NewCoordinator(folderID, a.fc, a.chunks, 0, nil)
-	engineOn(t, ctxA, oaA, a, RoleReplica, ca)
+	engineOn(t, ctxA, oaA, a, RoleReader, ca)
 	waitConverged(t, owner, a)
 	cancelA()
 
@@ -68,16 +71,16 @@ func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
 
 	// 3) B connects to A first and registers it as a source (A serves what it holds).
 	abA, abB := memSessionPair(t, ctx, a, b)
-	aServe := engineOn(t, ctx, abA, a, RoleReplica, ca)
-	engineOn(t, ctx, abB, b, RoleReplica, cb)
+	aServe := engineOn(t, ctx, abA, a, RoleReader, ca)
+	engineOn(t, ctx, abB, b, RoleReader, cb)
 	waitSources(t, cb, 1)
 
 	// 4) B connects to the owner: register the owner as a source, then start the owner
 	//    engine so its announce drives B's reconcile with both sources present.
 	obO, obB := memSessionPair(t, ctx, owner, b)
-	engineOn(t, ctx, obB, b, RoleReplica, cb)
+	engineOn(t, ctx, obB, b, RoleReader, cb)
 	waitSources(t, cb, 2)
-	ownerServe := engineOn(t, ctx, obO, owner, RoleOwner, nil)
+	ownerServe := engineOn(t, ctx, obO, owner, RoleWriter, nil)
 
 	waitConverged(t, owner, b)
 	assertTreesEqual(t, owner.root, b.root)
@@ -104,9 +107,9 @@ func TestMultiSourceCorruptSourceRefetched(t *testing.T) {
 	// A fully syncs the file, then is frozen with a good copy.
 	ctxA, cancelA := context.WithCancel(context.Background())
 	oaO, oaA := memSessionPair(t, ctxA, owner, a)
-	engineOn(t, ctxA, oaO, owner, RoleOwner, nil)
+	engineOn(t, ctxA, oaO, owner, RoleWriter, nil)
 	ca := NewCoordinator(folderID, a.fc, a.chunks, 0, nil)
-	engineOn(t, ctxA, oaA, a, RoleReplica, ca)
+	engineOn(t, ctxA, oaA, a, RoleReader, ca)
 	waitConverged(t, owner, a)
 	cancelA()
 
@@ -119,14 +122,14 @@ func TestMultiSourceCorruptSourceRefetched(t *testing.T) {
 	fc := &faultyConn{}
 	fc.corrupt.Store(true)
 	abA, abB := memSessionPair(t, ctx, a, b, func(c netio.Conn) netio.Conn { fc.Conn = c; return fc })
-	engineOn(t, ctx, abA, a, RoleReplica, ca)
-	engineOn(t, ctx, abB, b, RoleReplica, cb)
+	engineOn(t, ctx, abA, a, RoleReader, ca)
+	engineOn(t, ctx, abB, b, RoleReader, cb)
 	waitSources(t, cb, 1)
 
 	obO, obB := memSessionPair(t, ctx, owner, b)
-	engineOn(t, ctx, obB, b, RoleReplica, cb)
+	engineOn(t, ctx, obB, b, RoleReader, cb)
 	waitSources(t, cb, 2)
-	engineOn(t, ctx, obO, owner, RoleOwner, nil)
+	engineOn(t, ctx, obO, owner, RoleWriter, nil)
 
 	waitConverged(t, owner, b)
 	assertTreesEqual(t, owner.root, b.root)

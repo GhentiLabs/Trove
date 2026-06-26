@@ -49,7 +49,7 @@ func TestLargeFileConvergesViaIntraManifestPaging(t *testing.T) {
 	ownerSess, replicaSess := memSessionPair(t, ctx, owner, replica)
 	ownerEng, err := New(Options{
 		Session: ownerSess, MaxDeltaBytes: 200,
-		Folders: []FolderConfig{{FolderID: folderID, Role: RoleOwner, Root: owner.root, Model: owner.model, Chunks: owner.chunks}},
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleWriter, Root: owner.root, Model: owner.model, Chunks: owner.chunks, Coord: NewCoordinator(folderID, owner.fc, owner.chunks, 0, nil)}},
 	})
 	if err != nil {
 		t.Fatalf("owner engine: %v", err)
@@ -57,7 +57,7 @@ func TestLargeFileConvergesViaIntraManifestPaging(t *testing.T) {
 	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err := New(Options{
 		Session: replicaSess,
-		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReader, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
 	})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)
@@ -90,7 +90,7 @@ func TestManifestDeltaPagination(t *testing.T) {
 	// A tiny delta budget forces many small pages out of the 60 manifests.
 	ownerEng, err := New(Options{
 		Session: ownerSess, MaxDeltaBytes: 512,
-		Folders: []FolderConfig{{FolderID: folderID, Role: RoleOwner, Root: owner.root, Model: owner.model, Chunks: owner.chunks}},
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleWriter, Root: owner.root, Model: owner.model, Chunks: owner.chunks, Coord: NewCoordinator(folderID, owner.fc, owner.chunks, 0, nil)}},
 	})
 	if err != nil {
 		t.Fatalf("owner engine: %v", err)
@@ -98,7 +98,7 @@ func TestManifestDeltaPagination(t *testing.T) {
 	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err := New(Options{
 		Session: replicaSess,
-		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReplica, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
+		Folders: []FolderConfig{{FolderID: folderID, Role: RoleReader, Root: replica.root, Model: replica.model, Chunks: replica.chunks, Coord: coord}},
 	})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)

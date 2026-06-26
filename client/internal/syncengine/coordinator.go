@@ -18,10 +18,10 @@ import (
 // chunkAttemptTimeout bounds one chunk request to one source before trying the next.
 const chunkAttemptTimeout = 15 * time.Second
 
-// Coordinator schedules multi-source chunk pulls for one folder on a replica node. It
-// is shared by all the node's sessions for the folder; each session registers its peer
-// as a source. Pulls spread across peer sources and fall back to the owner, which
-// holds every chunk.
+// Coordinator schedules multi-source chunk pulls for one folder. It is shared by all the
+// node's sessions for the folder; each session registers its peer as a source. Pulls
+// spread across peer sources and fall back to the announcing peer as the guaranteed
+// supplier. It also fans a local-change notification out to every session (push).
 type Coordinator struct {
 	folderID string
 	fc       chunkstore.FolderContext
@@ -31,6 +31,10 @@ type Coordinator struct {
 
 	mu      sync.Mutex
 	sources map[string]netio.Conn
+
+	announceMu sync.Mutex
+	announcers map[int]func()
+	nextSub    int
 
 	rotate atomic.Uint64
 }
@@ -45,7 +49,37 @@ func NewCoordinator(folderID string, fc chunkstore.FolderContext, chunks *chunks
 	}
 	return &Coordinator{
 		folderID: folderID, fc: fc, chunks: chunks, inflight: inflight, log: log,
-		sources: make(map[string]netio.Conn),
+		sources:    make(map[string]netio.Conn),
+		announcers: make(map[int]func()),
+	}
+}
+
+// OnAnnounce registers fn to run whenever the folder's local state changes, so every
+// session for the folder re-announces promptly. It returns a function that unregisters fn.
+func (c *Coordinator) OnAnnounce(fn func()) (cancel func()) {
+	c.announceMu.Lock()
+	id := c.nextSub
+	c.nextSub++
+	c.announcers[id] = fn
+	c.announceMu.Unlock()
+	return func() {
+		c.announceMu.Lock()
+		delete(c.announcers, id)
+		c.announceMu.Unlock()
+	}
+}
+
+// triggerAnnounce fans out a state-change notification to every registered session, each
+// in its own goroutine so a slow send never blocks the model commit that called it.
+func (c *Coordinator) triggerAnnounce() {
+	c.announceMu.Lock()
+	fns := make([]func(), 0, len(c.announcers))
+	for _, fn := range c.announcers {
+		fns = append(fns, fn)
+	}
+	c.announceMu.Unlock()
+	for _, fn := range fns {
+		go fn()
 	}
 }
 
@@ -76,16 +110,16 @@ type srcConn struct {
 	conn   netio.Conn
 }
 
-// order returns the sources to try for one chunk: non-owner peers first (rotated for
-// spread), then the owner as the guaranteed fallback.
-func (c *Coordinator) order(ownerID string) []srcConn {
+// order returns the sources to try for one chunk: other peers first (rotated for spread),
+// then the delta source as the guaranteed fallback.
+func (c *Coordinator) order(sourceID string) []srcConn {
 	c.mu.Lock()
 	peers := make([]srcConn, 0, len(c.sources))
-	var owner srcConn
+	var fallback srcConn
 	haveOwner := false
 	for id, conn := range c.sources {
-		if id == ownerID {
-			owner, haveOwner = srcConn{id, conn}, true
+		if id == sourceID {
+			fallback, haveOwner = srcConn{id, conn}, true
 			continue
 		}
 		peers = append(peers, srcConn{id, conn})
@@ -97,14 +131,14 @@ func (c *Coordinator) order(ownerID string) []srcConn {
 		peers = append(peers[k:], peers[:k]...)
 	}
 	if haveOwner {
-		peers = append(peers, owner)
+		peers = append(peers, fallback)
 	}
 	return peers
 }
 
-// pull fetches every chunk in refs the replica lacks, spreading across sources and
-// falling back to ownerID. The first hard error cancels the rest and is returned.
-func (c *Coordinator) pull(ctx context.Context, refs []manifest.ChunkRef, ownerID string) error {
+// pull fetches every chunk in refs the node lacks, spreading across sources and falling
+// back to sourceID. The first hard error cancels the rest and is returned.
+func (c *Coordinator) pull(ctx context.Context, refs []manifest.ChunkRef, sourceID string) error {
 	want, err := c.missing(ctx, refs)
 	if err != nil {
 		return err
@@ -132,7 +166,7 @@ func (c *Coordinator) pull(ctx context.Context, refs []manifest.ChunkRef, ownerI
 		}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			if err := c.fetch(ctx, id, ownerID); err != nil {
+			if err := c.fetch(ctx, id, sourceID); err != nil {
 				once.Do(func() { firstErr = err; cancel() })
 			}
 		})
@@ -167,11 +201,11 @@ func (c *Coordinator) missing(ctx context.Context, refs []manifest.ChunkRef) ([]
 	return want, nil
 }
 
-// fetch tries each source in turn until one delivers the chunk; the owner is always
+// fetch tries each source in turn until one delivers the chunk; the delta source is always
 // the final fallback. A per-attempt timeout re-issues a stalled chunk to the next
 // source.
-func (c *Coordinator) fetch(ctx context.Context, id hasher.ChunkID, ownerID string) error {
-	sources := c.order(ownerID)
+func (c *Coordinator) fetch(ctx context.Context, id hasher.ChunkID, sourceID string) error {
+	sources := c.order(sourceID)
 	if len(sources) == 0 {
 		return fmt.Errorf("syncengine: no sources for chunk %s", id)
 	}

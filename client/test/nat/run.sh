@@ -406,6 +406,87 @@ run_offline_gate() {
 	return 1
 }
 
+# run_bidi_gate is the M5 acceptance shape over real holepunch: two writers converge a
+# folder, both edit the SAME path during one offline window, and on reconnect converge to
+# byte-identical trees holding the deterministic winner plus the loser as a conflict copy —
+# neither edit lost.
+run_bidi_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTB="$STATE/B/share" group
+	mkdir -p "$SRC" "$DSTB"
+	printf 'founding content\n' >"$SRC/doc.txt"
+	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" | awk '/group id:/{print $3}')
+	if [ -z "$group" ]; then log "bidi-gate: found failed"; kill $COORD_PID 2>/dev/null; return 2; fi
+	# B is admitted as a WRITER (two-way), not a reader.
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" -writer >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DSTB" >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+
+	# Round 1: B converges the founding state.
+	local r1="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/doc.txt" "$DSTB/doc.txt" 2>/dev/null; then r1="ok"; break; fi
+		sleep 1
+	done
+	if [ "$r1" != ok ]; then
+		log "bidi-gate: round 1 convergence FAILED"; report_gate_logs
+		kill $pa $pb $COORD_PID 2>/dev/null; return 1
+	fi
+
+	# Both go offline and edit the same path differently — a true concurrent conflict.
+	kill $pa $pb 2>/dev/null; wait $pa $pb 2>/dev/null
+	printf 'edit by writer A\n' >"$SRC/doc.txt"
+	printf 'edit by writer B\n' >"$DSTB/doc.txt"
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >>"$LOG/A" 2>&1 &
+	pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >>"$LOG/B" 2>&1 &
+	pb=$!
+
+	# Converge: A and B end byte-identical (winner at doc.txt + one conflict copy), and both
+	# edits survive somewhere in the tree.
+	local conv="fail"
+	for j in $(seq 1 90); do
+		if diff -rq -x '.trove-tmp*' "$SRC" "$DSTB" >/dev/null 2>&1 \
+		   && grep -rqsF 'edit by writer A' "$SRC" && grep -rqsF 'edit by writer B' "$SRC" \
+		   && [ "$(find "$SRC" -name 'doc.conflict-*' | wc -l)" -eq 1 ]; then
+			conv="ok"; break
+		fi
+		sleep 1
+	done
+
+	kill $pa $pb $COORD_PID 2>/dev/null
+	wait $pa $pb 2>/dev/null
+
+	if [ "$conv" = ok ]; then
+		log "bidi-gate: PASS (2 writers; concurrent same-path offline edits → byte-identical keep-both convergence over holepunch)"
+		return 0
+	fi
+	log "bidi-gate: FAIL (conv=$conv)"
+	report_gate_logs
+	return 1
+}
+
 main() {
 	if ! ip netns add _probe 2>/dev/null; then
 		log "this harness needs --privileged (CAP_NET_ADMIN + netns)"; exit 2
@@ -422,6 +503,8 @@ main() {
 		run_cell "$NAT_A" "$NAT_B" "$EXPECT" ;;
 	offline-gate)
 		run_offline_gate ;;
+	bidi-gate)
+		run_bidi_gate ;;
 	*)
 		log "unknown SCENARIO ${SCENARIO}"; exit 2 ;;
 	esac

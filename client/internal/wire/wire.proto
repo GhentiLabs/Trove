@@ -53,15 +53,18 @@ message NetworkConfig {
   reserved 3;
 }
 
-// FolderSummary is the owner's per-folder anti-entropy announcement on the control
-// stream, sent once a session is Active and whenever the owner's folder root
-// advances. A replica compares snapshot_root to its own and requests a delta if
-// they differ; index_epoch_id and high_water_sequence drive the resync cursor.
+// FolderSummary is a node's per-folder anti-entropy announcement on the control stream,
+// sent once a session is Active and whenever its folder root advances. A peer compares
+// snapshot_root to its own and requests a delta if they differ; index_epoch_id and
+// high_water_sequence drive the resync cursor.
 message FolderSummary {
   string folder_id = 1;
   bytes snapshot_root = 2;
   uint64 index_epoch_id = 3;
   int64 high_water_sequence = 4;
+  // sent_ms is the sender's wall clock when it announced, used only to observe inter-node
+  // clock skew (the conflict winner's quality input). It never affects convergence.
+  int64 sent_ms = 5;
 }
 
 // ManifestRequest asks the owner for every manifest with seq greater than
@@ -94,12 +97,15 @@ message RemoteManifest {
   repeated ChunkRef chunks = 5;
   bytes manifest_id = 6;
   bytes version_vector = 7;
-  int64 owner_sequence = 8;
   bool deleted = 9;
   int64 deleted_ms = 10;
   // more_chunks is set when this entry carries only a prefix of the file's chunk list and
   // the remainder continues in the following delta pages (same path and manifest_id).
   bool more_chunks = 11;
+  // author and authored_ms name the node and wall-clock of the edit that minted this version.
+  // They travel verbatim and break concurrent-version ties; they are not hashed into manifest_id.
+  string author = 12;
+  int64 authored_ms = 13;
 }
 
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in

@@ -15,12 +15,20 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
-// apply materializes a delta crash-safely: stage files under tmpDirName, rename into
-// place, then commit the model. The destination is never written directly, and a
-// crash before the commit re-applies idempotently on restart.
+// apply reconciles a delta: the model resolves the incoming batch against local
+// versions, this stages the winners under tmpDirName and renames them into place,
+// then the model commits and advances the cursor. The destination is never written
+// directly, and a crash before the commit re-applies idempotently on restart.
 func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, delta *wirepb.ManifestDelta) error {
+	return fs.cfg.Model.ApplyRemote(ctx, fs.cfg.FolderID, fs.eng.sess.PeerNodeID(),
+		delta.GetIndexEpochId(), delta.GetHighWaterSequence(), batch, func(apply []model.RemoteManifest) error {
+			return fs.materializeBatch(ctx, apply)
+		})
+}
+
+func (fs *folderState) materializeBatch(ctx context.Context, batch []model.RemoteManifest) error {
 	// Validate the whole batch against the folder boundary before touching the
-	// filesystem: a hostile owner must not be able to delete the root, escape it, or
+	// filesystem: a hostile peer must not be able to delete the root, escape it, or
 	// plant an escaping symlink. The model commit re-validates, but only after the disk
 	// is mutated, so this guard has to run first.
 	dests := make([]string, len(batch))
@@ -63,16 +71,10 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 		}
 		parents[filepath.Dir(dest)] = struct{}{}
 	}
-	// Fsync touched directories so the renames are durable before the model commit
-	// makes them visible; otherwise a power loss could lose a converged file.
 	for dir := range parents {
 		if err := syncDir(dir); err != nil {
 			return err
 		}
-	}
-
-	if err := fs.cfg.Model.ApplyRemoteAndAdvance(ctx, batch, fs.cfg.FolderID, fs.eng.sess.PeerNodeID(), delta.GetIndexEpochId(), delta.GetHighWaterSequence()); err != nil {
-		return err
 	}
 	_ = os.RemoveAll(stage)
 	return nil

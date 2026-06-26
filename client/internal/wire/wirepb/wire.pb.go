@@ -336,18 +336,21 @@ func (x *NetworkConfig) GetFolders() []*Folder {
 	return nil
 }
 
-// FolderSummary is the owner's per-folder anti-entropy announcement on the control
-// stream, sent once a session is Active and whenever the owner's folder root
-// advances. A replica compares snapshot_root to its own and requests a delta if
-// they differ; index_epoch_id and high_water_sequence drive the resync cursor.
+// FolderSummary is a node's per-folder anti-entropy announcement on the control stream,
+// sent once a session is Active and whenever its folder root advances. A peer compares
+// snapshot_root to its own and requests a delta if they differ; index_epoch_id and
+// high_water_sequence drive the resync cursor.
 type FolderSummary struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
 	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
 	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// sent_ms is the sender's wall clock when it announced, used only to observe inter-node
+	// clock skew (the conflict winner's quality input). It never affects convergence.
+	SentMs        int64 `protobuf:"varint,5,opt,name=sent_ms,json=sentMs,proto3" json:"sent_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FolderSummary) Reset() {
@@ -404,6 +407,13 @@ func (x *FolderSummary) GetIndexEpochId() uint64 {
 func (x *FolderSummary) GetHighWaterSequence() int64 {
 	if x != nil {
 		return x.HighWaterSequence
+	}
+	return 0
+}
+
+func (x *FolderSummary) GetSentMs() int64 {
+	if x != nil {
+		return x.SentMs
 	}
 	return 0
 }
@@ -547,12 +557,15 @@ type RemoteManifest struct {
 	Chunks        []*ChunkRef            `protobuf:"bytes,5,rep,name=chunks,proto3" json:"chunks,omitempty"`
 	ManifestId    []byte                 `protobuf:"bytes,6,opt,name=manifest_id,json=manifestId,proto3" json:"manifest_id,omitempty"`
 	VersionVector []byte                 `protobuf:"bytes,7,opt,name=version_vector,json=versionVector,proto3" json:"version_vector,omitempty"`
-	OwnerSequence int64                  `protobuf:"varint,8,opt,name=owner_sequence,json=ownerSequence,proto3" json:"owner_sequence,omitempty"`
 	Deleted       bool                   `protobuf:"varint,9,opt,name=deleted,proto3" json:"deleted,omitempty"`
 	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
 	// more_chunks is set when this entry carries only a prefix of the file's chunk list and
 	// the remainder continues in the following delta pages (same path and manifest_id).
-	MoreChunks    bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
+	MoreChunks bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
+	// author and authored_ms name the node and wall-clock of the edit that minted this version.
+	// They travel verbatim and break concurrent-version ties; they are not hashed into manifest_id.
+	Author        string `protobuf:"bytes,12,opt,name=author,proto3" json:"author,omitempty"`
+	AuthoredMs    int64  `protobuf:"varint,13,opt,name=authored_ms,json=authoredMs,proto3" json:"authored_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -636,13 +649,6 @@ func (x *RemoteManifest) GetVersionVector() []byte {
 	return nil
 }
 
-func (x *RemoteManifest) GetOwnerSequence() int64 {
-	if x != nil {
-		return x.OwnerSequence
-	}
-	return 0
-}
-
 func (x *RemoteManifest) GetDeleted() bool {
 	if x != nil {
 		return x.Deleted
@@ -662,6 +668,20 @@ func (x *RemoteManifest) GetMoreChunks() bool {
 		return x.MoreChunks
 	}
 	return false
+}
+
+func (x *RemoteManifest) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *RemoteManifest) GetAuthoredMs() int64 {
+	if x != nil {
+		return x.AuthoredMs
+	}
+	return 0
 }
 
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
@@ -1080,12 +1100,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x0eindex_epoch_id\x18\x04 \x01(\x04R\findexEpochId\x12.\n" +
 	"\x13high_water_sequence\x18\x05 \x01(\x03R\x11highWaterSequenceJ\x04\b\x06\x10\a\"F\n" +
 	"\rNetworkConfig\x12/\n" +
-	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xa7\x01\n" +
+	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xc0\x01\n" +
 	"\rFolderSummary\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\xa9\x01\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\x12\x17\n" +
+	"\asent_ms\x18\x05 \x01(\x03R\x06sentMs\"\xa9\x01\n" +
 	"\x0fManifestRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12%\n" +
@@ -1093,7 +1114,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x12since_chunk_offset\x18\x04 \x01(\x03R\x10sinceChunkOffset\"=\n" +
 	"\bChunkRef\x12\x19\n" +
 	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x03R\x06length\"\xed\x02\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xff\x02\n" +
 	"\x0eRemoteManifest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
@@ -1102,14 +1123,16 @@ const file_wire_proto_rawDesc = "" +
 	"\x06chunks\x18\x05 \x03(\v2\x17.trove.wire.v1.ChunkRefR\x06chunks\x12\x1f\n" +
 	"\vmanifest_id\x18\x06 \x01(\fR\n" +
 	"manifestId\x12%\n" +
-	"\x0eversion_vector\x18\a \x01(\fR\rversionVector\x12%\n" +
-	"\x0eowner_sequence\x18\b \x01(\x03R\rownerSequence\x12\x18\n" +
+	"\x0eversion_vector\x18\a \x01(\fR\rversionVector\x12\x18\n" +
 	"\adeleted\x18\t \x01(\bR\adeleted\x12\x1d\n" +
 	"\n" +
 	"deleted_ms\x18\n" +
 	" \x01(\x03R\tdeletedMs\x12\x1f\n" +
 	"\vmore_chunks\x18\v \x01(\bR\n" +
-	"moreChunks\"\x92\x02\n" +
+	"moreChunks\x12\x16\n" +
+	"\x06author\x18\f \x01(\tR\x06author\x12\x1f\n" +
+	"\vauthored_ms\x18\r \x01(\x03R\n" +
+	"authoredMs\"\x92\x02\n" +
 	"\rManifestDelta\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +

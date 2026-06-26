@@ -143,15 +143,16 @@ func memSessionPair(t *testing.T, ctx context.Context, owner, replica peer, wrap
 // their control handlers, and drives them until ctx ends.
 func wireEngines(t *testing.T, ctx context.Context, ownerSess, replicaSess *session.Session, owner, replica peer) (ownerEng, replicaEng *Engine) {
 	t.Helper()
+	ownerCoord := NewCoordinator(folderID, owner.fc, owner.chunks, 0, nil)
 	ownerEng, err := New(Options{Session: ownerSess, Folders: []FolderConfig{{
-		FolderID: folderID, Role: RoleOwner, Root: owner.root, FolderCtx: owner.fc, Model: owner.model, Chunks: owner.chunks,
+		FolderID: folderID, Role: RoleWriter, Root: owner.root, FolderCtx: owner.fc, Model: owner.model, Chunks: owner.chunks, Coord: ownerCoord,
 	}}})
 	if err != nil {
 		t.Fatalf("owner engine: %v", err)
 	}
 	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err = New(Options{Session: replicaSess, Folders: []FolderConfig{{
-		FolderID: folderID, Role: RoleReplica, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks, Coord: coord,
+		FolderID: folderID, Role: RoleReader, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks, Coord: coord,
 	}}})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)

@@ -25,6 +25,72 @@ func (vv VersionVector) Clone() VersionVector {
 	return maps.Clone(vv)
 }
 
+// Ordering is the causal relationship between two version vectors.
+type Ordering int
+
+const (
+	// Equal means the vectors carry identical causal histories.
+	Equal Ordering = iota
+	// Greater means the receiver dominates (descends, and is not equal to) other.
+	Greater
+	// Less means the receiver is dominated by other.
+	Less
+	// Concurrent means neither dominates the other: a real conflict.
+	Concurrent
+)
+
+// Compare returns the causal relationship of vv to other, treating a missing
+// entry as a zero counter.
+func (vv VersionVector) Compare(other VersionVector) Ordering {
+	le, ge := true, true
+	for node, c := range vv {
+		if c > other[node] {
+			le = false
+		}
+	}
+	for node, c := range other {
+		if c > vv[node] {
+			ge = false
+		}
+	}
+	switch {
+	case le && ge:
+		return Equal
+	case ge:
+		return Greater
+	case le:
+		return Less
+	default:
+		return Concurrent
+	}
+}
+
+// Dominates reports whether vv strictly descends other.
+func (vv VersionVector) Dominates(other VersionVector) bool {
+	return vv.Compare(other) == Greater
+}
+
+// IsConcurrent reports whether vv and other are causally concurrent.
+func (vv VersionVector) IsConcurrent(other VersionVector) bool {
+	return vv.Compare(other) == Concurrent
+}
+
+// Join returns the least upper bound: the entrywise maximum of the two vectors.
+func Join(a, b VersionVector) VersionVector {
+	out := make(VersionVector, max(len(a), len(b)))
+	for node, c := range a {
+		if c != 0 {
+			out[node] = c
+		}
+	}
+	for node, c := range b {
+		if c > out[node] {
+			out[node] = c
+		}
+	}
+	return out
+}
+
 // Canonical returns the deterministic encoding of the vector: a uvarint count of
 // nonzero entries, then each entry in ascending node-id order as a
 // length-prefixed node id and a uvarint counter. Zero counters are omitted.

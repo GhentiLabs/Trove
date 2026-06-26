@@ -63,6 +63,33 @@ func TestPutGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPutManifestStampsAuthorAndTimestamp(t *testing.T) {
+	s := newStore(t)
+	before := time.Now()
+	mustPut(t, s, regular("a.txt", "hello"), Metadata{Mtime: time.Unix(100, 0), Size: 5})
+	after := time.Now()
+
+	rec := mustGet(t, s, "a.txt")
+	if rec.Author != s.NodeID() {
+		t.Fatalf("author = %q, want this node %q", rec.Author, s.NodeID())
+	}
+	if rec.AuthoredAt.Before(before.Truncate(time.Millisecond)) || rec.AuthoredAt.After(after) {
+		t.Fatalf("authored-at %v outside [%v, %v]", rec.AuthoredAt, before, after)
+	}
+}
+
+func TestIdentityTouchKeepsAuthor(t *testing.T) {
+	s := newStore(t)
+	m := regular("a.txt", "hello")
+	mustPut(t, s, m, Metadata{Mtime: time.Unix(100, 0), Size: 5})
+	first := mustGet(t, s, "a.txt").AuthoredAt
+
+	mustPut(t, s, m, Metadata{Mtime: time.Unix(200, 0), Size: 5})
+	if got := mustGet(t, s, "a.txt").AuthoredAt; !got.Equal(first) {
+		t.Fatalf("a pure touch rewrote the author timestamp: %v -> %v", first, got)
+	}
+}
+
 func TestPutIsIdentityIdempotent(t *testing.T) {
 	s := newStore(t)
 	m := regular("a.txt", "hello")
