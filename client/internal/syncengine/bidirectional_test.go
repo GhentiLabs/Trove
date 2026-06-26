@@ -2,6 +2,8 @@ package syncengine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +128,44 @@ func TestConcurrentSamePathReaderConverges(t *testing.T) {
 
 	waitSameRoot(t, a, b, c)
 	assertTreesEqual(t, a.root, c.root)
+}
+
+// TestConcurrentDeleteVsEditKeepsEdit proves that when one writer deletes a path while
+// another edits it during the same offline window, both converge to the surviving edit —
+// data is never lost to a concurrent delete.
+func TestConcurrentDeleteVsEditKeepsEdit(t *testing.T) {
+	a := newPeer(t, ownerID)
+	b := newPeer(t, replicaID)
+	writeFile(t, a.root, "shared.txt", []byte("base"))
+	a.scan(t)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	sa, sb := memSessionPair(t, ctx1, a, b)
+	engineOn(t, ctx1, sa, a, RoleWriter, nil)
+	engineOn(t, ctx1, sb, b, RoleWriter, nil)
+	waitSameRoot(t, a, b)
+	cancel1()
+
+	// Offline: A deletes the file, B edits it.
+	if err := os.Remove(filepath.Join(a.root, "shared.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	a.scan(t)
+	writeFile(t, b.root, "shared.txt", []byte("edited by B while A deleted"))
+	b.scan(t)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	sa2, sb2 := memSessionPair(t, ctx2, a, b)
+	engineOn(t, ctx2, sa2, a, RoleWriter, nil)
+	engineOn(t, ctx2, sb2, b, RoleWriter, nil)
+
+	waitSameRoot(t, a, b)
+	assertTreesEqual(t, a.root, b.root)
+	got := fileContents(t, a.root)
+	if len(got) != 1 || !got["edited by B while A deleted"] {
+		t.Fatalf("edit must survive a concurrent delete: %v", got)
+	}
 }
 
 // TestTransitiveRelayConverges proves a writer's edit reaches a peer it never connects to

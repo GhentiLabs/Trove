@@ -391,6 +391,88 @@ func TestKeepBothConvergesDeterministically(t *testing.T) {
 	}
 }
 
+func tombstone(path, author string, counter uint64, atMs int64, content string) RemoteManifest {
+	rm := conflictingEdit(path, author, counter, atMs, content)
+	rm.Deleted = true
+	rm.DeletedAt = time.UnixMilli(atMs)
+	return rm
+}
+
+func TestDeleteVsEditResolvesToEditEitherOrder(t *testing.T) {
+	ctx := context.Background()
+	edit := conflictingEdit("a.txt", nodeA, 1, 100, "live edit by A")
+	del := tombstone("a.txt", nodeB, 1, 200, "B's stale content") // later, but a delete
+
+	// Edit then delete, and delete then edit, must both land on the live edit.
+	for _, order := range [][]RemoteManifest{{edit, del}, {del, edit}} {
+		s := newStore(t)
+		if err := applyRemote(ctx, s, order[0].Author, 1, 1, order[0]); err != nil {
+			t.Fatalf("apply first: %v", err)
+		}
+		if err := applyRemote(ctx, s, order[1].Author, 1, 1, order[1]); err != nil {
+			t.Fatalf("apply second: %v", err)
+		}
+		rec := mustGet(t, s, "a.txt")
+		if rec.Deleted {
+			t.Fatalf("concurrent edit lost to a delete (order %q,%q)", order[0].Author, order[1].Author)
+		}
+		if rec.ID != edit.ID {
+			t.Fatalf("path does not hold the live edit: %s", rec.ID)
+		}
+	}
+}
+
+func TestDeleteVsEditSameContentConverges(t *testing.T) {
+	ctx := context.Background()
+	// A keeps content X live; B deletes content X. The tombstone retains X, so both
+	// manifests share an id but differ in deleted state — this must not diverge.
+	live := conflictingEdit("a.txt", nodeA, 1, 100, "content X")
+	del := live
+	del.Author, del.Version, del.AuthoredAt = nodeB, manifest.VersionVector{nodeB: 1}, time.UnixMilli(200)
+	del.Deleted, del.DeletedAt = true, time.UnixMilli(200)
+
+	s1 := newStore(t)
+	_ = applyRemote(ctx, s1, nodeA, 1, 1, live)
+	_ = applyRemote(ctx, s1, nodeB, 1, 1, del)
+
+	s2 := newStore(t)
+	_ = applyRemote(ctx, s2, nodeB, 1, 1, del)
+	_ = applyRemote(ctx, s2, nodeA, 1, 1, live)
+
+	r1, _ := s1.CurrentRoot(ctx)
+	r2, _ := s2.CurrentRoot(ctx)
+	if r1 != r2 {
+		t.Fatalf("live-vs-tombstone of same content diverged: %s vs %s", r1, r2)
+	}
+	if mustGet(t, s1, "a.txt").Deleted {
+		t.Fatal("edit must win delete-vs-edit, even for identical content")
+	}
+}
+
+func TestDeleteVsDeleteConvergesToTombstone(t *testing.T) {
+	ctx := context.Background()
+	delA := tombstone("a.txt", nodeA, 1, 100, "A's last content")
+	delB := tombstone("a.txt", nodeB, 1, 200, "B's last content")
+
+	s1 := newStore(t)
+	_ = applyRemote(ctx, s1, nodeA, 1, 1, delA)
+	_ = applyRemote(ctx, s1, nodeB, 1, 1, delB)
+
+	s2 := newStore(t)
+	_ = applyRemote(ctx, s2, nodeB, 1, 1, delB)
+	_ = applyRemote(ctx, s2, nodeA, 1, 1, delA)
+
+	r1, _ := s1.CurrentRoot(ctx)
+	r2, _ := s2.CurrentRoot(ctx)
+	if r1 != r2 {
+		t.Fatalf("concurrent deletes diverged: %s vs %s", r1, r2)
+	}
+	recs, _ := s1.ListManifests(ctx)
+	if len(recs) != 1 || !recs[0].Deleted {
+		t.Fatalf("delete-vs-delete must converge to one tombstone, got %+v", recs)
+	}
+}
+
 func TestApplyRemoteRejectsEscapingSymlink(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

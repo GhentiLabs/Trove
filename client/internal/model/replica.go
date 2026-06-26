@@ -156,13 +156,24 @@ func (s *Store) resolveRemote(ctx context.Context, batch []RemoteManifest) ([]Re
 	return out, nil
 }
 
-// resolveConcurrent reconciles a path two nodes edited without seeing each other.
-// Identical content is not a conflict: the vectors merge and the content stays.
-// Otherwise the deterministic winner keeps the path with the joined vector (so it
-// dominates the loser everywhere and re-detection is idempotent), and the loser is
-// preserved as a conflict copy carrying its own vector verbatim — never silently lost.
+// resolveConcurrent reconciles a path two nodes changed without seeing each other.
+// A concurrent delete and edit resolve to the edit (never lose data); identical content
+// in the same state merges vectors with no copy; otherwise the deterministic winner keeps
+// the path with the joined vector (so it dominates the loser everywhere and re-detection
+// is idempotent), a live loser is preserved as a conflict copy carrying its own vector
+// verbatim, and two concurrent deletes converge to one tombstone.
 func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteManifest) ([]RemoteManifest, error) {
 	joined := manifest.Join(local.Version, rm.Version)
+
+	if local.Deleted != rm.Deleted {
+		if rm.Deleted {
+			winner, err := s.localAsRemote(ctx, local, joined)
+			return []RemoteManifest{winner}, err
+		}
+		rm.Version = joined
+		return []RemoteManifest{rm}, nil
+	}
+
 	if local.ID == rm.ID {
 		rm.Version = joined
 		if ConflictWinner(local.Author, local.AuthoredAt, rm.Author, rm.AuthoredAt) {
@@ -170,6 +181,7 @@ func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteMa
 		}
 		return []RemoteManifest{rm}, nil
 	}
+
 	localRM, err := s.localAsRemote(ctx, local, local.Version)
 	if err != nil {
 		return nil, err
@@ -184,10 +196,10 @@ func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteMa
 	return keepBoth(winner, rm), nil
 }
 
-// keepBoth returns the winner at the contested path plus, for a non-deleted loser, a
-// conflict copy at a deterministic path carrying the loser's content and vector
-// verbatim. A deleted loser leaves nothing to preserve (delete-vs-edit unification is
-// M5 Phase 3), so only the winner is kept.
+// keepBoth returns the winner at the contested path plus, for a live loser, a conflict
+// copy at a deterministic path carrying the loser's content and vector verbatim. Two
+// concurrent deletes reach here as winner+deleted-loser, leaving only the winning
+// tombstone.
 func keepBoth(winner, loser RemoteManifest) []RemoteManifest {
 	out := []RemoteManifest{winner}
 	if loser.Deleted {
