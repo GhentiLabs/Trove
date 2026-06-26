@@ -72,7 +72,7 @@ func randomEdits(t *testing.T, p simPeer, idx int, paths []string, count int, rn
 		} else {
 			writeFile(t, p.root, path, []byte(fmt.Sprintf("p%d-k%d-%d", idx, k, rng.Uint64())))
 		}
-		p.peer.scan(t)
+		p.scan(t)
 	}
 }
 
@@ -105,7 +105,7 @@ func TestSimManyWritersConverge(t *testing.T) {
 	// real files on disk now) must originate nothing and keep every tree identical.
 	want := peers[0].currentRoot(t)
 	for i := range peers {
-		peers[i].peer.scan(t)
+		peers[i].scan(t)
 	}
 	waitSameRoot(t, bare(peers)...)
 	if got := peers[0].currentRoot(t); got != want {
@@ -148,8 +148,8 @@ func TestSimConcurrentEditsOverCorruptLink(t *testing.T) {
 	b := newSimPeer(t, 'b')
 	writeFile(t, a.root, "doc.txt", []byte(strings.Repeat("A", 4096)))
 	writeFile(t, b.root, "doc.txt", []byte(strings.Repeat("B", 4096)))
-	a.peer.scan(t)
-	b.peer.scan(t)
+	a.scan(t)
+	b.scan(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -177,7 +177,7 @@ func TestSimConflictStormPreservesEveryEdit(t *testing.T) {
 	contents := []string{"alpha version", "bravo version", "charlie version"}
 	for i := range peers {
 		writeFile(t, peers[i].root, "hot.txt", []byte(contents[i]))
-		peers[i].peer.scan(t)
+		peers[i].scan(t)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
