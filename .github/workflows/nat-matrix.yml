@@ -1,5 +1,7 @@
-# Cross-NAT hole-punch matrix. Builds a privileged netns/nftables topology and runs
-# the real binaries through each NAT-type cell. Runs on every PR.
+# Cross-NAT hole-punch matrix. Builds a privileged netns/nftables topology and runs the
+# real binaries through each NAT-type cell, plus a 3-peer offline-gate cell that converges
+# a folder through edit/delete/rename with one replica offline and checks sync receipts.
+# Runs on every PR.
 name: NAT matrix
 
 on:
@@ -9,7 +11,7 @@ on:
 jobs:
   nat-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - run: make nat-matrix
