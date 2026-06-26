@@ -11,8 +11,8 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 )
 
-// ReceiptKind is the direction of a convergence receipt. A node holds both kinds per
-// peer once sync is two-way, so they are stored separately.
+// ReceiptKind is the direction of a convergence receipt: a peer acking this node's lineage
+// (InboundAck) or this node acking the peer's (LocalSync). A node holds both per peer.
 type ReceiptKind int
 
 const (

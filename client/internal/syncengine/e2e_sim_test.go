@@ -3,12 +3,13 @@ package syncengine
 import (
 	"context"
 	"fmt"
-	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GhentiLabs/Trove/client/internal/netio"
 )
 
 // simPeer is a writer with its own per-node coordinator, the unit of the multi-node
@@ -120,18 +121,22 @@ func TestSimPartitionHealConverges(t *testing.T) {
 	paths := []string{"shared.txt", "notes.txt", "data/x.bin"}
 	rng := rand.New(rand.NewPCG(7, 11))
 
-	for round := 0; round < 4; round++ {
+	for range 4 {
 		ctx, cancel := context.WithCancel(context.Background())
-		// Each round only some writers edit, then a full-mesh heal converges everyone.
+		edited := false
 		for i := range peers {
 			if rng.IntN(2) == 0 {
 				randomEdits(t, peers[i], i, paths, 3, rng)
+				edited = true
 			}
+		}
+		if !edited {
+			randomEdits(t, peers[0], 0, paths, 3, rng)
 		}
 		connectMesh(t, ctx, peers)
 		waitSameRoot(t, bare(peers)...)
 		assertAllEqual(t, peers)
-		cancel() // partition again for the next round
+		cancel()
 	}
 }
 
@@ -159,6 +164,10 @@ func TestSimConcurrentEditsOverCorruptLink(t *testing.T) {
 
 	waitSameRoot(t, a.peer, b.peer)
 	assertTreesEqual(t, a.root, b.root)
+	got := fileContents(t, a.root)
+	if !got[strings.Repeat("A", 4096)] || !got[strings.Repeat("B", 4096)] {
+		t.Fatalf("keep-both lost an edit over a corrupt link: %d survivors", len(got))
+	}
 }
 
 // TestSimConflictStormPreservesEveryEdit hammers a single path from three writers offline,

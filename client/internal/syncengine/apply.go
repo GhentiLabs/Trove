@@ -26,8 +26,6 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 		})
 }
 
-// materializeBatch stages and installs the resolved winners on disk, fsyncing touched
-// directories so the renames are durable before the model commit makes them visible.
 func (fs *folderState) materializeBatch(ctx context.Context, batch []model.RemoteManifest) error {
 	// Validate the whole batch against the folder boundary before touching the
 	// filesystem: a hostile peer must not be able to delete the root, escape it, or

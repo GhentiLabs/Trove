@@ -80,33 +80,38 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 	}
 	id := m.ID()
 
-	s.applyMu.Lock()
 	changed := false
-	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		prior, ok, err := loadRow(ctx, tx, m.Path)
-		if err != nil {
-			return err
-		}
-		if ok && prior.ID == id && !prior.Deleted {
-			return refreshStat(ctx, tx, m, md)
-		}
+	err := func() error {
+		s.applyMu.Lock()
+		defer s.applyMu.Unlock()
+		return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+			prior, ok, err := loadRow(ctx, tx, m.Path)
+			if err != nil {
+				return err
+			}
+			if ok && prior.ID == id && !prior.Deleted {
+				return refreshStat(ctx, tx, m, md)
+			}
 
-		vv := manifest.VersionVector{}
-		if ok {
-			vv = prior.Version.Clone()
-		}
-		vv.Bump(s.node)
-		seq, err := allocate(ctx, tx, counterManifestSeq)
-		if err != nil {
-			return err
-		}
-		if err := writeRow(ctx, tx, m, md, id, vv, seq, s.node, time.Now(), false, time.Time{}); err != nil {
-			return err
-		}
-		changed = true
-		return writeChunks(ctx, tx, id, m.Chunks)
-	})
-	s.applyMu.Unlock()
+			vv := manifest.VersionVector{}
+			if ok {
+				vv = prior.Version.Clone()
+			}
+			vv.Bump(s.node)
+			seq, err := allocate(ctx, tx, counterManifestSeq)
+			if err != nil {
+				return err
+			}
+			if err := writeRow(ctx, tx, m, md, id, vv, seq, s.node, time.Now(), false, time.Time{}); err != nil {
+				return err
+			}
+			if err := writeChunks(ctx, tx, id, m.Chunks); err != nil {
+				return err
+			}
+			changed = true
+			return nil
+		})
+	}()
 	if err != nil {
 		return manifest.ID{}, err
 	}
@@ -126,32 +131,36 @@ func (s *Store) DeleteManifest(ctx context.Context, path string) (manifest.ID, e
 	path = manifest.NormalizePath(path)
 	var id manifest.ID
 	changed := false
-	s.applyMu.Lock()
-	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		prior, ok, err := loadRow(ctx, tx, path)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrManifestNotFound
-		}
-		if prior.Deleted {
+	err := func() error {
+		s.applyMu.Lock()
+		defer s.applyMu.Unlock()
+		return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+			prior, ok, err := loadRow(ctx, tx, path)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrManifestNotFound
+			}
+			if prior.Deleted {
+				id = prior.ID
+				return nil
+			}
 			id = prior.ID
+			vv := prior.Version.Clone()
+			vv.Bump(s.node)
+			seq, err := allocate(ctx, tx, counterManifestSeq)
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			if err := writeRow(ctx, tx, prior.Manifest, prior.Metadata, prior.ID, vv, seq, s.node, now, true, now); err != nil {
+				return err
+			}
+			changed = true
 			return nil
-		}
-		id = prior.ID
-		vv := prior.Version.Clone()
-		vv.Bump(s.node)
-		seq, err := allocate(ctx, tx, counterManifestSeq)
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		m := prior.Manifest
-		changed = true
-		return writeRow(ctx, tx, m, prior.Metadata, prior.ID, vv, seq, s.node, now, true, now)
-	})
-	s.applyMu.Unlock()
+		})
+	}()
 	if err != nil {
 		return manifest.ID{}, err
 	}

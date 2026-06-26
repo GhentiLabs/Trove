@@ -30,9 +30,9 @@ type RemoteManifest struct {
 	Metadata   Metadata
 }
 
-// FolderEpoch returns this folder's stable epoch, allocating and persisting a
-// random nonzero value on first call. The epoch identifies the owner's sequence
-// lineage so a replica can detect a rebuild and force a full resync.
+// FolderEpoch returns this folder's stable epoch, allocating and persisting a random
+// nonzero value on first call. The epoch identifies this node's sequence lineage so a peer
+// can detect a rebuild and force a full resync.
 func (s *Store) FolderEpoch(ctx context.Context) (uint64, error) {
 	var epoch uint64
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
@@ -70,8 +70,8 @@ func newEpoch() uint64 {
 	return 1
 }
 
-// HighWater is the maximum manifest sequence currently stored, or zero if the
-// folder is empty. It is the owner's announce high-water.
+// HighWater is the maximum manifest sequence currently stored, or zero if the folder is
+// empty. It is this node's announce high-water.
 func (s *Store) HighWater(ctx context.Context) (int64, error) {
 	var hw sql.NullInt64
 	if err := s.db.QueryRow(ctx, `SELECT MAX(seq) FROM manifests`).Scan(&hw); err != nil {
@@ -107,30 +107,36 @@ func (s *Store) CurrentRoot(ctx context.Context) (snapshot.Root, error) {
 // materialize must durably place the winners before it returns, since the model
 // commit follows it and is the point of no return.
 func (s *Store) ApplyRemote(ctx context.Context, folderID, peerID string, epoch uint64, highWater int64, batch []RemoteManifest, materialize func(apply []RemoteManifest) error) error {
-	s.applyMu.Lock()
-	defer s.applyMu.Unlock()
-
-	apply, err := s.resolveRemote(ctx, batch)
+	notify := false
+	err := func() error {
+		s.applyMu.Lock()
+		defer s.applyMu.Unlock()
+		apply, err := s.resolveRemote(ctx, batch)
+		if err != nil {
+			return err
+		}
+		if len(apply) > 0 {
+			if err := materialize(apply); err != nil {
+				return err
+			}
+		}
+		if err := s.commitRemote(ctx, folderID, peerID, epoch, highWater, apply); err != nil {
+			return err
+		}
+		notify = len(apply) > 0
+		return nil
+	}()
 	if err != nil {
 		return err
 	}
-	if len(apply) > 0 {
-		if err := materialize(apply); err != nil {
-			return err
-		}
-	}
-	if err := s.commitRemote(ctx, folderID, peerID, epoch, highWater, apply); err != nil {
-		return err
-	}
-	if len(apply) > 0 {
+	if notify {
 		s.notifyChange()
 	}
 	return nil
 }
 
-// resolveRemote compares each incoming manifest to the local version and returns the
-// manifests to actually apply, with their final version vectors. It performs no
-// writes; the caller holds applyMu so the local state cannot change underneath it.
+// resolveRemote returns the manifests to apply after comparing each to the local version.
+// It only reads; the caller holds applyMu so local state is stable across resolve and commit.
 func (s *Store) resolveRemote(ctx context.Context, batch []RemoteManifest) ([]RemoteManifest, error) {
 	out := make([]RemoteManifest, 0, len(batch))
 	for _, rm := range batch {
@@ -170,12 +176,10 @@ func (s *Store) resolveRemote(ctx context.Context, batch []RemoteManifest) ([]Re
 	return out, nil
 }
 
-// resolveConcurrent reconciles a path two nodes changed without seeing each other.
-// A concurrent delete and edit resolve to the edit (never lose data); identical content
-// in the same state merges vectors with no copy; otherwise the deterministic winner keeps
-// the path with the joined vector (so it dominates the loser everywhere and re-detection
-// is idempotent), a live loser is preserved as a conflict copy carrying its own vector
-// verbatim, and two concurrent deletes converge to one tombstone.
+// resolveConcurrent reconciles concurrent versions of a path: an edit beats a delete,
+// identical content merges, otherwise the deterministic winner takes the path with the
+// joined vector (dominating the loser so re-detection is idempotent) and a live loser is
+// preserved as a conflict copy carrying its own vector verbatim.
 func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteManifest) ([]RemoteManifest, error) {
 	joined := manifest.Join(local.Version, rm.Version)
 
@@ -210,10 +214,8 @@ func (s *Store) resolveConcurrent(ctx context.Context, local Record, rm RemoteMa
 	return keepBoth(winner, rm), nil
 }
 
-// keepBoth returns the winner at the contested path plus, for a live loser, a conflict
-// copy at a deterministic path carrying the loser's content and vector verbatim. Two
-// concurrent deletes reach here as winner+deleted-loser, leaving only the winning
-// tombstone.
+// keepBoth returns the winner plus, for a live loser, its conflict copy. A deleted loser
+// (two concurrent deletes) leaves only the winning tombstone.
 func keepBoth(winner, loser RemoteManifest) []RemoteManifest {
 	out := []RemoteManifest{winner}
 	if loser.Deleted {
@@ -226,8 +228,6 @@ func keepBoth(winner, loser RemoteManifest) []RemoteManifest {
 	return out
 }
 
-// localAsRemote rebuilds the local record as a RemoteManifest carrying vv, so a
-// winning local version is rewritten with the joined vector and re-announced.
 func (s *Store) localAsRemote(ctx context.Context, local Record, vv manifest.VersionVector) (RemoteManifest, error) {
 	chunks, err := loadChunks(ctx, s.db, local.ID)
 	if err != nil {

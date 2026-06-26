@@ -20,6 +20,10 @@ func ConflictWinner(aAuthor string, aAuthoredAt time.Time, bAuthor string, bAuth
 
 const conflictTimeLayout = "20060102T150405.000Z"
 
+// maxFilenameBytes bounds a single path component to the common POSIX NAME_MAX, so a long
+// original name cannot make a conflict copy unwritable (ENAMETOOLONG) and stall the folder.
+const maxFilenameBytes = 255
+
 // ConflictPath is the keep-both copy path for the losing version of a path, derived
 // only from the loser's agreed fields (its edit time and author), so every node names
 // the copy identically. The name carries the loser's own identity, so the copy never
@@ -32,6 +36,9 @@ func ConflictPath(p, loserAuthor string, loserAuthoredAt time.Time) string {
 	if stem == "" { // a dotfile like ".bashrc" is all "extension"; keep the name visible
 		stem, ext = base, ""
 	}
-	ts := loserAuthoredAt.UTC().Format(conflictTimeLayout)
-	return dir + stem + ".conflict-" + ts + "-" + loserAuthor + ext
+	suffix := ".conflict-" + loserAuthoredAt.UTC().Format(conflictTimeLayout) + "-" + loserAuthor
+	if keep := maxFilenameBytes - len(suffix) - len(ext); keep >= 0 && len(stem) > keep {
+		stem = stem[:keep]
+	}
+	return dir + stem + suffix + ext
 }

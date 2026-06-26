@@ -40,6 +40,9 @@ var (
 	ErrCorruptModel = errors.New("model: stored manifest fails identity verification")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
 	ErrSchemaTooNew = errors.New("model: database schema newer than this binary")
+	// ErrSchemaOutdated is returned when the database predates this binary's schema. There
+	// are no migrations pre-release; the folder state must be deleted and resynced.
+	ErrSchemaOutdated = errors.New("model: database schema older than this binary")
 	// ErrNodeMismatch is returned when the database belongs to a different node.
 	ErrNodeMismatch = errors.New("model: database belongs to a different node")
 	// ErrInvalidManifest is returned when a manifest is not well-formed for its kind.
@@ -132,13 +135,10 @@ type Store struct {
 	db   *storage.DB
 	node string
 
-	// applyMu serializes a remote apply against local origination so a concurrent
-	// scan cannot change a path's version between the resolve and the commit.
+	// applyMu serializes a remote apply against local origination, so a concurrent scan
+	// cannot change a path's version between the resolve and the commit.
 	applyMu sync.Mutex
 
-	// onChange, if set, is called after any committed change to the folder's state, so
-	// the node can push a fresh announcement instead of waiting for the next tick. It is
-	// guarded because every session sharing the folder sets and reads it concurrently.
 	hookMu   sync.Mutex
 	onChange func()
 }
@@ -213,6 +213,9 @@ func (s *Store) validateVersion(got string) error {
 	}
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, v, SchemaVersion)
+	}
+	if v < SchemaVersion {
+		return fmt.Errorf("%w: found %d, this binary writes %d; delete the folder state and resync", ErrSchemaOutdated, v, SchemaVersion)
 	}
 	return nil
 }

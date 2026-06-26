@@ -1,6 +1,8 @@
 package model
 
 import (
+	"path"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +68,20 @@ func TestConflictPath(t *testing.T) {
 		if got := ConflictPath(tc.in, author, at); got != tc.want {
 			t.Fatalf("ConflictPath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestConflictPathBoundsFilenameLength(t *testing.T) {
+	author := strings.Repeat("a", 52)
+	long := "dir/" + strings.Repeat("x", 300) + ".csv"
+	got := ConflictPath(long, author, time.UnixMilli(1))
+	_, base := path.Split(got)
+	if len(base) > maxFilenameBytes {
+		t.Fatalf("conflict filename %d bytes exceeds NAME_MAX %d", len(base), maxFilenameBytes)
+	}
+	// Determinism: the same inputs always produce the same bounded path.
+	if again := ConflictPath(long, author, time.UnixMilli(1)); again != got {
+		t.Fatalf("bounded conflict path not deterministic: %q vs %q", got, again)
 	}
 }
 

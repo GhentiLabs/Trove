@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// waitSameRoot blocks until every peer reports the same current root, the convergence
-// signal for a multi-writer folder.
+// waitSameRoot blocks until every peer reports the same current root.
 func waitSameRoot(t *testing.T, peers ...peer) {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
@@ -56,8 +55,7 @@ func TestBidirectionalNonOverlappingEdits(t *testing.T) {
 	assertLeafSetsEqual(t, a, b)
 }
 
-// fileContents returns the set of regular-file contents under root, ignoring the stage
-// dir and directories, so a test can assert which versions survived a conflict.
+// fileContents returns the set of regular-file contents under root, ignoring directories.
 func fileContents(t *testing.T, root string) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
@@ -128,6 +126,36 @@ func TestConcurrentSamePathReaderConverges(t *testing.T) {
 
 	waitSameRoot(t, a, b, c)
 	assertTreesEqual(t, a.root, c.root)
+}
+
+// TestPushOnChangePropagatesBeforeTicker proves a mid-session edit reaches the peer via
+// the change hook, not the 5s anti-entropy ticker: it must arrive well within one second.
+func TestPushOnChangePropagatesBeforeTicker(t *testing.T) {
+	a := newPeer(t, ownerID)
+	b := newPeer(t, replicaID)
+	writeFile(t, a.root, "seed.txt", []byte("initial"))
+	a.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sa, sb := memSessionPair(t, ctx, a, b)
+	engineOn(t, ctx, sa, a, RoleWriter, nil)
+	engineOn(t, ctx, sb, b, RoleWriter, nil)
+	waitSameRoot(t, a, b)
+
+	// Edit after both engines are running and settled; only push (not the ticker) can
+	// deliver this within the deadline.
+	writeFile(t, a.root, "live.txt", []byte("appeared mid-session"))
+	a.scan(t)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(b.root, "live.txt")); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("mid-session edit did not propagate within 1s; push-on-change may have regressed")
 }
 
 // TestConcurrentDeleteVsEditKeepsEdit proves that when one writer deletes a path while

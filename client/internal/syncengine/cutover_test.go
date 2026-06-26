@@ -9,7 +9,7 @@ import (
 )
 
 // materializeSnapshot reconstructs every regular file in a retained snapshot from the
-// chunk store, the proof that historical content survives a model change.
+// chunk store.
 func materializeSnapshot(t *testing.T, p peer, root snapshot.Root) map[string][]byte {
 	t.Helper()
 	ctx := context.Background()

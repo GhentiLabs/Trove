@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,13 @@ func remoteFile(t *testing.T, path string, ver int64, chunks []manifest.ChunkRef
 // that do not exercise the filesystem.
 func applyRemote(ctx context.Context, s *Store, peer string, epoch uint64, hw int64, batch ...RemoteManifest) error {
 	return s.ApplyRemote(ctx, "fld", peer, epoch, hw, batch, func([]RemoteManifest) error { return nil })
+}
+
+func mustApplyRemote(t *testing.T, s *Store, peer string, rm RemoteManifest) {
+	t.Helper()
+	if err := applyRemote(context.Background(), s, peer, 1, 1, rm); err != nil {
+		t.Fatalf("apply from %s: %v", peer, err)
+	}
 }
 
 func TestApplyRemoteStoresVersionVerbatim(t *testing.T) {
@@ -263,6 +271,10 @@ func TestApplyRemoteIgnoresDominated(t *testing.T) {
 	if rec := mustGet(t, s, "a.txt"); rec.ID != local.ID {
 		t.Fatalf("dominated remote overwrote local: id=%s want %s", rec.ID, local.ID)
 	}
+	// A no-op batch must still advance the cursor, or the peer re-sends it forever.
+	if _, hw, ok, _ := s.LoadCursor(ctx, "fld", nodeB); !ok || hw != 1 {
+		t.Fatalf("cursor not advanced past a fully-dominated batch: ok=%v hw=%d", ok, hw)
+	}
 }
 
 func TestApplyRemoteConcurrentIdenticalContentJoins(t *testing.T) {
@@ -377,7 +389,8 @@ func TestKeepBothConvergesDeterministically(t *testing.T) {
 		t.Fatalf("conflict copy vector not verbatim: %v", cc.Version)
 	}
 
-	// Idempotent: re-running detection over the resolved state produces nothing new.
+	// Idempotent: re-running detection over the resolved state changes neither the
+	// manifest set nor the root.
 	before, _ := s1.ListManifests(ctx)
 	if err := applyRemote(ctx, s1, nodeA, 1, 1, a); err != nil {
 		t.Fatalf("re-apply a: %v", err)
@@ -388,6 +401,69 @@ func TestKeepBothConvergesDeterministically(t *testing.T) {
 	after, _ := s1.ListManifests(ctx)
 	if len(after) != len(before) {
 		t.Fatalf("resolution not idempotent: %d manifests before, %d after", len(before), len(after))
+	}
+	if rootAfter, _ := s1.CurrentRoot(ctx); rootAfter != r1 {
+		t.Fatalf("resolution not idempotent: root changed to %s", rootAfter)
+	}
+}
+
+func TestRescanOfResolvedTreeOriginatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t) // node = nodeA
+	mustPut(t, s, regular("doc.txt", "content from A"), Metadata{Mtime: time.Unix(1, 0)})
+	bWins := conflictingEdit("doc.txt", nodeB, 1, time.Now().Add(time.Hour).UnixMilli(), "content from B")
+	mustApplyRemote(t, s, nodeB, bWins) // winner B at doc.txt, conflict copy of A
+
+	rootBefore, _ := s.CurrentRoot(ctx)
+	before, _ := s.ListManifests(ctx)
+	if len(before) != 2 {
+		t.Fatalf("expected winner + conflict copy, got %d manifests", len(before))
+	}
+
+	// A rescan re-puts every stored manifest with its own content; an unchanged identity
+	// must refresh stat only — no new version, no conflict-of-conflict.
+	for _, rec := range before {
+		mustPut(t, s, rec.Manifest, rec.Metadata)
+	}
+
+	rootAfter, _ := s.CurrentRoot(ctx)
+	after, _ := s.ListManifests(ctx)
+	if rootAfter != rootBefore {
+		t.Fatalf("rescan changed the root: %s -> %s", rootBefore, rootAfter)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("rescan re-originated manifests: %d -> %d", len(before), len(after))
+	}
+}
+
+func TestThreeWayConflictConvergesAcrossAllOrders(t *testing.T) {
+	ctx := context.Background()
+	nodeC := strings.Repeat("c", 52)
+	edits := []RemoteManifest{
+		conflictingEdit("a.txt", nodeA, 1, 100, "from A"),
+		conflictingEdit("a.txt", nodeB, 1, 200, "from B"),
+		conflictingEdit("a.txt", nodeC, 1, 300, "from C"),
+	}
+	orders := [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+
+	var first snapshot.Root
+	for oi, order := range orders {
+		s := newStore(t)
+		for _, i := range order {
+			if err := applyRemote(ctx, s, edits[i].Author, 1, 1, edits[i]); err != nil {
+				t.Fatalf("order %v apply %d: %v", order, i, err)
+			}
+		}
+		root, _ := s.CurrentRoot(ctx)
+		if oi == 0 {
+			first = root
+			recs, _ := s.ListManifests(ctx)
+			if len(recs) != 3 { // the winner plus two conflict copies
+				t.Fatalf("3-way conflict left %d manifests, want 3", len(recs))
+			}
+		} else if root != first {
+			t.Fatalf("order %v diverged: %s != %s", order, root, first)
+		}
 	}
 }
 
@@ -432,12 +508,12 @@ func TestDeleteVsEditSameContentConverges(t *testing.T) {
 	del.Deleted, del.DeletedAt = true, time.UnixMilli(200)
 
 	s1 := newStore(t)
-	_ = applyRemote(ctx, s1, nodeA, 1, 1, live)
-	_ = applyRemote(ctx, s1, nodeB, 1, 1, del)
+	mustApplyRemote(t, s1, nodeA, live)
+	mustApplyRemote(t, s1, nodeB, del)
 
 	s2 := newStore(t)
-	_ = applyRemote(ctx, s2, nodeB, 1, 1, del)
-	_ = applyRemote(ctx, s2, nodeA, 1, 1, live)
+	mustApplyRemote(t, s2, nodeB, del)
+	mustApplyRemote(t, s2, nodeA, live)
 
 	r1, _ := s1.CurrentRoot(ctx)
 	r2, _ := s2.CurrentRoot(ctx)
@@ -455,12 +531,12 @@ func TestDeleteVsDeleteConvergesToTombstone(t *testing.T) {
 	delB := tombstone("a.txt", nodeB, 1, 200, "B's last content")
 
 	s1 := newStore(t)
-	_ = applyRemote(ctx, s1, nodeA, 1, 1, delA)
-	_ = applyRemote(ctx, s1, nodeB, 1, 1, delB)
+	mustApplyRemote(t, s1, nodeA, delA)
+	mustApplyRemote(t, s1, nodeB, delB)
 
 	s2 := newStore(t)
-	_ = applyRemote(ctx, s2, nodeB, 1, 1, delB)
-	_ = applyRemote(ctx, s2, nodeA, 1, 1, delA)
+	mustApplyRemote(t, s2, nodeB, delB)
+	mustApplyRemote(t, s2, nodeA, delA)
 
 	r1, _ := s1.CurrentRoot(ctx)
 	r2, _ := s2.CurrentRoot(ctx)
@@ -470,6 +546,9 @@ func TestDeleteVsDeleteConvergesToTombstone(t *testing.T) {
 	recs, _ := s1.ListManifests(ctx)
 	if len(recs) != 1 || !recs[0].Deleted {
 		t.Fatalf("delete-vs-delete must converge to one tombstone, got %+v", recs)
+	}
+	if want := manifest.Join(delA.Version, delB.Version); !maps.Equal(recs[0].Version, want) {
+		t.Fatalf("surviving tombstone vector = %v, want join %v", recs[0].Version, want)
 	}
 }
 

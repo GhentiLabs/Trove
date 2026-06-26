@@ -336,10 +336,10 @@ func (x *NetworkConfig) GetFolders() []*Folder {
 	return nil
 }
 
-// FolderSummary is the owner's per-folder anti-entropy announcement on the control
-// stream, sent once a session is Active and whenever the owner's folder root
-// advances. A replica compares snapshot_root to its own and requests a delta if
-// they differ; index_epoch_id and high_water_sequence drive the resync cursor.
+// FolderSummary is a node's per-folder anti-entropy announcement on the control stream,
+// sent once a session is Active and whenever its folder root advances. A peer compares
+// snapshot_root to its own and requests a delta if they differ; index_epoch_id and
+// high_water_sequence drive the resync cursor.
 type FolderSummary struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`

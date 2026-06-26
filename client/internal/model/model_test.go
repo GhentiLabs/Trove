@@ -65,3 +65,17 @@ func TestOpenRejectsFutureSchema(t *testing.T) {
 		t.Fatalf("got %v, want ErrSchemaTooNew", err)
 	}
 }
+
+func TestOpenRejectsOutdatedSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db := openDB(t, path)
+	if _, err := Open(Options{DB: db, NodeID: nodeA}); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if _, err := db.Exec(context.Background(), `UPDATE meta SET value = '1' WHERE key = 'schema_version'`); err != nil {
+		t.Fatalf("inject version: %v", err)
+	}
+	if _, err := Open(Options{DB: db, NodeID: nodeA}); !errors.Is(err, ErrSchemaOutdated) {
+		t.Fatalf("got %v, want ErrSchemaOutdated", err)
+	}
+}

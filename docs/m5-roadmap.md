@@ -116,6 +116,24 @@ the human ≥2-machine confirmation, mirroring M4's `offline-gate`.
    stays at the real path and the delete is dropped, which preserves data without an extra
    copy and is the simpler deterministic rule.
 
+## Known follow-ups (from the M5 review sweep; acceptable at milestone scale N≤5)
+
+- **Gossip amplification at scale:** an applied edit re-announces (relay), so in a large
+  mesh round-2 announcements are O(N²); combined with `ManifestsSince`'s N+1 query (a full
+  re-serve to a never-seen peer is 3F+1 reads), this binds around N≥15 / F≥50K. Fix shape:
+  collapse `ManifestsSince` into one JOIN query and short-circuit a serve when the cursor is
+  already at the high-water.
+- **Push fan-out under a bulk-import burst** spawns one announce goroutine per commit per
+  session. A coalescing debounce is the fix, but a naive `time.AfterFunc` debounce broke
+  convergence in stress testing (it interacts badly with the settling tail), so it must be a
+  carefully designed single-drain coalescer, not added casually. The 5s ticker bounds the
+  worst case meanwhile.
+- **`Author`/`AuthoredAt` are peer-supplied, not TLS-bound** (required for gossip relay). In
+  the trusted model a compromised member can pick a far-future timestamp or extreme node-id
+  to bias which version wins, or mis-attribute a conflict copy — but never lose data
+  (keep-both) and never move the reaping gate (receipts are keyed by TLS identity). Worth a
+  line in the M6 trust runbook.
+
 ## Deferred (NOT M5)
 
 Trust/encryption + untrusted (`holder`) peers and convergent vs random keys → M6. 1×
