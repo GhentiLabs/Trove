@@ -18,13 +18,15 @@ import (
 // content, the owner's identity and version vector, the owner sequence that drives
 // the replica's cursor, and the tombstone state.
 type RemoteManifest struct {
-	Manifest  manifest.Manifest
-	ID        manifest.ID
-	Version   manifest.VersionVector
-	OwnerSeq  int64
-	Deleted   bool
-	DeletedAt time.Time
-	Metadata  Metadata
+	Manifest   manifest.Manifest
+	ID         manifest.ID
+	Version    manifest.VersionVector
+	OwnerSeq   int64
+	Author     string
+	AuthoredAt time.Time
+	Deleted    bool
+	DeletedAt  time.Time
+	Metadata   Metadata
 }
 
 // FolderEpoch returns this folder's stable epoch, allocating and persisting a
@@ -111,7 +113,7 @@ func (s *Store) ApplyRemoteAndAdvance(ctx context.Context, batch []RemoteManifes
 			if m.ID() != rm.ID {
 				return fmt.Errorf("%w: path %q", ErrCorruptModel, m.Path)
 			}
-			if err := writeRow(ctx, tx, m, rm.Metadata, rm.ID, rm.Version, rm.OwnerSeq, rm.Deleted, rm.DeletedAt); err != nil {
+			if err := writeRow(ctx, tx, m, rm.Metadata, rm.ID, rm.Version, rm.OwnerSeq, rm.Author, rm.AuthoredAt, rm.Deleted, rm.DeletedAt); err != nil {
 				return err
 			}
 			if err := writeChunks(ctx, tx, rm.ID, m.Chunks); err != nil {

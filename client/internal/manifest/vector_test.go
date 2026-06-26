@@ -106,3 +106,97 @@ func TestVersionVectorBumpOnlyTouchesNode(t *testing.T) {
 		t.Fatalf("bump of absent node = %d, want 1", vv["c"])
 	}
 }
+
+func TestVersionVectorCompare(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b VersionVector
+		want Ordering
+	}{
+		{"both empty", VersionVector{}, VersionVector{}, Equal},
+		{"equal", VersionVector{"a": 2, "b": 1}, VersionVector{"a": 2, "b": 1}, Equal},
+		{"a dominates by counter", VersionVector{"a": 3}, VersionVector{"a": 2}, Greater},
+		{"a dominates by extra node", VersionVector{"a": 2, "b": 1}, VersionVector{"a": 2}, Greater},
+		{"a dominated", VersionVector{"a": 2}, VersionVector{"a": 2, "b": 1}, Less},
+		{"empty dominated by nonempty", VersionVector{}, VersionVector{"a": 1}, Less},
+		{"concurrent disjoint", VersionVector{"a": 1}, VersionVector{"b": 1}, Concurrent},
+		{"concurrent mixed", VersionVector{"a": 2, "b": 1}, VersionVector{"a": 1, "b": 2}, Concurrent},
+		{"zero entry is identity", VersionVector{"a": 1, "z": 0}, VersionVector{"a": 1}, Equal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Compare(tc.b); got != tc.want {
+				t.Fatalf("Compare = %v, want %v", got, tc.want)
+			}
+			// Compare is antisymmetric: swapping inverts Greater/Less, keeps Equal/Concurrent.
+			inv := map[Ordering]Ordering{Equal: Equal, Concurrent: Concurrent, Greater: Less, Less: Greater}
+			if got := tc.b.Compare(tc.a); got != inv[tc.want] {
+				t.Fatalf("Compare(swapped) = %v, want %v", got, inv[tc.want])
+			}
+		})
+	}
+}
+
+func TestVersionVectorDominatesIsStrictDescent(t *testing.T) {
+	a := VersionVector{"a": 2}
+	b := VersionVector{"a": 1}
+	if !a.Dominates(b) {
+		t.Fatal("a must dominate b")
+	}
+	if a.Dominates(a) {
+		t.Fatal("Dominates must be strict, not reflexive")
+	}
+	if b.Dominates(a) {
+		t.Fatal("b must not dominate a")
+	}
+}
+
+func TestVersionVectorIsConcurrentIsSymmetric(t *testing.T) {
+	a := VersionVector{"a": 2}
+	ordered := VersionVector{"a": 1}
+	disjoint := VersionVector{"b": 1}
+	if !a.IsConcurrent(disjoint) || !disjoint.IsConcurrent(a) {
+		t.Fatal("disjoint vectors must be concurrent, symmetrically")
+	}
+	if a.IsConcurrent(ordered) {
+		t.Fatal("an ordered pair must not be concurrent")
+	}
+}
+
+func TestJoinIsLeastUpperBound(t *testing.T) {
+	a := VersionVector{"a": 2, "b": 1}
+	b := VersionVector{"a": 1, "b": 3, "c": 1}
+	j := Join(a, b)
+	want := VersionVector{"a": 2, "b": 3, "c": 1}
+	if !bytes.Equal(j.Canonical(), want.Canonical()) {
+		t.Fatalf("Join = %v, want %v", j, want)
+	}
+	if !j.Dominates(a) || !j.Dominates(b) {
+		t.Fatal("join must dominate both inputs")
+	}
+}
+
+func TestJoinCommutativeAssociativeIdempotent(t *testing.T) {
+	a := VersionVector{"a": 2, "b": 1}
+	b := VersionVector{"b": 3, "c": 1}
+	c := VersionVector{"a": 1, "c": 4}
+	eq := func(x, y VersionVector) bool { return bytes.Equal(x.Canonical(), y.Canonical()) }
+	if !eq(Join(a, b), Join(b, a)) {
+		t.Fatal("join not commutative")
+	}
+	if !eq(Join(Join(a, b), c), Join(a, Join(b, c))) {
+		t.Fatal("join not associative")
+	}
+	if !eq(Join(a, a), a) {
+		t.Fatal("join not idempotent")
+	}
+}
+
+func TestJoinDoesNotMutateInputs(t *testing.T) {
+	a := VersionVector{"a": 2}
+	b := VersionVector{"a": 5}
+	_ = Join(a, b)
+	if a["a"] != 2 || b["a"] != 5 {
+		t.Fatalf("join mutated an input: a=%d b=%d", a["a"], b["a"])
+	}
+}

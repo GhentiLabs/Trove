@@ -100,6 +100,10 @@ message RemoteManifest {
   // more_chunks is set when this entry carries only a prefix of the file's chunk list and
   // the remainder continues in the following delta pages (same path and manifest_id).
   bool more_chunks = 11;
+  // author and authored_ms name the node and wall-clock of the edit that minted this version.
+  // They travel verbatim and break concurrent-version ties; they are not hashed into manifest_id.
+  string author = 12;
+  int64 authored_ms = 13;
 }
 
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in

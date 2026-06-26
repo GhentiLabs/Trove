@@ -17,7 +17,7 @@ import (
 
 // SchemaVersion is the current sync-state database layout. Open refuses a database
 // written by a newer binary.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // TombstoneLifetime is how long a deletion is retained before SweepTombstones may
 // remove it. It must exceed the longest plausible offline window so a peer cannot
@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS manifests (
 	inode       INTEGER NOT NULL DEFAULT 0,
 	version_vec BLOB    NOT NULL,
 	seq         INTEGER NOT NULL,
+	author      TEXT    NOT NULL DEFAULT '',
+	authored_ms INTEGER NOT NULL DEFAULT 0,
 	deleted     INTEGER NOT NULL DEFAULT 0,
 	deleted_ms  INTEGER,
 	expires_ms  INTEGER

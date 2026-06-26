@@ -24,15 +24,19 @@ type Metadata struct {
 }
 
 // Record is a stored manifest: its content, its identity, the metadata, and the
-// versioning fields the model maintains.
+// versioning fields the model maintains. Author and AuthoredAt name the node and
+// wall-clock of the edit that minted this version; they propagate with the
+// manifest and break concurrent ties, and never enter the content identity.
 type Record struct {
-	Manifest  manifest.Manifest
-	ID        manifest.ID
-	Metadata  Metadata
-	Version   manifest.VersionVector
-	Seq       int64
-	Deleted   bool
-	DeletedAt time.Time
+	Manifest   manifest.Manifest
+	ID         manifest.ID
+	Metadata   Metadata
+	Version    manifest.VersionVector
+	Seq        int64
+	Author     string
+	AuthoredAt time.Time
+	Deleted    bool
+	DeletedAt  time.Time
 }
 
 // StatSig is a path's stored change-detection signature, loaded without reading or
@@ -94,7 +98,7 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 		if err != nil {
 			return err
 		}
-		if err := writeRow(ctx, tx, m, md, id, vv, seq, false, time.Time{}); err != nil {
+		if err := writeRow(ctx, tx, m, md, id, vv, seq, s.node, time.Now(), false, time.Time{}); err != nil {
 			return err
 		}
 		return writeChunks(ctx, tx, id, m.Chunks)
@@ -133,8 +137,9 @@ func (s *Store) DeleteManifest(ctx context.Context, path string) (manifest.ID, e
 		if err != nil {
 			return err
 		}
+		now := time.Now()
 		m := prior.Manifest
-		return writeRow(ctx, tx, m, prior.Metadata, prior.ID, vv, seq, true, time.Now())
+		return writeRow(ctx, tx, m, prior.Metadata, prior.ID, vv, seq, s.node, now, true, now)
 	})
 	if err != nil {
 		return manifest.ID{}, err
@@ -309,22 +314,23 @@ func ValidateManifest(m manifest.Manifest) error {
 
 func loadRow(ctx context.Context, q querier, path string) (Record, bool, error) {
 	var (
-		rec      Record
-		idRaw    []byte
-		vvRaw    []byte
-		kind     int
-		mode     int64
-		target   string
-		mtimeNs  int64
-		size     int64
-		inode    int64
-		deleted  bool
-		deletedM sql.NullInt64
+		rec       Record
+		idRaw     []byte
+		vvRaw     []byte
+		kind      int
+		mode      int64
+		target    string
+		mtimeNs   int64
+		size      int64
+		inode     int64
+		authoredM int64
+		deleted   bool
+		deletedM  sql.NullInt64
 	)
 	err := q.QueryRow(ctx,
-		`SELECT manifest_id, kind, raw_mode, symlink_tgt, mtime_ns, size, inode, version_vec, seq, deleted, deleted_ms
+		`SELECT manifest_id, kind, raw_mode, symlink_tgt, mtime_ns, size, inode, version_vec, seq, author, authored_ms, deleted, deleted_ms
 		 FROM manifests WHERE path = ?`, path).
-		Scan(&idRaw, &kind, &mode, &target, &mtimeNs, &size, &inode, &vvRaw, &rec.Seq, &deleted, &deletedM)
+		Scan(&idRaw, &kind, &mode, &target, &mtimeNs, &size, &inode, &vvRaw, &rec.Seq, &rec.Author, &authoredM, &deleted, &deletedM)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Record{}, false, nil
@@ -341,6 +347,7 @@ func loadRow(ctx context.Context, q querier, path string) (Record, bool, error) 
 	}
 	rec.ID = id
 	rec.Version = vv
+	rec.AuthoredAt = time.UnixMilli(authoredM)
 	rec.Deleted = deleted
 	if deletedM.Valid {
 		rec.DeletedAt = time.UnixMilli(deletedM.Int64)
@@ -378,7 +385,7 @@ func loadChunks(ctx context.Context, q querier, id manifest.ID) ([]manifest.Chun
 	return refs, rows.Err()
 }
 
-func writeRow(ctx context.Context, tx *storage.Tx, m manifest.Manifest, md Metadata, id manifest.ID, vv manifest.VersionVector, seq int64, deleted bool, deletedAt time.Time) error {
+func writeRow(ctx context.Context, tx *storage.Tx, m manifest.Manifest, md Metadata, id manifest.ID, vv manifest.VersionVector, seq int64, author string, authoredAt time.Time, deleted bool, deletedAt time.Time) error {
 	var deletedMs, expiresMs sql.NullInt64
 	if deleted {
 		deletedMs = sql.NullInt64{Int64: deletedAt.UnixMilli(), Valid: true}
@@ -386,15 +393,17 @@ func writeRow(ctx context.Context, tx *storage.Tx, m manifest.Manifest, md Metad
 	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO manifests
-			(path, manifest_id, kind, raw_mode, symlink_tgt, mtime_ns, size, inode, version_vec, seq, deleted, deleted_ms, expires_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(path, manifest_id, kind, raw_mode, symlink_tgt, mtime_ns, size, inode, version_vec, seq, author, authored_ms, deleted, deleted_ms, expires_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path) DO UPDATE SET
 			manifest_id=excluded.manifest_id, kind=excluded.kind, raw_mode=excluded.raw_mode,
 			symlink_tgt=excluded.symlink_tgt, mtime_ns=excluded.mtime_ns, size=excluded.size,
 			inode=excluded.inode, version_vec=excluded.version_vec, seq=excluded.seq,
+			author=excluded.author, authored_ms=excluded.authored_ms,
 			deleted=excluded.deleted, deleted_ms=excluded.deleted_ms, expires_ms=excluded.expires_ms`,
 		m.Path, id.Bytes(), int(m.Kind), int64(m.Mode), m.SymlinkTarget,
-		md.Mtime.UnixNano(), md.Size, int64(md.Inode), vv.Canonical(), seq, deleted, deletedMs, expiresMs)
+		md.Mtime.UnixNano(), md.Size, int64(md.Inode), vv.Canonical(), seq,
+		author, authoredAt.UnixMilli(), deleted, deletedMs, expiresMs)
 	if err != nil {
 		return fmt.Errorf("model: write manifest: %w", err)
 	}

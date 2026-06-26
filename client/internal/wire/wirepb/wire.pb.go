@@ -552,7 +552,11 @@ type RemoteManifest struct {
 	DeletedMs     int64                  `protobuf:"varint,10,opt,name=deleted_ms,json=deletedMs,proto3" json:"deleted_ms,omitempty"`
 	// more_chunks is set when this entry carries only a prefix of the file's chunk list and
 	// the remainder continues in the following delta pages (same path and manifest_id).
-	MoreChunks    bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
+	MoreChunks bool `protobuf:"varint,11,opt,name=more_chunks,json=moreChunks,proto3" json:"more_chunks,omitempty"`
+	// author and authored_ms name the node and wall-clock of the edit that minted this version.
+	// They travel verbatim and break concurrent-version ties; they are not hashed into manifest_id.
+	Author        string `protobuf:"bytes,12,opt,name=author,proto3" json:"author,omitempty"`
+	AuthoredMs    int64  `protobuf:"varint,13,opt,name=authored_ms,json=authoredMs,proto3" json:"authored_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -662,6 +666,20 @@ func (x *RemoteManifest) GetMoreChunks() bool {
 		return x.MoreChunks
 	}
 	return false
+}
+
+func (x *RemoteManifest) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *RemoteManifest) GetAuthoredMs() int64 {
+	if x != nil {
+		return x.AuthoredMs
+	}
+	return 0
 }
 
 // ManifestDelta is the owner's reply to a ManifestRequest: the changed manifests in
@@ -1093,7 +1111,7 @@ const file_wire_proto_rawDesc = "" +
 	"\x12since_chunk_offset\x18\x04 \x01(\x03R\x10sinceChunkOffset\"=\n" +
 	"\bChunkRef\x12\x19\n" +
 	"\bchunk_id\x18\x01 \x01(\fR\achunkId\x12\x16\n" +
-	"\x06length\x18\x02 \x01(\x03R\x06length\"\xed\x02\n" +
+	"\x06length\x18\x02 \x01(\x03R\x06length\"\xa6\x03\n" +
 	"\x0eRemoteManifest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\rR\x04kind\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
@@ -1109,7 +1127,10 @@ const file_wire_proto_rawDesc = "" +
 	"deleted_ms\x18\n" +
 	" \x01(\x03R\tdeletedMs\x12\x1f\n" +
 	"\vmore_chunks\x18\v \x01(\bR\n" +
-	"moreChunks\"\x92\x02\n" +
+	"moreChunks\x12\x16\n" +
+	"\x06author\x18\f \x01(\tR\x06author\x12\x1f\n" +
+	"\vauthored_ms\x18\r \x01(\x03R\n" +
+	"authoredMs\"\x92\x02\n" +
 	"\rManifestDelta\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12.\n" +

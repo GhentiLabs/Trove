@@ -270,12 +270,14 @@ func convertManifests(wms []*wirepb.RemoteManifest) ([]model.RemoteManifest, []m
 			Chunks:        chunks,
 		}
 		rm := model.RemoteManifest{
-			Manifest: m,
-			ID:       id,
-			Version:  vv,
-			OwnerSeq: wm.GetOwnerSequence(),
-			Deleted:  wm.GetDeleted(),
-			Metadata: model.Metadata{Size: totalLength(chunks), Mtime: time.Now()},
+			Manifest:   m,
+			ID:         id,
+			Version:    vv,
+			OwnerSeq:   wm.GetOwnerSequence(),
+			Author:     wm.GetAuthor(),
+			AuthoredAt: time.UnixMilli(wm.GetAuthoredMs()),
+			Deleted:    wm.GetDeleted(),
+			Metadata:   model.Metadata{Size: totalLength(chunks), Mtime: time.Now()},
 		}
 		if rm.Deleted {
 			rm.DeletedAt = time.UnixMilli(wm.GetDeletedMs())

@@ -497,6 +497,8 @@ func recordToWireMeta(rec model.Record) *wirepb.RemoteManifest {
 		ManifestId:    rec.ID.Bytes(),
 		VersionVector: rec.Version.Canonical(),
 		OwnerSequence: rec.Seq,
+		Author:        rec.Author,
+		AuthoredMs:    rec.AuthoredAt.UnixMilli(),
 		Deleted:       rec.Deleted,
 	}
 	if rec.Deleted {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
@@ -59,6 +60,28 @@ func TestApplyRemoteStoresVerbatim(t *testing.T) {
 	}
 	if epoch != 9 || hw != 5 {
 		t.Fatalf("cursor = (%d,%d), want (9,5)", epoch, hw)
+	}
+}
+
+func TestApplyRemotePreservesAuthor(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	rm := remoteFile(t, "a.txt", 5, []manifest.ChunkRef{{ID: chunkID(t, "x"), Length: 1024}})
+	rm.Author = nodeB
+	rm.AuthoredAt = time.UnixMilli(1700000000123)
+
+	if err := s.ApplyRemoteAndAdvance(ctx, []RemoteManifest{rm}, "fld", nodeB, 9, 5); err != nil {
+		t.Fatalf("ApplyRemoteAndAdvance: %v", err)
+	}
+	rec, err := s.GetManifest(ctx, "a.txt")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if rec.Author != nodeB {
+		t.Fatalf("author = %q, want verbatim %q", rec.Author, nodeB)
+	}
+	if !rec.AuthoredAt.Equal(rm.AuthoredAt) {
+		t.Fatalf("authored-at = %v, want verbatim %v", rec.AuthoredAt, rm.AuthoredAt)
 	}
 }
 
