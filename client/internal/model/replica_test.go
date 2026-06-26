@@ -473,6 +473,19 @@ func TestDeleteVsDeleteConvergesToTombstone(t *testing.T) {
 	}
 }
 
+func TestApplyRemoteRejectsMalformedAuthor(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	rm := remoteFile(t, "a.txt", 1, []manifest.ChunkRef{{ID: chunkID(t, "x"), Length: 2}})
+	rm.Author = "../../etc/passwd" // would inject parent segments into a conflict path
+	if err := applyRemote(ctx, s, nodeB, 1, 1, rm); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("err = %v, want ErrInvalidManifest", err)
+	}
+	if _, _, ok, _ := s.LoadCursor(ctx, "fld", nodeB); ok {
+		t.Fatal("cursor advanced despite a rejected batch")
+	}
+}
+
 func TestApplyRemoteRejectsEscapingSymlink(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

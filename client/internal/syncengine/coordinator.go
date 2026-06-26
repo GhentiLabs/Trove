@@ -32,6 +32,10 @@ type Coordinator struct {
 	mu      sync.Mutex
 	sources map[string]netio.Conn
 
+	announceMu sync.Mutex
+	announcers map[int]func()
+	nextSub    int
+
 	rotate atomic.Uint64
 }
 
@@ -45,7 +49,37 @@ func NewCoordinator(folderID string, fc chunkstore.FolderContext, chunks *chunks
 	}
 	return &Coordinator{
 		folderID: folderID, fc: fc, chunks: chunks, inflight: inflight, log: log,
-		sources: make(map[string]netio.Conn),
+		sources:    make(map[string]netio.Conn),
+		announcers: make(map[int]func()),
+	}
+}
+
+// OnAnnounce registers fn to run whenever the folder's local state changes, so every
+// session for the folder re-announces promptly. It returns a function that unregisters fn.
+func (c *Coordinator) OnAnnounce(fn func()) (cancel func()) {
+	c.announceMu.Lock()
+	id := c.nextSub
+	c.nextSub++
+	c.announcers[id] = fn
+	c.announceMu.Unlock()
+	return func() {
+		c.announceMu.Lock()
+		delete(c.announcers, id)
+		c.announceMu.Unlock()
+	}
+}
+
+// triggerAnnounce fans out a state-change notification to every registered session. Each
+// runs in its own goroutine so a slow send never blocks the model commit that called it.
+func (c *Coordinator) triggerAnnounce() {
+	c.announceMu.Lock()
+	fns := make([]func(), 0, len(c.announcers))
+	for _, fn := range c.announcers {
+		fns = append(fns, fn)
+	}
+	c.announceMu.Unlock()
+	for _, fn := range fns {
+		go fn()
 	}
 }
 

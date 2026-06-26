@@ -12,6 +12,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/snapshot"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
+	"github.com/GhentiLabs/Trove/pkg/identity"
 )
 
 // RemoteManifest is a peer's manifest to be reconciled into the local model: its
@@ -113,10 +114,18 @@ func (s *Store) ApplyRemote(ctx context.Context, folderID, peerID string, epoch 
 	if err != nil {
 		return err
 	}
-	if err := materialize(apply); err != nil {
+	if len(apply) > 0 {
+		if err := materialize(apply); err != nil {
+			return err
+		}
+	}
+	if err := s.commitRemote(ctx, folderID, peerID, epoch, highWater, apply); err != nil {
 		return err
 	}
-	return s.commitRemote(ctx, folderID, peerID, epoch, highWater, apply)
+	if len(apply) > 0 {
+		s.notifyChange()
+	}
+	return nil
 }
 
 // resolveRemote compares each incoming manifest to the local version and returns the
@@ -132,6 +141,11 @@ func (s *Store) resolveRemote(ctx context.Context, batch []RemoteManifest) ([]Re
 		}
 		if rm.Manifest.ID() != rm.ID {
 			return nil, fmt.Errorf("%w: path %q", ErrCorruptModel, rm.Manifest.Path)
+		}
+		// The author is carried verbatim into a conflict copy's path, so a malformed one
+		// must never reach ConflictPath.
+		if !identity.ValidNodeID(rm.Author) {
+			return nil, fmt.Errorf("%w: author %q for path %q", ErrInvalidManifest, rm.Author, rm.Manifest.Path)
 		}
 		local, ok, err := loadRow(ctx, s.db, rm.Manifest.Path)
 		if err != nil {

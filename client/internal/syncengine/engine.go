@@ -1,9 +1,10 @@
-// Package syncengine drives one-way folder convergence over an Active session: an
-// owner serves its manifests and chunks; a replica pulls them and applies them
-// crash-safely to disk. One Engine is bound to one session and covers the folders
-// shared on it. It depends on model, chunkstore, session, and wire, and nothing
-// depends back on it. Control messages ride the session control stream as protobuf;
-// chunk payloads ride dedicated data streams as raw bytes (see codec.go).
+// Package syncengine drives two-way folder convergence over an Active session: every
+// node announces, serves its manifests and chunks, and pulls a peer's manifests to
+// reconcile them against local versions, applying the result crash-safely to disk. One
+// Engine is bound to one session and covers the folders shared on it. It depends on
+// model, chunkstore, session, and wire, and nothing depends back on it. Control messages
+// ride the session control stream as protobuf; chunk payloads ride dedicated data streams
+// as raw bytes (see codec.go).
 package syncengine
 
 import (
@@ -37,6 +38,12 @@ const (
 	tmpDirName        = ".trove-tmp"
 	deltaTimeout      = 60 * time.Second
 	announceInterval  = 5 * time.Second
+
+	// clockSkewWarn is the inter-node wall-clock gap above which skew is logged. Skew
+	// never breaks convergence (the node id decides ties); it only degrades which version
+	// is chosen as the conflict winner, so this is a measurement to inform whether an HLC
+	// is ever warranted, not a correctness guard.
+	clockSkewWarn = 5 * time.Second
 
 	// protoRepeatedOverhead bounds a repeated field's tag (1) + length varint (up to 3
 	// for values below 16 KiB) when budgeting a delta page, so the estimate never
@@ -187,6 +194,9 @@ func (e *Engine) Drive(ctx context.Context) error {
 		_ = os.RemoveAll(fs.stageDir)
 		fs.cfg.Coord.addSource(peer, conn)
 		defer fs.cfg.Coord.removeSource(peer, conn)
+		fs.cfg.Model.SetChangeHook(fs.cfg.Coord.triggerAnnounce)
+		cancel := fs.cfg.Coord.OnAnnounce(func() { _ = e.announceFolder(ctx, fs) })
+		defer cancel()
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { e.serveLoop(ctx) })
@@ -207,6 +217,21 @@ func (e *Engine) announceLoop(ctx context.Context) {
 		case <-t.C:
 			e.Announce(ctx)
 		}
+	}
+}
+
+// observeSkew logs the wall-clock gap to the announcing peer when it exceeds the warn
+// threshold. The control stream's latency biases this by well under the threshold.
+func (e *Engine) observeSkew(sentMs int64) {
+	if sentMs == 0 {
+		return
+	}
+	skew := time.Duration(time.Now().UnixMilli()-sentMs) * time.Millisecond
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew >= clockSkewWarn {
+		e.log.Warn("syncengine: peer clock skew", "peer", e.sess.PeerNodeID(), "skew", skew)
 	}
 }
 
@@ -237,6 +262,7 @@ func (e *Engine) announceFolder(ctx context.Context, fs *folderState) error {
 		SnapshotRoot:      root.Bytes(),
 		IndexEpochId:      epoch,
 		HighWaterSequence: hw,
+		SentMs:            time.Now().UnixMilli(),
 	})
 }
 
@@ -255,6 +281,7 @@ func (e *Engine) Handle(ctx context.Context, typ wire.MessageType, msg proto.Mes
 			e.log.Warn("syncengine: bad summary root", "folder", sum.GetFolderId(), "err", err)
 			return nil
 		}
+		e.observeSkew(sum.GetSentMs())
 		fs.trigger(ctx, announce{root: root, epoch: sum.GetIndexEpochId(), highWater: sum.GetHighWaterSequence()})
 	case wire.TypeManifestRequest:
 		req := msg.(*wirepb.ManifestRequest)

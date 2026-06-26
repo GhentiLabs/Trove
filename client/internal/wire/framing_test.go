@@ -140,7 +140,7 @@ func TestSyncMessageRoundTrip(t *testing.T) {
 	cid := bytes.Repeat([]byte{0xCD}, 32)
 	mid := bytes.Repeat([]byte{0xEF}, 32)
 	cases := []proto.Message{
-		&wirepb.FolderSummary{FolderId: "docs", SnapshotRoot: root, IndexEpochId: 7, HighWaterSequence: 42},
+		&wirepb.FolderSummary{FolderId: "docs", SnapshotRoot: root, IndexEpochId: 7, HighWaterSequence: 42, SentMs: 1700000000000},
 		&wirepb.ManifestRequest{FolderId: "docs", IndexEpochId: 7, SinceSequence: 12},
 		&wirepb.ManifestDelta{
 			FolderId: "docs", IndexEpochId: 7, HighWaterSequence: 42,

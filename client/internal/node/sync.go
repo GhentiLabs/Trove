@@ -26,6 +26,8 @@ import (
 
 // syncRuntime is the per-folder stores backing the sync engine.
 type syncRuntime struct {
+	self    string
+	members *membership.Store
 	folders []syncengine.FolderConfig
 	closers []func() error
 }
@@ -49,7 +51,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &syncRuntime{}
+	rt := &syncRuntime{self: s.opts.NodeID, members: s.members}
 	ok := false
 	defer func() {
 		if !ok {
@@ -108,6 +110,22 @@ func (rt *syncRuntime) repairFolders(ctx context.Context, log *slog.Logger) {
 			log.Warn("node: startup repair", "folder", fc.FolderID, "err", err)
 		}
 	}
+}
+
+// otherMembers returns the node ids of every member of groupID except this node — the
+// peers that could still hold a file this node has tombstoned.
+func (rt *syncRuntime) otherMembers(ctx context.Context, groupID string) ([]string, error) {
+	roster, err := rt.members.Roster(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(roster))
+	for _, e := range roster {
+		if e.NodeID != rt.self {
+			out = append(out, e.NodeID)
+		}
+	}
+	return out, nil
 }
 
 func (rt *syncRuntime) close() {
@@ -218,15 +236,20 @@ func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 			log.Warn("node: tombstone sweep epoch", "folder", fc.FolderID, "err", err)
 			continue
 		}
+		members, err := rt.otherMembers(ctx, fc.FolderID)
+		if err != nil {
+			log.Warn("node: tombstone sweep roster", "folder", fc.FolderID, "err", err)
+			continue
+		}
 		safeSeq := int64(math.MaxInt64)
-		if hw, ok, err := fc.Model.ConvergedHighWater(ctx, epoch); err != nil {
+		if hw, ok, err := fc.Model.ConvergedHighWater(ctx, epoch, members); err != nil {
 			log.Warn("node: tombstone sweep gate", "folder", fc.FolderID, "err", err)
 			continue
 		} else if ok {
 			safeSeq = hw
 		}
 		if safeSeq == 0 {
-			log.Debug("node: tombstone reaping gated; awaiting replica convergence", "folder", fc.FolderID)
+			log.Debug("node: tombstone reaping gated; awaiting member convergence", "folder", fc.FolderID)
 		}
 		n, err := fc.Model.SweepTombstones(ctx, now, safeSeq)
 		if err != nil {

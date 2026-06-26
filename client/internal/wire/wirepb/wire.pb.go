@@ -346,8 +346,11 @@ type FolderSummary struct {
 	SnapshotRoot      []byte                 `protobuf:"bytes,2,opt,name=snapshot_root,json=snapshotRoot,proto3" json:"snapshot_root,omitempty"`
 	IndexEpochId      uint64                 `protobuf:"varint,3,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
 	HighWaterSequence int64                  `protobuf:"varint,4,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// sent_ms is the sender's wall clock when it announced, used only to observe inter-node
+	// clock skew (the conflict winner's quality input). It never affects convergence.
+	SentMs        int64 `protobuf:"varint,5,opt,name=sent_ms,json=sentMs,proto3" json:"sent_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FolderSummary) Reset() {
@@ -404,6 +407,13 @@ func (x *FolderSummary) GetIndexEpochId() uint64 {
 func (x *FolderSummary) GetHighWaterSequence() int64 {
 	if x != nil {
 		return x.HighWaterSequence
+	}
+	return 0
+}
+
+func (x *FolderSummary) GetSentMs() int64 {
+	if x != nil {
+		return x.SentMs
 	}
 	return 0
 }
@@ -1090,12 +1100,13 @@ const file_wire_proto_rawDesc = "" +
 	"\x0eindex_epoch_id\x18\x04 \x01(\x04R\findexEpochId\x12.\n" +
 	"\x13high_water_sequence\x18\x05 \x01(\x03R\x11highWaterSequenceJ\x04\b\x06\x10\a\"F\n" +
 	"\rNetworkConfig\x12/\n" +
-	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xa7\x01\n" +
+	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xc0\x01\n" +
 	"\rFolderSummary\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\xa9\x01\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\x12\x17\n" +
+	"\asent_ms\x18\x05 \x01(\x03R\x06sentMs\"\xa9\x01\n" +
 	"\x0fManifestRequest\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12$\n" +
 	"\x0eindex_epoch_id\x18\x02 \x01(\x04R\findexEpochId\x12%\n" +

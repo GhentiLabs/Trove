@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/snapshot"
@@ -82,30 +83,28 @@ func (s *Store) Receipts(ctx context.Context, kind ReceiptKind) ([]Receipt, erro
 	return out, rows.Err()
 }
 
-// ConvergedHighWater is the minimum high-water across inbound acks at epoch — the sequence
-// every reporting peer has converged past — used as the tombstone-reaping gate. ok is
-// false only when no inbound ack of any epoch exists, so the caller falls back to retention
-// alone. If any inbound ack is at a different epoch (a previously-known peer that has not
-// re-confirmed since an epoch rebuild, and may still hold un-applied deletions), it returns
-// (0, true) to block reaping until that peer reconnects.
-func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64) (hw int64, ok bool, err error) {
-	var stale int64
-	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM sync_receipts WHERE direction = ? AND epoch != ?`, int(InboundAck), int64(epoch)).Scan(&stale); err != nil {
-		return 0, false, fmt.Errorf("model: stale receipt count: %w", err)
-	}
-	if stale > 0 {
-		return 0, true, nil
-	}
-	var min sql.NullInt64
-	if err := s.db.QueryRow(ctx,
-		`SELECT MIN(high_water) FROM sync_receipts WHERE direction = ? AND epoch = ?`, int(InboundAck), int64(epoch)).Scan(&min); err != nil {
-		return 0, false, fmt.Errorf("model: converged high water: %w", err)
-	}
-	if !min.Valid {
+// ConvergedHighWater is the minimum high-water that every member has acked converging
+// past at epoch — the tombstone-reaping gate. members is the set of peers that could still
+// hold the deleted file (the roster minus this node). It returns (0, true) to block reaping
+// while any member has not confirmed at the current epoch (never connected, or stale since
+// an epoch rebuild), so a partitioned member cannot resurrect a reaped delete. ok is false
+// only when there are no members at all, so the caller falls back to retention alone.
+func (s *Store) ConvergedHighWater(ctx context.Context, epoch uint64, members []string) (hw int64, ok bool, err error) {
+	if len(members) == 0 {
 		return 0, false, nil
 	}
-	return min.Int64, true, nil
+	hw = math.MaxInt64
+	for _, m := range members {
+		r, ok, err := s.Receipt(ctx, InboundAck, m)
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok || r.Epoch != epoch {
+			return 0, true, nil
+		}
+		hw = min(hw, r.HighWater)
+	}
+	return hw, true, nil
 }
 
 type scanner interface {

@@ -29,6 +29,9 @@ func ConflictPath(p, loserAuthor string, loserAuthoredAt time.Time) string {
 	dir, base := path.Split(p)
 	ext := path.Ext(base)
 	stem := base[:len(base)-len(ext)]
+	if stem == "" { // a dotfile like ".bashrc" is all "extension"; keep the name visible
+		stem, ext = base, ""
+	}
 	ts := loserAuthoredAt.UTC().Format(conflictTimeLayout)
 	return dir + stem + ".conflict-" + ts + "-" + loserAuthor + ext
 }

@@ -135,6 +135,29 @@ type Store struct {
 	// applyMu serializes a remote apply against local origination so a concurrent
 	// scan cannot change a path's version between the resolve and the commit.
 	applyMu sync.Mutex
+
+	// onChange, if set, is called after any committed change to the folder's state, so
+	// the node can push a fresh announcement instead of waiting for the next tick. It is
+	// guarded because every session sharing the folder sets and reads it concurrently.
+	hookMu   sync.Mutex
+	onChange func()
+}
+
+// SetChangeHook registers a callback invoked after each committed state change. It must
+// not block and must not call back into the store synchronously.
+func (s *Store) SetChangeHook(fn func()) {
+	s.hookMu.Lock()
+	s.onChange = fn
+	s.hookMu.Unlock()
+}
+
+func (s *Store) notifyChange() {
+	s.hookMu.Lock()
+	fn := s.onChange
+	s.hookMu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // Options configures Open.

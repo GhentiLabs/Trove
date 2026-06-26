@@ -229,8 +229,8 @@ func TestConvergedHighWater(t *testing.T) {
 		t.Fatalf("CurrentRoot: %v", err)
 	}
 
-	if _, ok, err := s.ConvergedHighWater(ctx, 7); err != nil || ok {
-		t.Fatalf("empty receipts: ok=%v err=%v, want ok=false", ok, err)
+	if _, ok, err := s.ConvergedHighWater(ctx, 7, nil); err != nil || ok {
+		t.Fatalf("no members: ok=%v err=%v, want ok=false", ok, err)
 	}
 
 	now := time.Now()
@@ -242,16 +242,20 @@ func TestConvergedHighWater(t *testing.T) {
 	must("p1", 7, 40)
 	must("p2", 7, 25)
 
-	// All receipts at the queried epoch: the gate is their minimum.
-	hw, ok, err := s.ConvergedHighWater(ctx, 7)
+	// A member with no receipt yet blocks reaping outright.
+	if hw, ok, err := s.ConvergedHighWater(ctx, 7, []string{"p1", "p2", "p3"}); err != nil || !ok || hw != 0 {
+		t.Fatalf("unacked member gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
+	}
+
+	// All members acked at the queried epoch: the gate is their minimum.
+	hw, ok, err := s.ConvergedHighWater(ctx, 7, []string{"p1", "p2"})
 	if err != nil || !ok || hw != 25 {
 		t.Fatalf("ConvergedHighWater(7) = (%d, %v, %v), want (25, true, nil)", hw, ok, err)
 	}
 
-	// A receipt at a stale epoch (a previously-known replica that has not re-confirmed
-	// since an owner rebuild) blocks reaping at 0 until it reconnects.
+	// A member at a stale epoch (not re-confirmed since an epoch rebuild) blocks reaping.
 	must("p3", 9, 5)
-	hw, ok, err = s.ConvergedHighWater(ctx, 7)
+	hw, ok, err = s.ConvergedHighWater(ctx, 7, []string{"p1", "p2", "p3"})
 	if err != nil || !ok || hw != 0 {
 		t.Fatalf("stale-epoch gate: (%d, %v, %v), want (0, true, nil)", hw, ok, err)
 	}

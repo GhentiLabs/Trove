@@ -51,19 +51,19 @@ func (fs *folderState) reconcileLoop(ctx context.Context) {
 
 func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 	m := fs.cfg.Model
-	owner := fs.eng.sess.PeerNodeID()
+	peer := fs.eng.sess.PeerNodeID()
 
 	cur, err := m.CurrentRoot(ctx)
 	if err != nil {
 		return err
 	}
 	if cur == a.root {
-		ep, hw, ok, err := m.LoadCursor(ctx, fs.cfg.FolderID, owner)
+		ep, hw, ok, err := m.LoadCursor(ctx, fs.cfg.FolderID, peer)
 		if err != nil {
 			return err
 		}
 		if !ok || ep != a.epoch || hw != a.highWater {
-			if err := m.AdvanceCursor(ctx, fs.cfg.FolderID, owner, a.epoch, a.highWater); err != nil {
+			if err := m.AdvanceCursor(ctx, fs.cfg.FolderID, peer, a.epoch, a.highWater); err != nil {
 				return err
 			}
 		}
@@ -71,7 +71,7 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 		return nil
 	}
 
-	ep, hw, ok, err := m.LoadCursor(ctx, fs.cfg.FolderID, owner)
+	ep, hw, ok, err := m.LoadCursor(ctx, fs.cfg.FolderID, peer)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 	}
 
 	// Pull the delta a page at a time. The cursor (sequence, chunk-offset) must strictly
-	// advance and the page count is capped, so a buggy or hostile owner cannot loop the
+	// advance and the page count is capped, so a buggy or hostile peer cannot loop the
 	// replica forever. A manifest whose chunk list spans pages is accumulated in carry
 	// and applied only once fully received.
 	var offset int64
@@ -109,13 +109,13 @@ func (fs *folderState) runReconcile(ctx context.Context, a announce) error {
 	}
 }
 
-// markConverged records that this replica reached root at (epoch, highWater) and reports
-// it to the owner. Both writes are best-effort; a dropped receipt is re-sent on the next
-// reconcile, so it never fails the reconcile.
+// markConverged records that this node reached root over the peer's lineage at (epoch,
+// highWater) and reports it to the peer. Both writes are best-effort; a dropped receipt is
+// re-sent on the next reconcile, so it never fails the reconcile.
 func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, epoch uint64, highWater int64) {
-	owner := fs.eng.sess.PeerNodeID()
+	peer := fs.eng.sess.PeerNodeID()
 	if err := fs.cfg.Model.RecordReceipt(ctx, model.LocalSync, model.Receipt{
-		PeerID: owner, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: time.Now(),
+		PeerID: peer, Root: root, Epoch: epoch, HighWater: highWater, SyncedAt: time.Now(),
 	}); err != nil {
 		fs.eng.log.Warn("syncengine: record receipt", "folder", fs.cfg.FolderID, "err", err)
 	}
@@ -125,7 +125,7 @@ func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, ep
 		IndexEpochId:      epoch,
 		HighWaterSequence: highWater,
 	}); err != nil {
-		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", owner, "err", err)
+		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", peer, "err", err)
 	}
 }
 
@@ -153,7 +153,7 @@ func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since, offse
 	}
 	wms := delta.GetManifests()
 	newSince := delta.GetHighWaterSequence()
-	owner := fs.eng.sess.PeerNodeID()
+	peer := fs.eng.sess.PeerNodeID()
 
 	// A continuation page carries the single in-progress manifest's next chunk slice; its
 	// chunks are pulled now but the file is applied only when the manifest completes.
@@ -166,7 +166,7 @@ func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since, offse
 		if err != nil {
 			return pageResult{}, err
 		}
-		if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
+		if err := fs.cfg.Coord.pull(ctx, pull, peer); err != nil {
 			return pageResult{}, err
 		}
 		if carry == nil {
@@ -192,7 +192,7 @@ func (fs *folderState) applyPage(ctx context.Context, epoch uint64, since, offse
 	if err != nil {
 		return pageResult{}, err
 	}
-	if err := fs.cfg.Coord.pull(ctx, pull, owner); err != nil {
+	if err := fs.cfg.Coord.pull(ctx, pull, peer); err != nil {
 		return pageResult{}, err
 	}
 	if err := fs.apply(ctx, batch, delta); err != nil {

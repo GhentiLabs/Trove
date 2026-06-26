@@ -62,6 +62,9 @@ message FolderSummary {
   bytes snapshot_root = 2;
   uint64 index_epoch_id = 3;
   int64 high_water_sequence = 4;
+  // sent_ms is the sender's wall clock when it announced, used only to observe inter-node
+  // clock skew (the conflict winner's quality input). It never affects convergence.
+  int64 sent_ms = 5;
 }
 
 // ManifestRequest asks the owner for every manifest with seq greater than

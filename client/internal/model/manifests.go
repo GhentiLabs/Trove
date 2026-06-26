@@ -81,7 +81,7 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 	id := m.ID()
 
 	s.applyMu.Lock()
-	defer s.applyMu.Unlock()
+	changed := false
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		prior, ok, err := loadRow(ctx, tx, m.Path)
 		if err != nil {
@@ -103,10 +103,15 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 		if err := writeRow(ctx, tx, m, md, id, vv, seq, s.node, time.Now(), false, time.Time{}); err != nil {
 			return err
 		}
+		changed = true
 		return writeChunks(ctx, tx, id, m.Chunks)
 	})
+	s.applyMu.Unlock()
 	if err != nil {
 		return manifest.ID{}, err
+	}
+	if changed {
+		s.notifyChange()
 	}
 	return id, nil
 }
@@ -120,8 +125,8 @@ func (s *Store) PutManifest(ctx context.Context, m manifest.Manifest, md Metadat
 func (s *Store) DeleteManifest(ctx context.Context, path string) (manifest.ID, error) {
 	path = manifest.NormalizePath(path)
 	var id manifest.ID
+	changed := false
 	s.applyMu.Lock()
-	defer s.applyMu.Unlock()
 	err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		prior, ok, err := loadRow(ctx, tx, path)
 		if err != nil {
@@ -143,10 +148,15 @@ func (s *Store) DeleteManifest(ctx context.Context, path string) (manifest.ID, e
 		}
 		now := time.Now()
 		m := prior.Manifest
+		changed = true
 		return writeRow(ctx, tx, m, prior.Metadata, prior.ID, vv, seq, s.node, now, true, now)
 	})
+	s.applyMu.Unlock()
 	if err != nil {
 		return manifest.ID{}, err
+	}
+	if changed {
+		s.notifyChange()
 	}
 	return id, nil
 }

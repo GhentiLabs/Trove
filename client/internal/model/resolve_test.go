@@ -50,6 +50,34 @@ func TestConflictWinnerIsTotalAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestConflictPath(t *testing.T) {
+	at := time.UnixMilli(1700000000000) // 2023-11-14T22:13:20.000Z
+	author := "node22222222222222222222222222222222222222222222node"
+	cases := []struct {
+		in, want string
+	}{
+		{"budget.xlsx", "budget.conflict-20231114T221320.000Z-" + author + ".xlsx"},
+		{"dir/sub/report.txt", "dir/sub/report.conflict-20231114T221320.000Z-" + author + ".txt"},
+		{"noext", "noext.conflict-20231114T221320.000Z-" + author},
+		{"archive.tar.gz", "archive.tar.conflict-20231114T221320.000Z-" + author + ".gz"},
+		{".bashrc", ".bashrc.conflict-20231114T221320.000Z-" + author},
+	}
+	for _, tc := range cases {
+		if got := ConflictPath(tc.in, author, at); got != tc.want {
+			t.Fatalf("ConflictPath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestConflictPathStaysWithinFolder(t *testing.T) {
+	// Even a hostile author cannot be used here (resolveRemote rejects it), but the path
+	// must never gain a leading separator or parent segment from a normal author.
+	got := ConflictPath("dir/file.txt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", time.UnixMilli(0))
+	if got == "" || got[0] == '/' || got == "dir/file.txt" {
+		t.Fatalf("unexpected conflict path: %q", got)
+	}
+}
+
 func TestConflictWinnerIgnoresSubMillisecondAndMonotonicClock(t *testing.T) {
 	base := time.UnixMilli(1000)
 	if ConflictWinner("a", base.Add(400*time.Microsecond), "b", base) {
