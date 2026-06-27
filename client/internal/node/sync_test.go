@@ -113,9 +113,24 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 	if _, _, err := cfg.GetFolderKey(ctx, group); !errors.Is(err, config.ErrNoKey) {
 		t.Fatalf("key state after non-writer delivery err = %v, want ErrNoKey (not stored)", err)
 	}
+	members2, founderID, _ := openMembers(t)
+	group2, err := members2.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	cfg2 := openConfig(t, "self-node-2")
+	if err := cfg2.AddFolder(ctx, config.Folder{ID: group2, Root: "/r", ShareID: group2, Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	rt2 := &syncRuntime{self: "self-node-2", members: members2, cfg: cfg2, byShare: map[string]config.Folder{
+		group2: {ID: group2, Root: "/r", ShareID: group2, Encrypted: true},
+	}}
 	short := []byte{1, 2, 3}
-	if err := rt.receiveFolderKey(ctx, log, "ignored", &wirepb.FolderKey{FolderId: group, Key: short, KeyGeneration: 1}); err != nil {
+	if err := rt2.receiveFolderKey(ctx, log, founderID, &wirepb.FolderKey{FolderId: group2, Key: short, KeyGeneration: 1}); err != nil {
 		t.Fatalf("short-key delivery err = %v, want nil", err)
+	}
+	if _, _, err := cfg2.GetFolderKey(ctx, group2); !errors.Is(err, config.ErrNoKey) {
+		t.Fatalf("short key was stored; want ErrNoKey")
 	}
 }
 
@@ -141,11 +156,11 @@ func TestDeliverableOnlyToTrustedMembers(t *testing.T) {
 	cf := config.Folder{ID: group, Root: "/r", ShareID: group, Encrypted: true}
 	var key [config.MasterKeyLen]byte
 
-	if d := rt.deliverable(ctx, cf, readerID, key, 1); d == nil || d.GetFolderId() != group {
+	if d := rt.deliverable(ctx, slog.New(slog.DiscardHandler), cf, readerID, key, 1); d == nil || d.GetFolderId() != group {
 		t.Fatalf("deliverable to reader = %v, want a message for %s", d, group)
 	}
 	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-	if d := rt.deliverable(ctx, cf, stranger, key, 1); d != nil {
+	if d := rt.deliverable(ctx, slog.New(slog.DiscardHandler), cf, stranger, key, 1); d != nil {
 		t.Fatal("delivered a key to a non-member")
 	}
 }

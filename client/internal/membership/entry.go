@@ -33,7 +33,9 @@ const (
 	RoleReader Role = 0
 	// RoleWriter may read, write, and add members. The owner is the founding writer.
 	RoleWriter Role = 1
-	// Value 2 is reserved for a future ciphertext-only holder tier (encrypted folders).
+	// RoleHolder stores a folder's ciphertext without its key: it serves opaque blinded
+	// blobs back to trusted members but cannot read, write, or add members.
+	RoleHolder Role = 2
 )
 
 // Entry is one signed roster record: a member's identity and the admin attestation
@@ -107,7 +109,7 @@ func (e Entry) validate() error {
 		return fmt.Errorf("%w: public key length %d", ErrInvalidEntry, len(e.PublicKey))
 	case e.AddedBy == "":
 		return fmt.Errorf("%w: empty added_by", ErrInvalidEntry)
-	case e.Role != RoleReader && e.Role != RoleWriter:
+	case e.Role != RoleReader && e.Role != RoleWriter && e.Role != RoleHolder:
 		return fmt.Errorf("%w: unknown role %d", ErrInvalidEntry, e.Role)
 	}
 	return nil

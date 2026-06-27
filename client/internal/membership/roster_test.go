@@ -113,12 +113,19 @@ func TestMergeIdempotentOnKnownEntries(t *testing.T) {
 	}
 }
 
-// The reserved holder role (2) cannot be signed until encrypted-folder sync exists.
-func TestSignRejectsReservedRole(t *testing.T) {
+func TestSignHolderRole(t *testing.T) {
 	n := newNode(t)
-	e := Entry{NetworkID: "net", NodeID: n.id, PublicKey: n.pub, Role: 2, AddedBy: n.id, AddedAtMs: 1}
+	e := Entry{NetworkID: "net", NodeID: n.id, PublicKey: n.pub, Role: RoleHolder, AddedBy: n.id, AddedAtMs: 1}
+	if _, err := Sign(n.key, e); err != nil {
+		t.Fatalf("Sign holder entry: %v", err)
+	}
+}
+
+func TestSignRejectsUnknownRole(t *testing.T) {
+	n := newNode(t)
+	e := Entry{NetworkID: "net", NodeID: n.id, PublicKey: n.pub, Role: 3, AddedBy: n.id, AddedAtMs: 1}
 	if _, err := Sign(n.key, e); !errors.Is(err, ErrInvalidEntry) {
-		t.Fatalf("Sign with reserved role 2: err = %v, want ErrInvalidEntry", err)
+		t.Fatalf("Sign with unknown role 3: err = %v, want ErrInvalidEntry", err)
 	}
 }
 

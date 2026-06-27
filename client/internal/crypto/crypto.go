@@ -41,10 +41,16 @@ var (
 
 	verifyLabel = []byte("trove/folder/verify/v1")
 	verifySalt  = []byte("trove/folder-verify")
+
+	blindLabel = []byte("trove/holder/blind/v1")
+	blindSalt  = []byte("trove/holder-blind")
 )
 
 // VerifierLen is the length of a folder key-mismatch verifier.
 const VerifierLen = 32
+
+// BlindLen is the length of a holder-blinded id.
+const BlindLen = 32
 
 func deriveKeyNonce(master [MasterKeyLen]byte, id hasher.ChunkID) (key [chacha20poly1305.KeySize]byte, nonce [chacha20poly1305.NonceSize]byte) {
 	info := make([]byte, 0, len(id)+len(hkdfLabel))
@@ -95,6 +101,22 @@ func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 	out := make([]byte, VerifierLen)
 	if _, err := io.ReadFull(r, out); err != nil {
 		panic(fmt.Sprintf("crypto: hkdf verifier: %v", err))
+	}
+	return out
+}
+
+// BlindID derives the opaque id under which a holder stores a blob, from the folder
+// master key and the blob's true id. A holder, lacking the key, cannot map a blinded id
+// back to the content id or correlate it across folders; key-holders derive it
+// deterministically, so identical content dedups within a folder.
+func BlindID(master [MasterKeyLen]byte, id []byte) [BlindLen]byte {
+	info := make([]byte, 0, len(blindLabel)+len(id))
+	info = append(info, blindLabel...)
+	info = append(info, id...)
+	r := hkdf.New(sha256.New, master[:], blindSalt, info)
+	var out [BlindLen]byte
+	if _, err := io.ReadFull(r, out[:]); err != nil {
+		panic(fmt.Sprintf("crypto: hkdf blind: %v", err))
 	}
 	return out
 }

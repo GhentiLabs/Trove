@@ -28,6 +28,28 @@ func TestFolderVerifier(t *testing.T) {
 	}
 }
 
+func TestBlindID(t *testing.T) {
+	var a, b [MasterKeyLen]byte
+	for i := range a {
+		a[i] = byte(i)
+		b[i] = byte(255 - i)
+	}
+	id1 := []byte("chunk-one")
+	blind := BlindID(a, id1)
+	if len(blind) != BlindLen {
+		t.Fatalf("blind len = %d, want %d", len(blind), BlindLen)
+	}
+	if blind != BlindID(a, id1) {
+		t.Fatal("blind id not deterministic")
+	}
+	if blind == BlindID(b, id1) {
+		t.Fatal("different keys produced the same blind id")
+	}
+	if blind == BlindID(a, []byte("chunk-two")) {
+		t.Fatal("different ids produced the same blind id")
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	var master [MasterKeyLen]byte
 	for i := range master {

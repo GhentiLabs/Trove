@@ -249,7 +249,7 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 const FirstKeyGeneration = 1
 
 // GenerateFolderKey mints a random master key for a folder and stores it. It
-// refuses to overwrite an existing key (use SetFolderKey to replace one).
+// refuses to overwrite an existing key.
 func (s *Store) GenerateFolderKey(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
 	var key [MasterKeyLen]byte
 	if _, err := rand.Read(key[:]); err != nil {

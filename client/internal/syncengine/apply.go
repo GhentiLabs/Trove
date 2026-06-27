@@ -28,8 +28,7 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 }
 
 // writerAuthored drops every manifest whose author lacks write access per the roster,
-// failing closed on a lookup error. The cursor still advances over the dropped
-// manifests, so a non-writer's edit is rejected, not endlessly re-requested.
+// failing closed on a lookup error.
 func (fs *folderState) writerAuthored(ctx context.Context, batch []model.RemoteManifest) []model.RemoteManifest {
 	if fs.cfg.AuthorWriter == nil {
 		return batch

@@ -36,20 +36,22 @@ type syncRuntime struct {
 	closers []func() error
 }
 
-// isWriter reports whether nodeID may originate edits in groupID: the founder always
-// can, any other node only with the writer tier in the roster.
-func (rt *syncRuntime) isWriter(ctx context.Context, groupID, nodeID string) (bool, error) {
+// effectiveRole returns nodeID's role in groupID, treating the founder as a writer
+// even without an explicit roster entry. ok is false for a non-member.
+func (rt *syncRuntime) effectiveRole(ctx context.Context, groupID, nodeID string) (membership.Role, bool, error) {
 	if nodeID == "" {
-		return false, nil
+		return 0, false, nil
 	}
 	if founder, ok := membership.Founder(groupID); ok && founder == nodeID {
-		return true, nil
+		return membership.RoleWriter, true, nil
 	}
-	role, ok, err := rt.members.RoleOf(ctx, groupID, nodeID)
-	if err != nil {
-		return false, err
-	}
-	return ok && role == membership.RoleWriter, nil
+	return rt.members.RoleOf(ctx, groupID, nodeID)
+}
+
+// isWriter reports whether nodeID may originate edits in groupID.
+func (rt *syncRuntime) isWriter(ctx context.Context, groupID, nodeID string) (bool, error) {
+	role, ok, err := rt.effectiveRole(ctx, groupID, nodeID)
+	return ok && role == membership.RoleWriter, err
 }
 
 // folderRole is this node's tier for a group: a writer originates local edits, a
@@ -129,8 +131,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 }
 
 // folderContext resolves a folder's encryption context. An encrypted folder whose key
-// has not yet been delivered gets an Encrypted context with no key; its engine stays
-// idle until onSession sees the key.
+// has not yet been delivered gets an Encrypted context with no key.
 func (rt *syncRuntime) folderContext(ctx context.Context, f config.Folder) (chunkstore.FolderContext, error) {
 	if !f.Encrypted {
 		return chunkstore.FolderContext{}, nil
@@ -178,8 +179,7 @@ func (rt *syncRuntime) close() {
 	rt.closers = nil
 }
 
-// errReattachAfterKey ends a session once a folder key has just been delivered, so
-// the peer manager reconnects and onSession re-attaches the now-keyed folder.
+// errReattachAfterKey ends a session once a folder key has just been delivered.
 var errReattachAfterKey = errors.New("node: reattach after folder key delivery")
 
 // onSession returns a peermgr hook that, for each session, registers the peer with the
@@ -216,7 +216,12 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				}
 				return gossip.handle(hctx, peerID, gm)
 			case wire.TypeFolderKey:
-				return rt.receiveFolderKey(hctx, log, peerID, msg.(*wirepb.FolderKey))
+				fk, ok := msg.(*wirepb.FolderKey)
+				if !ok {
+					log.Warn("node: folder key with unexpected payload", "peer", peerID)
+					return nil
+				}
+				return rt.receiveFolderKey(hctx, log, peerID, fk)
 			default:
 				if eng != nil {
 					return eng.Handle(hctx, typ, msg)
@@ -279,7 +284,7 @@ func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peer
 		fc.FolderCtx = fctx
 		fc.Coord.SetFolderContext(fctx)
 		fcs = append(fcs, fc)
-		if d := rt.deliverable(ctx, cf, peerID, key, gen); d != nil {
+		if d := rt.deliverable(ctx, log, cf, peerID, key, gen); d != nil {
 			deliveries = append(deliveries, d)
 		}
 	}
@@ -288,11 +293,23 @@ func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peer
 
 // deliverable returns a folder-key message for peerID when this node is a writer able
 // to share the key and the peer is a trusted member; a holder or non-member gets nil.
-func (rt *syncRuntime) deliverable(ctx context.Context, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
-	if mine, err := rt.isWriter(ctx, cf.ShareID, rt.self); err != nil || !mine {
+// The key is re-offered on every reconnect; that is safe because the receiver stores it
+// only if absent (DeliverFolderKey), and it never leaves the authenticated session.
+func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
+	mine, err := rt.isWriter(ctx, cf.ShareID, rt.self)
+	if err != nil {
+		log.Warn("node: folder key delivery skipped", "folder", cf.ShareID, "err", err)
 		return nil
 	}
-	if trusted, err := rt.peerTrusted(ctx, cf.ShareID, peerID); err != nil || !trusted {
+	if !mine {
+		return nil
+	}
+	trusted, err := rt.peerTrusted(ctx, cf.ShareID, peerID)
+	if err != nil {
+		log.Warn("node: folder key delivery skipped", "folder", cf.ShareID, "peer", peerID, "err", err)
+		return nil
+	}
+	if !trusted {
 		return nil
 	}
 	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: key[:], KeyGeneration: uint64(gen)}
@@ -332,17 +349,11 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 	}
 }
 
-// peerTrusted reports whether nodeID is a reader or writer (or the founder) of groupID,
-// i.e. a member entitled to the folder key. A holder or non-member is not.
+// peerTrusted reports whether nodeID is a member entitled to the folder key — a reader,
+// writer, or founder. A holder or non-member is not.
 func (rt *syncRuntime) peerTrusted(ctx context.Context, groupID, nodeID string) (bool, error) {
-	if founder, ok := membership.Founder(groupID); ok && founder == nodeID {
-		return true, nil
-	}
-	role, ok, err := rt.members.RoleOf(ctx, groupID, nodeID)
-	if err != nil {
-		return false, err
-	}
-	return ok && (role == membership.RoleWriter || role == membership.RoleReader), nil
+	role, ok, err := rt.effectiveRole(ctx, groupID, nodeID)
+	return ok && (role == membership.RoleWriter || role == membership.RoleReader), err
 }
 
 const tombstoneSweepInterval = time.Hour
