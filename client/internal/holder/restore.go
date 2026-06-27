@@ -13,6 +13,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
+	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
 // errChunkMismatch means a restored chunk's plaintext did not hash to its expected id.
@@ -70,6 +71,13 @@ func restoreChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks
 }
 
 func materialize(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.FolderContext, root string, manifests []manifest.Manifest) error {
+	// Validate the whole catalog before touching the filesystem: a hostile writer's
+	// sealed catalog must not plant a path or symlink target that escapes the root.
+	for _, mf := range manifests {
+		if err := model.ValidateManifest(mf); err != nil {
+			return fmt.Errorf("holder: reject manifest %q: %w", mf.Path, err)
+		}
+	}
 	sorted := append([]manifest.Manifest(nil), manifests...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	for _, mf := range sorted {
@@ -131,7 +139,7 @@ func writeRegular(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.F
 func safeJoin(root, rel string) (string, error) {
 	dest := filepath.Join(root, filepath.FromSlash(rel))
 	rootClean := filepath.Clean(root)
-	if dest != rootClean && !strings.HasPrefix(dest, rootClean+string(os.PathSeparator)) {
+	if dest == rootClean || !strings.HasPrefix(dest, rootClean+string(os.PathSeparator)) {
 		return "", fmt.Errorf("holder: path %q escapes root", rel)
 	}
 	return dest, nil

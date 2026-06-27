@@ -10,6 +10,7 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/scanner"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
@@ -146,6 +147,34 @@ func TestRestoreRejectsTamperedChunk(t *testing.T) {
 	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
 	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err == nil {
 		t.Fatal("Restore accepted a tampered chunk blob")
+	}
+}
+
+// TestRestoreRejectsEscapingSymlink checks a hostile writer's sealed catalog cannot plant
+// a symlink whose target escapes the restore root.
+func TestRestoreRejectsEscapingSymlink(t *testing.T) {
+	ctx := context.Background()
+	key := testKey(0x44)
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	evil := []manifest.Manifest{{Kind: manifest.KindSymlink, Path: "evil", SymlinkTarget: "../../escape"}}
+	sealed, err := crypto.Seal(key, catalogID, EncodeCatalog(evil))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := store.Put(crypto.BlindID(key, catalogID[:]), sealed); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	dst := newFolder(t, key)
+	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
+	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err == nil {
+		t.Fatal("Restore accepted a catalog with an escaping symlink")
+	}
+	if _, err := os.Lstat(filepath.Join(dst.root, "evil")); err == nil {
+		t.Fatal("escaping symlink was planted before rejection")
 	}
 }
 
