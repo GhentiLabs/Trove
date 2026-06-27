@@ -15,6 +15,7 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/holder"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/scanner"
@@ -32,6 +33,7 @@ type syncRuntime struct {
 	members *membership.Store
 	cfg     *config.Store
 	folders []syncengine.FolderConfig
+	holders map[string]*holder.Store
 	byShare map[string]config.Folder
 	closers []func() error
 }
@@ -73,7 +75,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, byShare: map[string]config.Folder{}}
+	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, byShare: map[string]config.Folder{}, holders: map[string]*holder.Store{}}
 	ok := false
 	defer func() {
 		if !ok {
@@ -82,6 +84,15 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	}()
 	for _, f := range folders {
 		if f.ShareID == "" {
+			continue
+		}
+		if f.Holder {
+			hs, err := holder.Open(filepath.Join(s.opts.StateDir, "folders", f.ID, "holder"))
+			if err != nil {
+				return nil, fmt.Errorf("node: open holder store %q: %w", f.ShareID, err)
+			}
+			rt.holders[f.ShareID] = hs
+			rt.byShare[f.ShareID] = f
 			continue
 		}
 		if f.Root == "" {
@@ -237,23 +248,82 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			}
 		}
 
-		var driveCancel context.CancelFunc
-		var driveWg sync.WaitGroup
+		sctx, cancel := context.WithCancel(ctx)
+		var wg sync.WaitGroup
 		if eng != nil {
-			dctx, cancel := context.WithCancel(ctx)
-			driveCancel = cancel
-			driveWg.Add(1)
+			wg.Add(1)
 			go func() {
-				defer driveWg.Done()
-				_ = eng.Drive(dctx)
+				defer wg.Done()
+				_ = eng.Drive(sctx)
 			}()
 		}
+		if held := rt.sharedHolderStores(shared); len(held) > 0 && eng == nil {
+			srv := holder.NewServer(held, rt.holderPutAllowed, log)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				srv.Serve(sctx, sess.Conn())
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rt.pushToHolders(sctx, log, sess, shared)
+		}()
 		return func() {
-			if driveCancel != nil {
-				driveCancel()
-				driveWg.Wait()
-			}
+			cancel()
+			wg.Wait()
 			gossip.removePeer(peerID, sess)
+		}
+	}
+}
+
+// sharedHolderStores returns this node's holder stores for the folders shared on a session.
+func (rt *syncRuntime) sharedHolderStores(shared map[string]bool) map[string]*holder.Store {
+	held := map[string]*holder.Store{}
+	for id := range shared {
+		if hs := rt.holders[id]; hs != nil {
+			held[id] = hs
+		}
+	}
+	return held
+}
+
+// holderPutAllowed authorizes a peer to store blobs on this holder: only a roster writer.
+func (rt *syncRuntime) holderPutAllowed(folderID, peerID string) (bool, error) {
+	return rt.isWriter(context.Background(), folderID, peerID)
+}
+
+// pushToHolders exports each shared encrypted folder this node writes to any peer that is
+// a holder of it, sealing the catalog and chunks under blinded ids over the session.
+func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool) {
+	peerID := sess.PeerNodeID()
+	for _, fc := range rt.folders {
+		if !shared[fc.FolderID] {
+			continue
+		}
+		cf := rt.byShare[fc.FolderID]
+		if !cf.Encrypted {
+			continue
+		}
+		switch role, ok, err := rt.effectiveRole(ctx, cf.ShareID, peerID); {
+		case err != nil:
+			log.Warn("node: holder push role check", "folder", cf.ShareID, "peer", peerID, "err", err)
+			continue
+		case !ok || role != membership.RoleHolder:
+			continue
+		}
+		if mine, err := rt.isWriter(ctx, cf.ShareID, rt.self); err != nil || !mine {
+			continue
+		}
+		key, _, err := rt.cfg.GetFolderKey(ctx, cf.ID)
+		if err != nil {
+			continue
+		}
+		fctx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+		put := holder.PutBlobOverConn(sess.Conn(), cf.ShareID)
+		if err := holder.Export(ctx, key, fc.Model, fc.Chunks, fctx, put); err != nil {
+			log.Warn("node: push to holder", "folder", cf.ShareID, "peer", peerID, "err", err)
 		}
 	}
 }
@@ -320,7 +390,7 @@ func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf con
 // delivery from a non-writer, for an unknown or already-keyed folder, is ignored.
 func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey) error {
 	cf, ok := rt.byShare[fk.GetFolderId()]
-	if !ok || !cf.Encrypted {
+	if !ok || !cf.Encrypted || cf.Holder {
 		return nil
 	}
 	switch okWriter, err := rt.isWriter(ctx, cf.ShareID, peerID); {

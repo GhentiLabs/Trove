@@ -134,6 +134,43 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 	}
 }
 
+// TestHolderPutAllowedOnlyForWriters checks a holder accepts blob stores only from a
+// roster writer (the founder here), not from a reader or a non-member.
+func TestHolderPutAllowedOnlyForWriters(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	_, readerID, readerPub := openMembers(t)
+	if _, err := members.Add(ctx, group, readerID, readerPub, membership.RoleReader); err != nil {
+		t.Fatalf("Add reader: %v", err)
+	}
+	rt := &syncRuntime{self: "holder-self", members: members}
+
+	cases := []struct {
+		name   string
+		peerID string
+		want   bool
+	}{
+		{"writer/founder allowed", founderID, true},
+		{"reader denied", readerID, false},
+		{"non-member denied", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := rt.holderPutAllowed(group, tc.peerID)
+			if err != nil {
+				t.Fatalf("holderPutAllowed: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("holderPutAllowed(%s) = %v, want %v", tc.peerID, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDeliverableOnlyToTrustedMembers checks a writer offers the key to a reader member
 // but never to a non-member.
 func TestDeliverableOnlyToTrustedMembers(t *testing.T) {

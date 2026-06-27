@@ -182,19 +182,26 @@ func cmdInvite(args []string) error {
 	nodeID := fs.String("node", "", "member node id to admit")
 	keyHex := fs.String("key", "", "member public key in hex (from their `identity`)")
 	writer := fs.Bool("writer", false, "admit as a writer (two-way sync) instead of a reader")
+	holderFlag := fs.Bool("holder", false, "admit as an untrusted holder (stores ciphertext only, no key)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *group == "" || *nodeID == "" || *keyHex == "" {
 		return errors.New("invite: -group, -node, and -key are required")
 	}
+	if *writer && *holderFlag {
+		return errors.New("invite: -writer and -holder are mutually exclusive")
+	}
 	pub, err := hex.DecodeString(*keyHex)
 	if err != nil {
 		return fmt.Errorf("invite: bad -key: %w", err)
 	}
 	role, tier := membership.RoleReader, "reader"
-	if *writer {
+	switch {
+	case *writer:
 		role, tier = membership.RoleWriter, "writer"
+	case *holderFlag:
+		role, tier = membership.RoleHolder, "holder"
 	}
 	p, err := openPeer(*dir)
 	if err != nil {
@@ -213,11 +220,16 @@ func cmdJoin(args []string) error {
 	dir := fs.String("dir", ".trove", "state directory")
 	group := fs.String("group", "", "group id to join (from the owner)")
 	root := fs.String("root", "", "local folder root to receive into")
+	encrypted := fs.Bool("encrypted", false, "the folder is encrypted; await the key over the session")
+	holderFlag := fs.Bool("holder", false, "join as a holder: store ciphertext only, no root or key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *group == "" || *root == "" {
-		return errors.New("join: -group and -root are required")
+	if *group == "" {
+		return errors.New("join: -group is required")
+	}
+	if !*holderFlag && *root == "" {
+		return errors.New("join: -root is required")
 	}
 	if _, ok := membership.Founder(*group); !ok {
 		return fmt.Errorf("join: %q is not a valid group id", *group)
@@ -231,7 +243,8 @@ func cmdJoin(args []string) error {
 	if err := p.members.Join(ctx, *group); err != nil {
 		return err
 	}
-	switch err := p.cfg.AddFolder(ctx, config.Folder{ID: *group, Root: *root, ShareID: *group}); {
+	folder := config.Folder{ID: *group, Root: *root, ShareID: *group, Encrypted: *encrypted || *holderFlag, Holder: *holderFlag}
+	switch err := p.cfg.AddFolder(ctx, folder); {
 	case err == nil, errors.Is(err, config.ErrFolderExists):
 	default:
 		return err

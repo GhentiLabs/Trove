@@ -19,7 +19,7 @@ import (
 
 // SchemaVersion is the current config database layout. Open refuses a database
 // written by a newer binary and migrates older ones forward.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // MasterKeyLen is the length of a folder master key.
 const MasterKeyLen = crypto.MasterKeyLen
@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS folders (
 	kdf_mem_kib    INTEGER,
 	kdf_threads    INTEGER,
 	created_ms     INTEGER NOT NULL,
-	share_id       TEXT    NOT NULL DEFAULT ''
+	share_id       TEXT    NOT NULL DEFAULT '',
+	holder         INTEGER NOT NULL DEFAULT 0
 );`
 
 // Folder is a registered sync folder.
@@ -69,6 +70,9 @@ type Folder struct {
 	// ShareID is the cross-node match key agreed at pairing, distinct from ID and the
 	// encryption key. Empty until the folder is paired.
 	ShareID string
+	// Holder marks a folder this node stores only as untrusted ciphertext: it keeps
+	// blinded blobs and never holds the key, a root tree, or plaintext.
+	Holder bool
 }
 
 // Store is the config database handle.
@@ -154,6 +158,11 @@ func migrate(ctx context.Context, tx *storage.Tx, from int) error {
 			return fmt.Errorf("config: migrate v3: %w", err)
 		}
 	}
+	if from < 4 {
+		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN holder INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("config: migrate v4: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE meta SET value = ? WHERE key = 'schema_version'`, SchemaVersion); err != nil {
 		return fmt.Errorf("config: set version: %w", err)
 	}
@@ -175,8 +184,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 			return fmt.Errorf("config: check folder: %w", err)
 		}
 		_, err = tx.Exec(ctx,
-			`INSERT INTO folders (id, root, encrypted, created_ms, share_id) VALUES (?, ?, ?, ?, ?)`,
-			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID)
+			`INSERT INTO folders (id, root, encrypted, created_ms, share_id, holder) VALUES (?, ?, ?, ?, ?, ?)`,
+			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID, f.Holder)
 		if err != nil {
 			return fmt.Errorf("config: add folder: %w", err)
 		}
@@ -187,8 +196,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 // GetFolder returns the folder with the given id.
 func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 	var f Folder
-	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id FROM folders WHERE id = ?`, id).
-		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID)
+	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id, holder FROM folders WHERE id = ?`, id).
+		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Folder{}, ErrFolderNotFound
@@ -200,7 +209,7 @@ func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 
 // ListFolders returns all registered folders ordered by id.
 func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id FROM folders ORDER BY id`)
+	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id, holder FROM folders ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("config: list folders: %w", err)
 	}
@@ -209,7 +218,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
 	for rows.Next() {
 		var f Folder
-		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID); err != nil {
+		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder); err != nil {
 			return nil, fmt.Errorf("config: scan folder: %w", err)
 		}
 		out = append(out, f)
