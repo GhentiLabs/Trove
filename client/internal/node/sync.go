@@ -257,19 +257,25 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				_ = eng.Drive(sctx)
 			}()
 		}
-		if held := rt.sharedHolderStores(shared); len(held) > 0 && eng == nil {
-			srv := holder.NewServer(held, rt.holderPutAllowed, log)
+		if held := rt.sharedHolderStores(shared); len(held) > 0 {
+			if eng != nil {
+				log.Warn("node: holder serving suppressed on a session that also syncs", "peer", peerID)
+			} else {
+				srv := holder.NewServer(held, rt.holderPutAllowed, log)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					srv.Serve(sctx, sess.Conn())
+				}()
+			}
+		}
+		if len(rt.folders) > 0 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				srv.Serve(sctx, sess.Conn())
+				rt.pushToHolders(sctx, log, sess, shared)
 			}()
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rt.pushToHolders(sctx, log, sess, shared)
-		}()
 		return func() {
 			cancel()
 			wg.Wait()
@@ -290,8 +296,8 @@ func (rt *syncRuntime) sharedHolderStores(shared map[string]bool) map[string]*ho
 }
 
 // holderPutAllowed authorizes a peer to store blobs on this holder: only a roster writer.
-func (rt *syncRuntime) holderPutAllowed(folderID, peerID string) (bool, error) {
-	return rt.isWriter(context.Background(), folderID, peerID)
+func (rt *syncRuntime) holderPutAllowed(ctx context.Context, folderID, peerID string) (bool, error) {
+	return rt.isWriter(ctx, folderID, peerID)
 }
 
 // pushToHolders exports each shared encrypted folder this node writes to any peer that is

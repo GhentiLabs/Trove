@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 )
@@ -12,14 +13,14 @@ import (
 // this holder keeps. It holds no key and serves only opaque ciphertext.
 type Server struct {
 	stores   map[string]*Store
-	allowPut func(folderID, peerID string) (bool, error)
+	allowPut func(ctx context.Context, folderID, peerID string) (bool, error)
 	log      *slog.Logger
+	wg       sync.WaitGroup
 }
 
 // NewServer builds a holder server over folderID->store. allowPut authorizes a peer to
-// store blobs for a folder (a writer); nil allows any connected peer. Reads are open to
-// any connected peer, since the session already authorized folder membership.
-func NewServer(stores map[string]*Store, allowPut func(folderID, peerID string) (bool, error), log *slog.Logger) *Server {
+// store blobs for a folder; nil allows any connected peer.
+func NewServer(stores map[string]*Store, allowPut func(ctx context.Context, folderID, peerID string) (bool, error), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -27,18 +28,19 @@ func NewServer(stores map[string]*Store, allowPut func(folderID, peerID string) 
 }
 
 // Serve accepts streams on conn and answers each as a blind get or put until ctx is
-// cancelled or the connection closes.
+// cancelled or the connection closes, then waits for in-flight requests to finish.
 func (s *Server) Serve(ctx context.Context, conn netio.Conn) {
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
+			s.wg.Wait()
 			return
 		}
-		go s.handle(stream, conn.PeerNodeID())
+		s.wg.Go(func() { s.handle(ctx, stream, conn.PeerNodeID()) })
 	}
 }
 
-func (s *Server) handle(stream netio.Stream, peerID string) {
+func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string) {
 	defer func() { _ = stream.Close() }()
 	op, folderID, blinded, payload, err := readRequest(stream)
 	if err != nil {
@@ -63,7 +65,7 @@ func (s *Server) handle(stream netio.Stream, peerID string) {
 			_ = writeResponse(stream, StatusOK, data)
 		}
 	case opPut:
-		if !s.putAllowed(folderID, peerID) {
+		if !s.putAllowed(ctx, folderID, peerID) {
 			s.log.Warn("holder: rejecting put from unauthorized peer", "folder", folderID, "peer", peerID)
 			_ = writeResponse(stream, StatusError, nil)
 			return
@@ -77,11 +79,11 @@ func (s *Server) handle(stream netio.Stream, peerID string) {
 	}
 }
 
-func (s *Server) putAllowed(folderID, peerID string) bool {
+func (s *Server) putAllowed(ctx context.Context, folderID, peerID string) bool {
 	if s.allowPut == nil {
 		return true
 	}
-	ok, err := s.allowPut(folderID, peerID)
+	ok, err := s.allowPut(ctx, folderID, peerID)
 	if err != nil {
 		s.log.Warn("holder: put authorization", "folder", folderID, "peer", peerID, "err", err)
 		return false

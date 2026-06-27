@@ -160,7 +160,7 @@ func TestHolderPutAllowedOnlyForWriters(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := rt.holderPutAllowed(group, tc.peerID)
+			got, err := rt.holderPutAllowed(ctx, group, tc.peerID)
 			if err != nil {
 				t.Fatalf("holderPutAllowed: %v", err)
 			}

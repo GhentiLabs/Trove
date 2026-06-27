@@ -10,12 +10,8 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 )
 
-// catalogDomain prefixes the encoded catalog so a malformed or wrong-key decode (the
-// AEAD already guards integrity) fails fast rather than producing garbage manifests.
 const catalogDomain = "trove/holder/catalog/v1\x00"
 
-// maxCatalogEntries and maxCatalogChunks bound a decoded catalog so a corrupt blob
-// cannot drive an unbounded allocation.
 const (
 	maxCatalogEntries = 1 << 24
 	maxCatalogChunks  = 1 << 28

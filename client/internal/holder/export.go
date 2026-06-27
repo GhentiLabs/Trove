@@ -11,8 +11,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
-// catalogID is the fixed content id of the sealed catalog blob; the holder stores it
-// under BlindID(masterKey, catalogID) and a restorer fetches it to enumerate the tree.
+// catalogID is the fixed content id of the sealed catalog blob.
 var catalogID = hasher.Sum([]byte("trove/holder/catalog/v1"))
 
 // PutBlob stores one opaque blob under its blinded id on a holder.
