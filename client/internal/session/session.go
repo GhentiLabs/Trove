@@ -3,6 +3,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,9 @@ func (s State) String() string {
 type Folder struct {
 	ShareID   string
 	Encrypted bool
+	// Verifier is the non-secret key-mismatch token for an encrypted folder, empty
+	// when this node holds no key for it yet.
+	Verifier []byte
 }
 
 // Local identifies this node for the Hello and the folders it offers.
@@ -173,11 +177,15 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 	if keepalive <= 0 {
 		keepalive = DefaultKeepaliveInterval
 	}
+	shared, mismatched := intersectFolders(offered, peerCfg)
+	if len(mismatched) > 0 {
+		log.Warn("session: refusing folders on key mismatch", "peer", peerID, "folders", mismatched)
+	}
 	s := &Session{
 		conn:       cfg.Conn,
 		ctrl:       ctrl,
 		peerNodeID: peerID,
-		shared:     intersectFolders(offered, peerCfg),
+		shared:     shared,
 		keepalive:  keepalive,
 		started:    time.Now(),
 		log:        log,
@@ -241,9 +249,10 @@ func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
 	folders := make([]*wirepb.Folder, 0, len(offered))
 	for _, f := range offered {
 		folders = append(folders, &wirepb.Folder{
-			FolderId:   f.ShareID,
-			FolderType: wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
-			Encrypted:  f.Encrypted,
+			FolderId:           f.ShareID,
+			FolderType:         wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
+			Encrypted:          f.Encrypted,
+			EncryptionVerifier: f.Verifier,
 		})
 	}
 	return &wirepb.NetworkConfig{Folders: folders}
@@ -279,21 +288,31 @@ func readNetworkConfig(ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
 	return msg.(*wirepb.NetworkConfig), nil
 }
 
-func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) []string {
+// intersectFolders returns the folder ids both sides offer, excluding any
+// encrypted folder whose verifiers prove a key mismatch; the excluded ids are
+// returned separately so the caller can surface the mismatch.
+func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) (shared, mismatched []string) {
+	peerVerifier := make(map[string][]byte, len(peer.GetFolders()))
 	peerSet := make(map[string]struct{}, len(peer.GetFolders()))
 	for _, f := range peer.GetFolders() {
 		if id := f.GetFolderId(); id != "" {
 			peerSet[id] = struct{}{}
+			peerVerifier[id] = f.GetEncryptionVerifier()
 		}
 	}
-	var out []string
 	for _, f := range offered {
-		if _, ok := peerSet[f.ShareID]; ok {
-			out = append(out, f.ShareID)
+		if _, ok := peerSet[f.ShareID]; !ok {
+			continue
 		}
+		if pv := peerVerifier[f.ShareID]; len(f.Verifier) > 0 && len(pv) > 0 && !bytes.Equal(f.Verifier, pv) {
+			mismatched = append(mismatched, f.ShareID)
+			continue
+		}
+		shared = append(shared, f.ShareID)
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(shared)
+	sort.Strings(mismatched)
+	return shared, mismatched
 }
 
 // PeerNodeID is the authenticated peer identity.

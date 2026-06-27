@@ -142,6 +142,7 @@ func cmdFound(args []string) error {
 	fs := flag.NewFlagSet("found", flag.ContinueOnError)
 	dir := fs.String("dir", ".trove", "state directory")
 	root := fs.String("root", "", "local folder root to share")
+	encrypted := fs.Bool("encrypted", false, "encrypt the folder at rest and on untrusted holders")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -158,10 +159,18 @@ func cmdFound(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group}); err != nil {
+	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted}); err != nil {
 		return err
 	}
 	fmt.Println("group id:", group)
+	if *encrypted {
+		key, err := p.cfg.GenerateFolderKey(ctx, group)
+		if err != nil {
+			return err
+		}
+		fmt.Println("recovery code:", config.EncodeRecoveryCode(key))
+		fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
+	}
 	fmt.Println("share this id with members; collect their `identity` output to invite them")
 	return nil
 }

@@ -7,6 +7,27 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
 )
 
+func TestFolderVerifier(t *testing.T) {
+	var a, b [MasterKeyLen]byte
+	for i := range a {
+		a[i] = byte(i)
+		b[i] = byte(255 - i)
+	}
+	v := FolderVerifier(a, "folder-1")
+	if len(v) != VerifierLen {
+		t.Fatalf("verifier len = %d, want %d", len(v), VerifierLen)
+	}
+	if !bytes.Equal(v, FolderVerifier(a, "folder-1")) {
+		t.Fatal("verifier not deterministic")
+	}
+	if bytes.Equal(v, FolderVerifier(b, "folder-1")) {
+		t.Fatal("different keys produced the same verifier")
+	}
+	if bytes.Equal(v, FolderVerifier(a, "folder-2")) {
+		t.Fatal("different folder ids produced the same verifier")
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	var master [MasterKeyLen]byte
 	for i := range master {

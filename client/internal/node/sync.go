@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
+	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/scanner"
@@ -65,8 +67,17 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 		if f.Root == "" {
 			return nil, fmt.Errorf("node: folder %q has no root configured", f.ShareID)
 		}
+		var fctx chunkstore.FolderContext
 		if f.Encrypted {
-			return nil, fmt.Errorf("node: folder %q is encrypted; encrypted folders are not yet supported", f.ShareID)
+			switch key, _, err := s.opts.Config.GetFolderKey(ctx, f.ID); {
+			case err == nil:
+				fctx = chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+			case errors.Is(err, config.ErrNoKey):
+				s.log.Info("node: encrypted folder awaiting key", "folder", f.ShareID)
+				continue
+			default:
+				return nil, fmt.Errorf("node: folder %q key: %w", f.ShareID, err)
+			}
 		}
 		dir := filepath.Join(s.opts.StateDir, "folders", f.ID)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -93,7 +104,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 		rt.closers = append(rt.closers, cs.Close)
 		role := folderRole(ctx, s.members, s.opts.NodeID, f.ShareID)
 		fc := syncengine.FolderConfig{
-			FolderID: f.ShareID, Role: role, Root: f.Root, Model: ms, Chunks: cs,
+			FolderID: f.ShareID, Role: role, Root: f.Root, Model: ms, Chunks: cs, FolderCtx: fctx,
 		}
 		fc.Coord = syncengine.NewCoordinator(f.ShareID, fc.FolderCtx, cs, 0, s.log)
 		rt.folders = append(rt.folders, fc)

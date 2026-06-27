@@ -211,17 +211,19 @@ func (x *Header) GetCompression() uint32 {
 
 // Folder is one folder a peer offers in its NetworkConfig. Folders match across
 // nodes solely by folder_id (the shared string agreed at pairing), independent of
-// the encryption key. Tag 6 is reserved for the M6 key-agreement token
-// (encryption_password_token).
+// the encryption key. encryption_verifier is a non-secret token derived from the
+// folder key (empty when the peer holds no key); two key-holders refuse to sync a
+// folder whose verifiers differ, surfacing a key mismatch instead of corrupting.
 type Folder struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	FolderId          string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
-	FolderType        FolderType             `protobuf:"varint,2,opt,name=folder_type,json=folderType,proto3,enum=trove.wire.v1.FolderType" json:"folder_type,omitempty"`
-	Encrypted         bool                   `protobuf:"varint,3,opt,name=encrypted,proto3" json:"encrypted,omitempty"`
-	IndexEpochId      uint64                 `protobuf:"varint,4,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
-	HighWaterSequence int64                  `protobuf:"varint,5,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	FolderId           string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	FolderType         FolderType             `protobuf:"varint,2,opt,name=folder_type,json=folderType,proto3,enum=trove.wire.v1.FolderType" json:"folder_type,omitempty"`
+	Encrypted          bool                   `protobuf:"varint,3,opt,name=encrypted,proto3" json:"encrypted,omitempty"`
+	IndexEpochId       uint64                 `protobuf:"varint,4,opt,name=index_epoch_id,json=indexEpochId,proto3" json:"index_epoch_id,omitempty"`
+	HighWaterSequence  int64                  `protobuf:"varint,5,opt,name=high_water_sequence,json=highWaterSequence,proto3" json:"high_water_sequence,omitempty"`
+	EncryptionVerifier []byte                 `protobuf:"bytes,6,opt,name=encryption_verifier,json=encryptionVerifier,proto3" json:"encryption_verifier,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Folder) Reset() {
@@ -287,6 +289,13 @@ func (x *Folder) GetHighWaterSequence() int64 {
 		return x.HighWaterSequence
 	}
 	return 0
+}
+
+func (x *Folder) GetEncryptionVerifier() []byte {
+	if x != nil {
+		return x.EncryptionVerifier
+	}
+	return nil
 }
 
 // NetworkConfig is the first post-Hello message, sent exactly once each way. The
@@ -1091,14 +1100,15 @@ const file_wire_proto_rawDesc = "" +
 	"\x0eclient_version\x18\x05 \x01(\tR\rclientVersion\">\n" +
 	"\x06Header\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\rR\x04type\x12 \n" +
-	"\vcompression\x18\x02 \x01(\rR\vcompression\"\xdb\x01\n" +
+	"\vcompression\x18\x02 \x01(\rR\vcompression\"\x86\x02\n" +
 	"\x06Folder\x12\x1b\n" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12:\n" +
 	"\vfolder_type\x18\x02 \x01(\x0e2\x19.trove.wire.v1.FolderTypeR\n" +
 	"folderType\x12\x1c\n" +
 	"\tencrypted\x18\x03 \x01(\bR\tencrypted\x12$\n" +
 	"\x0eindex_epoch_id\x18\x04 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x05 \x01(\x03R\x11highWaterSequenceJ\x04\b\x06\x10\a\"F\n" +
+	"\x13high_water_sequence\x18\x05 \x01(\x03R\x11highWaterSequence\x12/\n" +
+	"\x13encryption_verifier\x18\x06 \x01(\fR\x12encryptionVerifier\"F\n" +
 	"\rNetworkConfig\x12/\n" +
 	"\afolders\x18\x01 \x03(\v2\x15.trove.wire.v1.FolderR\afoldersJ\x04\b\x03\x10\x04\"\xc0\x01\n" +
 	"\rFolderSummary\x12\x1b\n" +

@@ -38,7 +38,13 @@ const (
 var (
 	hkdfLabel = []byte("trove/chunk/v1")
 	hkdfSalt  = []byte("trove/chunk-keys")
+
+	verifyLabel = []byte("trove/folder/verify/v1")
+	verifySalt  = []byte("trove/folder-verify")
 )
+
+// VerifierLen is the length of a folder key-mismatch verifier.
+const VerifierLen = 32
 
 func deriveKeyNonce(master [MasterKeyLen]byte, id hasher.ChunkID) (key [chacha20poly1305.KeySize]byte, nonce [chacha20poly1305.NonceSize]byte) {
 	info := make([]byte, 0, len(id)+len(hkdfLabel))
@@ -77,6 +83,21 @@ func Open(master [MasterKeyLen]byte, id hasher.ChunkID, ciphertext []byte) ([]by
 		return nil, fmt.Errorf("crypto: open: %w", err)
 	}
 	return out, nil
+}
+
+// FolderVerifier derives a non-secret token from the folder master key, used to
+// detect a key mismatch between members before syncing. A peer without the key
+// cannot reproduce it; two peers with the same key produce the same token.
+func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
+	info := make([]byte, 0, len(verifyLabel)+len(folderID))
+	info = append(info, verifyLabel...)
+	info = append(info, folderID...)
+	r := hkdf.New(sha256.New, master[:], verifySalt, info)
+	out := make([]byte, VerifierLen)
+	if _, err := io.ReadFull(r, out); err != nil {
+		panic(fmt.Sprintf("crypto: hkdf verifier: %v", err))
+	}
+	return out
 }
 
 // DeriveMasterKey derives a folder master key from a passphrase and salt via Argon2id.

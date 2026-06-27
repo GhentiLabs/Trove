@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/storage"
@@ -84,10 +85,10 @@ func TestFolderKeys(t *testing.T) {
 		t.Fatalf("AddFolder: %v", err)
 	}
 
-	if _, err := s.GetFolderKey(ctx, "f"); !errors.Is(err, ErrNoKey) {
+	if _, _, err := s.GetFolderKey(ctx, "f"); !errors.Is(err, ErrNoKey) {
 		t.Fatalf("GetFolderKey before set err = %v, want ErrNoKey", err)
 	}
-	if _, err := s.GetFolderKey(ctx, "missing"); !errors.Is(err, ErrFolderNotFound) {
+	if _, _, err := s.GetFolderKey(ctx, "missing"); !errors.Is(err, ErrFolderNotFound) {
 		t.Fatalf("GetFolderKey(missing) err = %v, want ErrFolderNotFound", err)
 	}
 	if _, err := s.GenerateFolderKey(ctx, "missing"); !errors.Is(err, ErrFolderNotFound) {
@@ -98,12 +99,15 @@ func TestFolderKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateFolderKey: %v", err)
 	}
-	got, err := s.GetFolderKey(ctx, "f")
+	got, generation, err := s.GetFolderKey(ctx, "f")
 	if err != nil {
 		t.Fatalf("GetFolderKey: %v", err)
 	}
 	if got != gen {
 		t.Fatal("stored key does not match generated key")
+	}
+	if generation != FirstKeyGeneration {
+		t.Fatalf("key generation = %d, want %d", generation, FirstKeyGeneration)
 	}
 
 	if err := s.AddFolder(ctx, Folder{ID: "g", Root: "/g", Encrypted: true}); err != nil {
@@ -116,12 +120,58 @@ func TestFolderKeys(t *testing.T) {
 	if derived == gen {
 		t.Fatal("derived key collided with previous random key")
 	}
-	got, err = s.GetFolderKey(ctx, "g")
+	got, _, err = s.GetFolderKey(ctx, "g")
 	if err != nil {
 		t.Fatalf("GetFolderKey after derive: %v", err)
 	}
 	if got != derived {
 		t.Fatal("stored key does not match derived key")
+	}
+}
+
+func TestRecoveryCodeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+	if err := s.AddFolder(ctx, Folder{ID: "f", Root: "/f", Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	key, err := s.GenerateFolderKey(ctx, "f")
+	if err != nil {
+		t.Fatalf("GenerateFolderKey: %v", err)
+	}
+	code := EncodeRecoveryCode(key)
+	back, err := DecodeRecoveryCode(code)
+	if err != nil {
+		t.Fatalf("DecodeRecoveryCode: %v", err)
+	}
+	if back != key {
+		t.Fatal("recovery code did not round-trip to the master key")
+	}
+	if _, err := DecodeRecoveryCode("not base32!!"); err == nil {
+		t.Fatal("DecodeRecoveryCode accepted invalid input")
+	}
+	if _, err := DecodeRecoveryCode(strings.ToLower(code)); err != nil {
+		t.Fatalf("DecodeRecoveryCode rejected lowercased code: %v", err)
+	}
+}
+
+func TestSetFolderKeyGeneration(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+	if err := s.AddFolder(ctx, Folder{ID: "f", Root: "/f", Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	var key [MasterKeyLen]byte
+	key[0] = 0x42
+	if err := s.SetFolderKey(ctx, "f", key, 7); err != nil {
+		t.Fatalf("SetFolderKey: %v", err)
+	}
+	got, gen, err := s.GetFolderKey(ctx, "f")
+	if err != nil {
+		t.Fatalf("GetFolderKey: %v", err)
+	}
+	if got != key || gen != 7 {
+		t.Fatalf("got key=%x gen=%d, want key=%x gen=7", got, gen, key)
 	}
 }
 
