@@ -86,8 +86,7 @@ func Open(master [MasterKeyLen]byte, id hasher.ChunkID, ciphertext []byte) ([]by
 }
 
 // FolderVerifier derives a non-secret token from the folder master key, used to
-// detect a key mismatch between members before syncing. A peer without the key
-// cannot reproduce it; two peers with the same key produce the same token.
+// detect a key mismatch between members before syncing.
 func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 	info := make([]byte, 0, len(verifyLabel)+len(folderID))
 	info = append(info, verifyLabel...)

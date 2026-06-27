@@ -24,10 +24,12 @@ const chunkAttemptTimeout = 15 * time.Second
 // supplier. It also fans a local-change notification out to every session (push).
 type Coordinator struct {
 	folderID string
-	fc       chunkstore.FolderContext
 	chunks   *chunkstore.Store
 	inflight int
 	log      *slog.Logger
+
+	fcMu sync.RWMutex
+	fc   chunkstore.FolderContext
 
 	mu      sync.Mutex
 	sources map[string]netio.Conn
@@ -52,6 +54,20 @@ func NewCoordinator(folderID string, fc chunkstore.FolderContext, chunks *chunks
 		sources:    make(map[string]netio.Conn),
 		announcers: make(map[int]func()),
 	}
+}
+
+// SetFolderContext updates the encryption context used when storing pulled chunks,
+// so a folder whose key arrives after startup begins sealing once it is delivered.
+func (c *Coordinator) SetFolderContext(fc chunkstore.FolderContext) {
+	c.fcMu.Lock()
+	c.fc = fc
+	c.fcMu.Unlock()
+}
+
+func (c *Coordinator) folderCtx() chunkstore.FolderContext {
+	c.fcMu.RLock()
+	defer c.fcMu.RUnlock()
+	return c.fc
 }
 
 // OnAnnounce registers fn to run whenever the folder's local state changes, so every
@@ -258,7 +274,7 @@ func (c *Coordinator) fetchFrom(ctx context.Context, conn netio.Conn, id hasher.
 	if hasher.Sum(buf) != id {
 		return fmt.Errorf("%w: %s", errChunkVerify, id)
 	}
-	if _, err := c.chunks.Put(ctx, c.fc, buf); err != nil {
+	if _, err := c.chunks.Put(ctx, c.folderCtx(), buf); err != nil {
 		return fmt.Errorf("syncengine: store chunk %s: %w", id, err)
 	}
 	return nil

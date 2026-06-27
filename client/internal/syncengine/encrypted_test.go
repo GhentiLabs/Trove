@@ -25,8 +25,8 @@ func encrypt(p *peer, key [crypto.MasterKeyLen]byte) {
 	p.fc = chunkstore.FolderContext{Encrypted: true, MasterKey: key}
 }
 
-// TestEncryptedFolderConvergesBitExact is the Phase A headline: two peers sharing a
-// folder key sync an encrypted folder bit-exact, and the chunks land sealed at rest.
+// TestEncryptedFolderConvergesBitExact syncs an encrypted folder between two peers
+// sharing a key, bit-exact, with the chunks landing sealed at rest on both.
 func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
@@ -50,9 +50,9 @@ func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 	assertChunkSealedAtRest(t, replica, []byte("hello world"), key)
 }
 
-// TestEncryptedSnapshotRootMatchesPlaintext is the frozen-contract guardrail:
-// encrypting a folder must not change any history hash, so the same tree scanned
-// encrypted and unencrypted yields a byte-identical snapshot root.
+// TestEncryptedSnapshotRootMatchesPlaintext checks that encrypting a folder changes
+// no history hash: the same tree scanned encrypted and unencrypted yields a
+// byte-identical snapshot root.
 func TestEncryptedSnapshotRootMatchesPlaintext(t *testing.T) {
 	plain := newPeer(t, ownerID)
 	sealed := newPeer(t, ownerID)

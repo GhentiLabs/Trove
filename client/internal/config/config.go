@@ -246,15 +246,7 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 }
 
 // FirstKeyGeneration is the epoch stamped when a folder key is first established.
-// Rotation, which would advance it, is deferred.
 const FirstKeyGeneration = 1
-
-// SetFolderKey stores an explicit master key and its generation for a folder,
-// clearing any recorded passphrase-derivation parameters. It is the sink for a
-// key delivered by a trusted member over the session.
-func (s *Store) SetFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte, generation int) error {
-	return s.updateKey(ctx, id, key[:], generation, nil, nil, nil, nil)
-}
 
 // GenerateFolderKey mints a random master key for a folder and stores it. It
 // refuses to overwrite an existing key (use SetFolderKey to replace one).
@@ -263,10 +255,17 @@ func (s *Store) GenerateFolderKey(ctx context.Context, id string) ([MasterKeyLen
 	if _, err := rand.Read(key[:]); err != nil {
 		return [MasterKeyLen]byte{}, fmt.Errorf("config: generate key: %w", err)
 	}
-	if err := s.setKeyIfAbsent(ctx, id, key[:], nil, nil, nil, nil); err != nil {
+	if err := s.setKeyIfAbsent(ctx, id, key[:], FirstKeyGeneration, nil, nil, nil, nil); err != nil {
 		return [MasterKeyLen]byte{}, err
 	}
 	return key, nil
+}
+
+// DeliverFolderKey stores a key received from a trusted member, only if the folder
+// has none yet. A replayed or duplicate delivery returns ErrKeyExists, which the
+// caller treats as already-keyed; it never clobbers a stored key.
+func (s *Store) DeliverFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte, generation int) error {
+	return s.setKeyIfAbsent(ctx, id, key[:], generation, nil, nil, nil, nil)
 }
 
 // DeriveFolderKey derives a folder master key from a passphrase via Argon2id,
@@ -279,15 +278,15 @@ func (s *Store) DeriveFolderKey(ctx context.Context, id, passphrase string) ([Ma
 	}
 	key := crypto.DeriveMasterKey(passphrase, salt)
 	t, m, p := int64(crypto.ArgonTime), int64(crypto.ArgonMemoryKiB), int64(crypto.ArgonThreads)
-	if err := s.setKeyIfAbsent(ctx, id, key[:], salt, &t, &m, &p); err != nil {
+	if err := s.setKeyIfAbsent(ctx, id, key[:], FirstKeyGeneration, salt, &t, &m, &p); err != nil {
 		return [MasterKeyLen]byte{}, err
 	}
 	return key, nil
 }
 
-// setKeyIfAbsent writes a first-generation key only if the folder exists and has
-// none, in one transaction so concurrent callers cannot both succeed.
-func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte, t, m, p *int64) error {
+// setKeyIfAbsent writes a key only if the folder exists and has none, in one
+// transaction so concurrent callers cannot both succeed.
+func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key []byte, generation int, salt []byte, t, m, p *int64) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		var existing []byte
 		err := tx.QueryRow(ctx, `SELECT master_key FROM folders WHERE id = ?`, id).Scan(&existing)
@@ -301,24 +300,9 @@ func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte,
 		}
 		_, err = tx.Exec(ctx,
 			`UPDATE folders SET master_key = ?, key_generation = ?, kdf_salt = ?, kdf_time = ?, kdf_mem_kib = ?, kdf_threads = ? WHERE id = ?`,
-			key, FirstKeyGeneration, salt, t, m, p, id)
-		if err != nil {
-			return fmt.Errorf("config: set key: %w", err)
-		}
-		return nil
-	})
-}
-
-func (s *Store) updateKey(ctx context.Context, id string, key []byte, generation int, salt []byte, t, m, p *int64) error {
-	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		res, err := tx.Exec(ctx,
-			`UPDATE folders SET master_key = ?, key_generation = ?, kdf_salt = ?, kdf_time = ?, kdf_mem_kib = ?, kdf_threads = ? WHERE id = ?`,
 			key, generation, salt, t, m, p, id)
 		if err != nil {
 			return fmt.Errorf("config: set key: %w", err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return ErrFolderNotFound
 		}
 		return nil
 	})
@@ -347,7 +331,6 @@ func (s *Store) GetFolderKey(ctx context.Context, id string) ([MasterKeyLen]byte
 	return key, gen, nil
 }
 
-// recoveryEncoding renders a 32-byte key as an unpadded, uppercase base32 code.
 var recoveryEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // EncodeRecoveryCode renders a folder master key as a base32 recovery code.

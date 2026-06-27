@@ -30,8 +30,26 @@ import (
 type syncRuntime struct {
 	self    string
 	members *membership.Store
+	cfg     *config.Store
 	folders []syncengine.FolderConfig
+	byShare map[string]config.Folder
 	closers []func() error
+}
+
+// isWriter reports whether nodeID may originate edits in groupID: the founder always
+// can, any other node only with the writer tier in the roster.
+func (rt *syncRuntime) isWriter(ctx context.Context, groupID, nodeID string) (bool, error) {
+	if nodeID == "" {
+		return false, nil
+	}
+	if founder, ok := membership.Founder(groupID); ok && founder == nodeID {
+		return true, nil
+	}
+	role, ok, err := rt.members.RoleOf(ctx, groupID, nodeID)
+	if err != nil {
+		return false, err
+	}
+	return ok && role == membership.RoleWriter, nil
 }
 
 // folderRole is this node's tier for a group: a writer originates local edits, a
@@ -53,7 +71,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &syncRuntime{self: s.opts.NodeID, members: s.members}
+	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, byShare: map[string]config.Folder{}}
 	ok := false
 	defer func() {
 		if !ok {
@@ -67,17 +85,9 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 		if f.Root == "" {
 			return nil, fmt.Errorf("node: folder %q has no root configured", f.ShareID)
 		}
-		var fctx chunkstore.FolderContext
-		if f.Encrypted {
-			switch key, _, err := s.opts.Config.GetFolderKey(ctx, f.ID); {
-			case err == nil:
-				fctx = chunkstore.FolderContext{Encrypted: true, MasterKey: key}
-			case errors.Is(err, config.ErrNoKey):
-				s.log.Info("node: encrypted folder awaiting key", "folder", f.ShareID)
-				continue
-			default:
-				return nil, fmt.Errorf("node: folder %q key: %w", f.ShareID, err)
-			}
+		fctx, err := rt.folderContext(ctx, f)
+		if err != nil {
+			return nil, err
 		}
 		dir := filepath.Join(s.opts.StateDir, "folders", f.ID)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -103,14 +113,36 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 		}
 		rt.closers = append(rt.closers, cs.Close)
 		role := folderRole(ctx, s.members, s.opts.NodeID, f.ShareID)
+		shareID := f.ShareID
 		fc := syncengine.FolderConfig{
-			FolderID: f.ShareID, Role: role, Root: f.Root, Model: ms, Chunks: cs, FolderCtx: fctx,
+			FolderID: shareID, Role: role, Root: f.Root, Model: ms, Chunks: cs, FolderCtx: fctx,
+			AuthorWriter: func(ctx context.Context, nodeID string) (bool, error) {
+				return rt.isWriter(ctx, shareID, nodeID)
+			},
 		}
-		fc.Coord = syncengine.NewCoordinator(f.ShareID, fc.FolderCtx, cs, 0, s.log)
+		fc.Coord = syncengine.NewCoordinator(shareID, fc.FolderCtx, cs, 0, s.log)
 		rt.folders = append(rt.folders, fc)
+		rt.byShare[shareID] = f
 	}
 	ok = true
 	return rt, nil
+}
+
+// folderContext resolves a folder's encryption context. An encrypted folder whose key
+// has not yet been delivered gets an Encrypted context with no key; its engine stays
+// idle until onSession sees the key.
+func (rt *syncRuntime) folderContext(ctx context.Context, f config.Folder) (chunkstore.FolderContext, error) {
+	if !f.Encrypted {
+		return chunkstore.FolderContext{}, nil
+	}
+	switch key, _, err := rt.cfg.GetFolderKey(ctx, f.ID); {
+	case err == nil:
+		return chunkstore.FolderContext{Encrypted: true, MasterKey: key}, nil
+	case errors.Is(err, config.ErrNoKey):
+		return chunkstore.FolderContext{Encrypted: true}, nil
+	default:
+		return chunkstore.FolderContext{}, fmt.Errorf("node: folder %q key: %w", f.ShareID, err)
+	}
 }
 
 // repairFolders re-materializes out-of-band-deleted files for each folder from its
@@ -146,21 +178,23 @@ func (rt *syncRuntime) close() {
 	rt.closers = nil
 }
 
+// errReattachAfterKey ends a session once a folder key has just been delivered, so
+// the peer manager reconnects and onSession re-attaches the now-keyed folder.
+var errReattachAfterKey = errors.New("node: reattach after folder key delivery")
+
 // onSession returns a peermgr hook that, for each session, registers the peer with the
 // gossiper and (when the two share folders) attaches a sync engine. A composite control
-// handler routes membership gossip to the gossiper and everything else to the engine.
+// handler routes membership gossip to the gossiper, folder-key delivery to the key sink,
+// and everything else to the engine. Encrypted folders attach only once keyed.
 func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(context.Context, *session.Session) func() {
 	return func(ctx context.Context, sess *session.Session) func() {
+		peerID := sess.PeerNodeID()
 		shared := make(map[string]bool, len(sess.SharedFolders()))
 		for _, id := range sess.SharedFolders() {
 			shared[id] = true
 		}
-		var fcs []syncengine.FolderConfig
-		for _, fc := range rt.folders {
-			if shared[fc.FolderID] {
-				fcs = append(fcs, fc)
-			}
-		}
+		fcs, deliveries := rt.attachFolders(ctx, log, peerID, shared)
+
 		var eng *syncengine.Engine
 		if len(fcs) > 0 {
 			e, err := syncengine.New(syncengine.Options{Session: sess, Folders: fcs, Logger: log})
@@ -172,21 +206,31 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		}
 
 		gossip.addPeer(ctx, sess)
-		peerID := sess.PeerNodeID()
 		sess.SetControlHandler(func(hctx context.Context, typ wire.MessageType, msg proto.Message) error {
-			if typ == wire.TypeMembershipGossip {
+			switch typ {
+			case wire.TypeMembershipGossip:
 				gm, ok := msg.(*wirepb.MembershipGossip)
 				if !ok {
 					log.Warn("node: membership gossip with unexpected payload", "peer", peerID)
 					return nil
 				}
 				return gossip.handle(hctx, peerID, gm)
+			case wire.TypeFolderKey:
+				return rt.receiveFolderKey(hctx, log, peerID, msg.(*wirepb.FolderKey))
+			default:
+				if eng != nil {
+					return eng.Handle(hctx, typ, msg)
+				}
+				return nil
 			}
-			if eng != nil {
-				return eng.Handle(hctx, typ, msg)
-			}
-			return nil
 		})
+
+		for _, d := range deliveries {
+			if err := sess.Send(d); err != nil {
+				log.Debug("node: deliver folder key", "folder", d.GetFolderId(), "peer", peerID, "err", err)
+				break
+			}
+		}
 
 		var driveCancel context.CancelFunc
 		var driveWg sync.WaitGroup
@@ -207,6 +251,98 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			gossip.removePeer(peerID, sess)
 		}
 	}
+}
+
+// attachFolders resolves the shared folders for a session: it returns the engine
+// configs to attach (an encrypted folder is included only once its key is known, with
+// the live key threaded into its coordinator) and the folder keys to deliver to a
+// trusted peer that may still lack them.
+func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peerID string, shared map[string]bool) (fcs []syncengine.FolderConfig, deliveries []*wirepb.FolderKey) {
+	for _, fc := range rt.folders {
+		if !shared[fc.FolderID] {
+			continue
+		}
+		cf := rt.byShare[fc.FolderID]
+		if !cf.Encrypted {
+			fcs = append(fcs, fc)
+			continue
+		}
+		key, gen, err := rt.cfg.GetFolderKey(ctx, cf.ID)
+		if errors.Is(err, config.ErrNoKey) {
+			continue
+		}
+		if err != nil {
+			log.Warn("node: folder key", "folder", fc.FolderID, "err", err)
+			continue
+		}
+		fctx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+		fc.FolderCtx = fctx
+		fc.Coord.SetFolderContext(fctx)
+		fcs = append(fcs, fc)
+		if d := rt.deliverable(ctx, cf, peerID, key, gen); d != nil {
+			deliveries = append(deliveries, d)
+		}
+	}
+	return fcs, deliveries
+}
+
+// deliverable returns a folder-key message for peerID when this node is a writer able
+// to share the key and the peer is a trusted member; a holder or non-member gets nil.
+func (rt *syncRuntime) deliverable(ctx context.Context, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
+	if mine, err := rt.isWriter(ctx, cf.ShareID, rt.self); err != nil || !mine {
+		return nil
+	}
+	if trusted, err := rt.peerTrusted(ctx, cf.ShareID, peerID); err != nil || !trusted {
+		return nil
+	}
+	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: key[:], KeyGeneration: uint64(gen)}
+}
+
+// receiveFolderKey persists a key delivered by a roster writer for a folder this node
+// still lacks, then ends the session so it reconnects and attaches the folder. A
+// delivery from a non-writer, for an unknown or already-keyed folder, is ignored.
+func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey) error {
+	cf, ok := rt.byShare[fk.GetFolderId()]
+	if !ok || !cf.Encrypted {
+		return nil
+	}
+	switch okWriter, err := rt.isWriter(ctx, cf.ShareID, peerID); {
+	case err != nil:
+		log.Warn("node: folder key sender check", "folder", cf.ShareID, "peer", peerID, "err", err)
+		return nil
+	case !okWriter:
+		log.Warn("node: ignoring folder key from non-writer", "folder", cf.ShareID, "peer", peerID)
+		return nil
+	}
+	if len(fk.GetKey()) != config.MasterKeyLen {
+		log.Warn("node: folder key wrong length", "folder", cf.ShareID, "peer", peerID)
+		return nil
+	}
+	var key [config.MasterKeyLen]byte
+	copy(key[:], fk.GetKey())
+	switch err := rt.cfg.DeliverFolderKey(ctx, cf.ID, key, int(fk.GetKeyGeneration())); {
+	case err == nil:
+		log.Info("node: folder key received; reattaching", "folder", cf.ShareID, "peer", peerID)
+		return errReattachAfterKey
+	case errors.Is(err, config.ErrKeyExists):
+		return nil
+	default:
+		log.Warn("node: store delivered key", "folder", cf.ShareID, "peer", peerID, "err", err)
+		return nil
+	}
+}
+
+// peerTrusted reports whether nodeID is a reader or writer (or the founder) of groupID,
+// i.e. a member entitled to the folder key. A holder or non-member is not.
+func (rt *syncRuntime) peerTrusted(ctx context.Context, groupID, nodeID string) (bool, error) {
+	if founder, ok := membership.Founder(groupID); ok && founder == nodeID {
+		return true, nil
+	}
+	role, ok, err := rt.members.RoleOf(ctx, groupID, nodeID)
+	if err != nil {
+		return false, err
+	}
+	return ok && (role == membership.RoleWriter || role == membership.RoleReader), nil
 }
 
 const tombstoneSweepInterval = time.Hour

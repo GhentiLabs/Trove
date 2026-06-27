@@ -1003,6 +1003,69 @@ func (x *SyncReceipt) GetHighWaterSequence() int64 {
 	return 0
 }
 
+// FolderKey delivers an encrypted folder's master key to a trusted member over the
+// mutually-authenticated session. Only a roster writer's delivery is accepted, and a
+// holder is never sent one. The key never touches the discovery server.
+type FolderKey struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	KeyGeneration uint64                 `protobuf:"varint,3,opt,name=key_generation,json=keyGeneration,proto3" json:"key_generation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FolderKey) Reset() {
+	*x = FolderKey{}
+	mi := &file_wire_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FolderKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FolderKey) ProtoMessage() {}
+
+func (x *FolderKey) ProtoReflect() protoreflect.Message {
+	mi := &file_wire_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FolderKey.ProtoReflect.Descriptor instead.
+func (*FolderKey) Descriptor() ([]byte, []int) {
+	return file_wire_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *FolderKey) GetFolderId() string {
+	if x != nil {
+		return x.FolderId
+	}
+	return ""
+}
+
+func (x *FolderKey) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *FolderKey) GetKeyGeneration() uint64 {
+	if x != nil {
+		return x.KeyGeneration
+	}
+	return 0
+}
+
 // Ping is the idle-timer keepalive.
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1012,7 +1075,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1024,7 +1087,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[12]
+	mi := &file_wire_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1037,7 +1100,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{12}
+	return file_wire_proto_rawDescGZIP(), []int{13}
 }
 
 // Close requests a graceful shutdown.
@@ -1050,7 +1113,7 @@ type Close struct {
 
 func (x *Close) Reset() {
 	*x = Close{}
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1062,7 +1125,7 @@ func (x *Close) String() string {
 func (*Close) ProtoMessage() {}
 
 func (x *Close) ProtoReflect() protoreflect.Message {
-	mi := &file_wire_proto_msgTypes[13]
+	mi := &file_wire_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1075,7 +1138,7 @@ func (x *Close) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Close.ProtoReflect.Descriptor instead.
 func (*Close) Descriptor() ([]byte, []int) {
-	return file_wire_proto_rawDescGZIP(), []int{13}
+	return file_wire_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Close) GetReason() string {
@@ -1168,7 +1231,11 @@ const file_wire_proto_rawDesc = "" +
 	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12#\n" +
 	"\rsnapshot_root\x18\x02 \x01(\fR\fsnapshotRoot\x12$\n" +
 	"\x0eindex_epoch_id\x18\x03 \x01(\x04R\findexEpochId\x12.\n" +
-	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"\x06\n" +
+	"\x13high_water_sequence\x18\x04 \x01(\x03R\x11highWaterSequence\"a\n" +
+	"\tFolderKey\x12\x1b\n" +
+	"\tfolder_id\x18\x01 \x01(\tR\bfolderId\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\x12%\n" +
+	"\x0ekey_generation\x18\x03 \x01(\x04R\rkeyGeneration\"\x06\n" +
 	"\x04Ping\"\x1f\n" +
 	"\x05Close\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason*\x86\x01\n" +
@@ -1192,7 +1259,7 @@ func file_wire_proto_rawDescGZIP() []byte {
 }
 
 var file_wire_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_wire_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_wire_proto_goTypes = []any{
 	(FolderType)(0),          // 0: trove.wire.v1.FolderType
 	(*Hello)(nil),            // 1: trove.wire.v1.Hello
@@ -1207,8 +1274,9 @@ var file_wire_proto_goTypes = []any{
 	(*MembershipEntry)(nil),  // 10: trove.wire.v1.MembershipEntry
 	(*MembershipGossip)(nil), // 11: trove.wire.v1.MembershipGossip
 	(*SyncReceipt)(nil),      // 12: trove.wire.v1.SyncReceipt
-	(*Ping)(nil),             // 13: trove.wire.v1.Ping
-	(*Close)(nil),            // 14: trove.wire.v1.Close
+	(*FolderKey)(nil),        // 13: trove.wire.v1.FolderKey
+	(*Ping)(nil),             // 14: trove.wire.v1.Ping
+	(*Close)(nil),            // 15: trove.wire.v1.Close
 }
 var file_wire_proto_depIdxs = []int32{
 	0,  // 0: trove.wire.v1.Folder.folder_type:type_name -> trove.wire.v1.FolderType
@@ -1234,7 +1302,7 @@ func file_wire_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wire_proto_rawDesc), len(file_wire_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

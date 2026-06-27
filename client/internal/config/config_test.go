@@ -155,7 +155,7 @@ func TestRecoveryCodeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSetFolderKeyGeneration(t *testing.T) {
+func TestDeliverFolderKey(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
 	if err := s.AddFolder(ctx, Folder{ID: "f", Root: "/f", Encrypted: true}); err != nil {
@@ -163,8 +163,8 @@ func TestSetFolderKeyGeneration(t *testing.T) {
 	}
 	var key [MasterKeyLen]byte
 	key[0] = 0x42
-	if err := s.SetFolderKey(ctx, "f", key, 7); err != nil {
-		t.Fatalf("SetFolderKey: %v", err)
+	if err := s.DeliverFolderKey(ctx, "f", key, 7); err != nil {
+		t.Fatalf("DeliverFolderKey: %v", err)
 	}
 	got, gen, err := s.GetFolderKey(ctx, "f")
 	if err != nil {
@@ -172,6 +172,11 @@ func TestSetFolderKeyGeneration(t *testing.T) {
 	}
 	if got != key || gen != 7 {
 		t.Fatalf("got key=%x gen=%d, want key=%x gen=7", got, gen, key)
+	}
+	var other [MasterKeyLen]byte
+	other[0] = 0x99
+	if err := s.DeliverFolderKey(ctx, "f", other, 8); !errors.Is(err, ErrKeyExists) {
+		t.Fatalf("redelivery err = %v, want ErrKeyExists (must not clobber)", err)
 	}
 }
 

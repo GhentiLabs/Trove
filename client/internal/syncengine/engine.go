@@ -92,6 +92,10 @@ type FolderConfig struct {
 	Model     *model.Store
 	Chunks    *chunkstore.Store
 	Coord     *Coordinator
+	// AuthorWriter reports whether a manifest author holds write access per the roster.
+	// When set, an incoming manifest from a non-writer is rejected on apply. Nil disables
+	// the check (folders with no membership, e.g. tests).
+	AuthorWriter func(ctx context.Context, nodeID string) (bool, error)
 }
 
 // Options configures an Engine bound to one Active session.

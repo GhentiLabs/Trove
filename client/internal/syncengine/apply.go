@@ -20,10 +20,34 @@ import (
 // then the model commits and advances the cursor. The destination is never written
 // directly, and a crash before the commit re-applies idempotently on restart.
 func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, delta *wirepb.ManifestDelta) error {
+	batch = fs.writerAuthored(ctx, batch)
 	return fs.cfg.Model.ApplyRemote(ctx, fs.cfg.FolderID, fs.eng.sess.PeerNodeID(),
 		delta.GetIndexEpochId(), delta.GetHighWaterSequence(), batch, func(apply []model.RemoteManifest) error {
 			return fs.materializeBatch(ctx, apply)
 		})
+}
+
+// writerAuthored drops every manifest whose author lacks write access per the roster,
+// failing closed on a lookup error. The cursor still advances over the dropped
+// manifests, so a non-writer's edit is rejected, not endlessly re-requested.
+func (fs *folderState) writerAuthored(ctx context.Context, batch []model.RemoteManifest) []model.RemoteManifest {
+	if fs.cfg.AuthorWriter == nil {
+		return batch
+	}
+	out := make([]model.RemoteManifest, 0, len(batch))
+	for _, rm := range batch {
+		ok, err := fs.cfg.AuthorWriter(ctx, rm.Author)
+		if err != nil {
+			fs.eng.log.Warn("syncengine: author check failed, rejecting", "folder", fs.cfg.FolderID, "author", rm.Author, "err", err)
+			continue
+		}
+		if !ok {
+			fs.eng.log.Warn("syncengine: rejecting manifest from non-writer", "folder", fs.cfg.FolderID, "author", rm.Author, "path", rm.Manifest.Path)
+			continue
+		}
+		out = append(out, rm)
+	}
+	return out
 }
 
 func (fs *folderState) materializeBatch(ctx context.Context, batch []model.RemoteManifest) error {

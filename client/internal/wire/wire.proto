@@ -154,6 +154,15 @@ message SyncReceipt {
   int64 high_water_sequence = 4;
 }
 
+// FolderKey delivers an encrypted folder's master key to a trusted member over the
+// mutually-authenticated session. Only a roster writer's delivery is accepted, and a
+// holder is never sent one. The key never touches the discovery server.
+message FolderKey {
+  string folder_id = 1;
+  bytes key = 2;
+  uint64 key_generation = 3;
+}
+
 // Ping is the idle-timer keepalive.
 message Ping {}
 

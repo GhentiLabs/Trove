@@ -162,7 +162,8 @@ func TestSyncMessageRoundTrip(t *testing.T) {
 		}},
 	}
 	cases = append(cases, gossip)
-	wantTypes := []MessageType{TypeFolderSummary, TypeManifestRequest, TypeManifestDelta, TypeMembershipGossip}
+	cases = append(cases, &wirepb.FolderKey{FolderId: "docs", Key: bytes.Repeat([]byte{0x33}, 32), KeyGeneration: 1})
+	wantTypes := []MessageType{TypeFolderSummary, TypeManifestRequest, TypeManifestDelta, TypeMembershipGossip, TypeFolderKey}
 	for i, msg := range cases {
 		var buf bytes.Buffer
 		if err := WriteMessage(&buf, msg); err != nil {

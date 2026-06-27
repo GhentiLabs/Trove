@@ -288,9 +288,8 @@ func readNetworkConfig(ctrl netio.Stream) (*wirepb.NetworkConfig, error) {
 	return msg.(*wirepb.NetworkConfig), nil
 }
 
-// intersectFolders returns the folder ids both sides offer, excluding any
-// encrypted folder whose verifiers prove a key mismatch; the excluded ids are
-// returned separately so the caller can surface the mismatch.
+// intersectFolders returns the folder ids both sides offer in shared, and any
+// excluded for a proven encryption-key mismatch in mismatched.
 func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) (shared, mismatched []string) {
 	peerVerifier := make(map[string][]byte, len(peer.GetFolders()))
 	peerSet := make(map[string]struct{}, len(peer.GetFolders()))
