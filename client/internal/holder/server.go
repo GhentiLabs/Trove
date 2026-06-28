@@ -69,9 +69,53 @@ func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string)
 		s.serveGet(stream, s.stores[folderID], folderID)
 	case opHasBatch:
 		s.serveHasBatch(stream, s.stores[folderID], folderID)
+	case opList:
+		s.serveList(stream, s.stores[folderID], folderID)
 	case opPut:
 		s.servePut(ctx, stream, s.stores[folderID], folderID, peerID)
+	case opDelete:
+		s.serveDelete(ctx, stream, s.stores[folderID], folderID, peerID)
 	}
+}
+
+func (s *Server) serveList(stream netio.Stream, store *Store, folderID string) {
+	after, limit, err := readListBody(stream)
+	if err != nil {
+		s.log.Debug("holder: read list", "folder", folderID, "err", err)
+		return
+	}
+	if store == nil {
+		_ = writeResponse(stream, StatusError, nil)
+		return
+	}
+	refs, err := store.List(after, limit)
+	if err != nil {
+		s.log.Debug("holder: list", "folder", folderID, "err", err)
+		_ = writeResponse(stream, StatusError, nil)
+		return
+	}
+	_ = writeResponse(stream, StatusOK, encodeBlobRefs(refs))
+}
+
+func (s *Server) serveDelete(ctx context.Context, stream netio.Stream, store *Store, folderID, peerID string) {
+	ids, err := readBlindedList(stream)
+	if err != nil {
+		s.log.Debug("holder: read delete", "folder", folderID, "err", err)
+		return
+	}
+	if store == nil || !s.putAllowed(ctx, folderID, peerID) {
+		s.log.Warn("holder: rejecting delete", "folder", folderID, "peer", peerID)
+		_ = writeResponse(stream, StatusError, nil)
+		return
+	}
+	for _, id := range ids {
+		if err := store.Delete(id); err != nil {
+			s.log.Debug("holder: delete", "folder", folderID, "err", err)
+			_ = writeResponse(stream, StatusError, nil)
+			return
+		}
+	}
+	_ = writeResponse(stream, StatusOK, nil)
 }
 
 func (s *Server) serveGet(stream netio.Stream, store *Store, folderID string) {

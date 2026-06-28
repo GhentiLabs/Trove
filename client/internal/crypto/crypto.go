@@ -54,6 +54,9 @@ const VerifierLen = 32
 // BlindIDLen is the length of a holder-blinded id.
 const BlindIDLen = 32
 
+// SealOverhead is the byte overhead Seal adds (the AEAD tag).
+const SealOverhead = chacha20poly1305.Overhead
+
 // MutableOverhead is the byte overhead SealMutable adds: a prepended nonce plus the AEAD tag.
 const MutableOverhead = chacha20poly1305.NonceSize + chacha20poly1305.Overhead
 

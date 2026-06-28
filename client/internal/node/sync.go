@@ -198,6 +198,10 @@ func (rt *syncRuntime) close() {
 // errReattachAfterKey ends a session once a folder key has just been delivered.
 var errReattachAfterKey = errors.New("node: reattach after folder key delivery")
 
+// holderGCGraceMillis keeps a holder GC sweep from reaping any blob written within the last
+// hour, so a concurrent writer's in-flight push is never deleted.
+const holderGCGraceMillis = int64(time.Hour / time.Millisecond)
+
 // onSession returns a peermgr hook that registers each session's peer with the gossiper
 // and attaches a sync engine when the two share folders.
 func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(context.Context, *session.Session) func() {
@@ -338,6 +342,12 @@ func (rt *syncRuntime) startHolderPush(ctx context.Context, log *slog.Logger, se
 		}}
 		set.trigger(p)
 		cancels = append(cancels, target.Coord.OnAnnounce(func() { set.trigger(p) }))
+		set.wg.Go(func() {
+			err := holder.Collect(ctx, folderKey, target.Model, holder.ListBlobsOverConn(conn, shareID), holder.DeleteBlobsOverConn(conn, shareID), holderGCGraceMillis, time.Now().UnixMilli())
+			if err != nil && ctx.Err() == nil {
+				log.Warn("node: holder gc", "folder", shareID, "err", err)
+			}
+		})
 	}
 	return func() {
 		for _, c := range cancels {

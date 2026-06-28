@@ -4,11 +4,13 @@
 package holder
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 )
@@ -86,12 +88,57 @@ func (s *Store) Has(blinded [crypto.BlindIDLen]byte) bool {
 	return err == nil
 }
 
-// Delete removes the blob stored under the blinded id, if present. It is the primitive a
-// future sweep uses to reclaim blobs no longer referenced by the catalog.
+// Delete removes the blob stored under the blinded id, if present.
 func (s *Store) Delete(blinded [crypto.BlindIDLen]byte) error {
 	_, file := s.path(blinded)
 	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("holder: delete: %w", err)
 	}
 	return nil
+}
+
+// BlobRef is a stored blob's blinded id and last-modified time, the input to a writer's
+// garbage-collection sweep.
+type BlobRef struct {
+	ID        [crypto.BlindIDLen]byte
+	ModMillis int64
+}
+
+// List returns up to limit stored blobs whose id sorts after the given id (the zero id
+// starts from the beginning), in id order, for paginated enumeration during GC.
+func (s *Store) List(after [crypto.BlindIDLen]byte, limit int) ([]BlobRef, error) {
+	afterHex := hex.EncodeToString(after[:])
+	var refs []BlobRef
+	err := filepath.WalkDir(s.dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || len(d.Name()) != 2*crypto.BlindIDLen {
+			return nil
+		}
+		if d.Name() <= afterHex {
+			return nil
+		}
+		raw, err := hex.DecodeString(d.Name())
+		if err != nil {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		var ref BlobRef
+		copy(ref.ID[:], raw)
+		ref.ModMillis = info.ModTime().UnixMilli()
+		refs = append(refs, ref)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("holder: list: %w", err)
+	}
+	sort.Slice(refs, func(i, j int) bool { return bytes.Compare(refs[i].ID[:], refs[j].ID[:]) < 0 })
+	if len(refs) > limit {
+		refs = refs[:limit]
+	}
+	return refs, nil
 }

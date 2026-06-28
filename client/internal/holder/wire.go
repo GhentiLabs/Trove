@@ -28,6 +28,8 @@ const (
 	opGet      byte = 0x01
 	opPut      byte = 0x02
 	opHasBatch byte = 0x04
+	opList     byte = 0x05
+	opDelete   byte = 0x06
 )
 
 // BlobStatus is the result byte in a holder response.
@@ -87,7 +89,7 @@ func readRequestHeader(r io.Reader) (op byte, folderID string, err error) {
 		return 0, "", errHolderVersion
 	}
 	op = head[5]
-	if op != opGet && op != opPut && op != opHasBatch {
+	if op != opGet && op != opPut && op != opHasBatch && op != opList && op != opDelete {
 		return 0, "", errBadOp
 	}
 	folderLen := binary.BigEndian.Uint16(head[6:8])
@@ -147,6 +149,70 @@ func readBlindedList(r io.Reader) ([][crypto.BlindIDLen]byte, error) {
 		}
 	}
 	return ids, nil
+}
+
+// MaxListPage bounds the blobs returned in one list page.
+const MaxListPage = 4096
+
+func writeListRequest(w io.Writer, folderID string, after [crypto.BlindIDLen]byte, limit uint16) error {
+	if len(folderID) > MaxFolderIDLen {
+		return errHolderIDTooLong
+	}
+	buf := make([]byte, 0, 8+len(folderID)+crypto.BlindIDLen+2)
+	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
+	buf = append(buf, HolderVersion, opList)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
+	buf = append(buf, folderID...)
+	buf = append(buf, after[:]...)
+	buf = binary.BigEndian.AppendUint16(buf, limit)
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("holder: write list request: %w", err)
+	}
+	return nil
+}
+
+func readListBody(r io.Reader) (after [crypto.BlindIDLen]byte, limit int, err error) {
+	after, err = readBlinded(r)
+	if err != nil {
+		return after, 0, err
+	}
+	var lim [2]byte
+	if _, err = io.ReadFull(r, lim[:]); err != nil {
+		return after, 0, fmt.Errorf("holder: read list limit: %w", err)
+	}
+	limit = int(binary.BigEndian.Uint16(lim[:]))
+	if limit == 0 || limit > MaxListPage {
+		limit = MaxListPage
+	}
+	return after, limit, nil
+}
+
+func encodeBlobRefs(refs []BlobRef) []byte {
+	buf := make([]byte, 0, 2+len(refs)*(crypto.BlindIDLen+8))
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(refs)))
+	for _, ref := range refs {
+		buf = append(buf, ref.ID[:]...)
+		buf = binary.BigEndian.AppendUint64(buf, uint64(ref.ModMillis))
+	}
+	return buf
+}
+
+func decodeBlobRefs(payload []byte) ([]BlobRef, error) {
+	if len(payload) < 2 {
+		return nil, fmt.Errorf("holder: short list response")
+	}
+	n := int(binary.BigEndian.Uint16(payload[:2]))
+	rest := payload[2:]
+	const sz = crypto.BlindIDLen + 8
+	if len(rest) < n*sz {
+		return nil, fmt.Errorf("holder: truncated list response")
+	}
+	refs := make([]BlobRef, n)
+	for i := range refs {
+		copy(refs[i].ID[:], rest[i*sz:])
+		refs[i].ModMillis = int64(binary.BigEndian.Uint64(rest[i*sz+crypto.BlindIDLen:]))
+	}
+	return refs, nil
 }
 
 // writeBitmapResponse answers a has-batch: one bit per queried id, set when present.

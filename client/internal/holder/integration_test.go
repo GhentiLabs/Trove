@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
@@ -159,6 +160,90 @@ func TestReconcileSkipsExistingBlobs(t *testing.T) {
 	}
 	if n := puts.Load(); n != 1 {
 		t.Fatalf("second reconcile pushed %d blobs, want 1 (the pointer only)", n)
+	}
+}
+
+// TestCollectReclaimsSupersededBlobs checks GC deletes the old catalog and the chunks of a
+// deleted file while keeping everything the current version needs (restore stays bit-exact).
+func TestCollectReclaimsSupersededBlobs(t *testing.T) {
+	ctx := context.Background()
+	key := testKey(0x5C)
+	src := newFolder(t, key)
+	writeFile(t, src.root, "keep.txt", []byte("keep me"))
+	writeFile(t, src.root, "gone.bin", pseudoRandom(3<<20, 8))
+	src.scan(t)
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(src.root, "gone.bin")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	writeFile(t, src.root, "keep.txt", []byte("keep me, now edited and longer"))
+	src.scan(t)
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	beforeGC := len(holderBlobs(t, store.dir))
+
+	now := time.Now().UnixMilli() + 1000
+	if err := Collect(ctx, key, src.model, storeList(store), storeDelete(store), 0, now); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	afterGC := len(holderBlobs(t, store.dir))
+	if afterGC >= beforeGC {
+		t.Fatalf("GC reclaimed nothing: %d -> %d blobs", beforeGC, afterGC)
+	}
+
+	dst := newFolder(t, key)
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
+	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err != nil {
+		t.Fatalf("restore after GC: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst.root, "keep.txt"))
+	if err != nil || string(got) != "keep me, now edited and longer" {
+		t.Fatalf("restored keep.txt = %q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dst.root, "gone.bin")); !os.IsNotExist(err) {
+		t.Fatal("deleted file reappeared after GC+restore")
+	}
+}
+
+// TestCollectGraceSkipsRecentBlobs checks GC never reaps a blob written inside the grace
+// window, so a concurrent writer's in-flight push survives.
+func TestCollectGraceSkipsRecentBlobs(t *testing.T) {
+	ctx := context.Background()
+	key := testKey(0x6D)
+	src := newFolder(t, key)
+	writeFile(t, src.root, "a.txt", []byte("one"))
+	src.scan(t)
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	writeFile(t, src.root, "a.txt", []byte("two, longer than one"))
+	src.scan(t)
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	before := len(holderBlobs(t, store.dir))
+
+	// now ~= the blobs' write time, so a generous grace protects all of them.
+	if err := Collect(ctx, key, src.model, storeList(store), storeDelete(store), int64(time.Hour/time.Millisecond), time.Now().UnixMilli()); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if after := len(holderBlobs(t, store.dir)); after != before {
+		t.Fatalf("grace did not protect recent blobs: %d -> %d", before, after)
 	}
 }
 
@@ -346,6 +431,23 @@ func assertHolderLeaksNothing(t *testing.T, dir string, needles ...any) {
 				t.Fatalf("blob %s leaks plaintext %q", f, probe)
 			}
 		}
+	}
+}
+
+func storeList(store *Store) ListBlobs {
+	return func(_ context.Context, after [crypto.BlindIDLen]byte) ([]BlobRef, error) {
+		return store.List(after, MaxListPage)
+	}
+}
+
+func storeDelete(store *Store) DeleteBlobs {
+	return func(_ context.Context, ids [][crypto.BlindIDLen]byte) error {
+		for _, id := range ids {
+			if err := store.Delete(id); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 }
 

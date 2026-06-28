@@ -43,7 +43,7 @@ func Reconcile(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.S
 	}
 
 	catalog := EncodeCatalog(live)
-	if uint32(len(catalog)+crypto.MutableOverhead) > MaxBlobBytes {
+	if uint32(len(catalog)+crypto.SealOverhead) > MaxBlobBytes {
 		return fmt.Errorf("holder: catalog too large (%d live manifests, %d bytes exceeds %d limit)", len(live), len(catalog), MaxBlobBytes)
 	}
 	catalogID := hasher.Sum(catalog)

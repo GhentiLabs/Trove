@@ -212,6 +212,47 @@ func TestServeUnknownFolder(t *testing.T) {
 	}
 }
 
+// TestServeListDelete exercises the list and delete ops over the wire, including that a
+// delete from an unauthorized peer is refused.
+func TestServeListDelete(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var a, b [crypto.BlindIDLen]byte
+	a[0], b[0] = 0x01, 0x02
+	_ = store.Put(a, []byte("x"))
+	_ = store.Put(b, []byte("y"))
+
+	const fid = "f"
+	holderConn, peerConn := connPair(t, ctx)
+	srv := NewServer(map[string]*Store{fid: store}, allowAll, nil)
+	go srv.Serve(ctx, holderConn)
+
+	var zero [crypto.BlindIDLen]byte
+	refs, err := ListBlobsOverConn(peerConn, fid)(ctx, zero)
+	if err != nil || len(refs) != 2 {
+		t.Fatalf("list = %d refs err=%v, want 2", len(refs), err)
+	}
+	if err := DeleteBlobsOverConn(peerConn, fid)(ctx, [][crypto.BlindIDLen]byte{a}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if store.Has(a) {
+		t.Fatal("blob not deleted")
+	}
+
+	denyConn1, denyConn2 := connPair(t, ctx)
+	denySrv := NewServer(map[string]*Store{fid: store}, func(context.Context, string, string) (bool, error) { return false, nil }, nil)
+	go denySrv.Serve(ctx, denyConn1)
+	if err := DeleteBlobsOverConn(denyConn2, fid)(ctx, [][crypto.BlindIDLen]byte{b}); err == nil {
+		t.Fatal("unauthorized delete succeeded")
+	}
+	if !store.Has(b) {
+		t.Fatal("unauthorized delete removed a blob")
+	}
+}
+
 func connPair(t *testing.T, ctx context.Context) (a, b netio.Conn) {
 	t.Helper()
 	mn := netio.NewMemNet()
