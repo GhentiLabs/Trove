@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS folders (
 	kdf_threads    INTEGER,
 	created_ms     INTEGER NOT NULL,
 	share_id       TEXT    NOT NULL DEFAULT '',
-	holder         INTEGER NOT NULL DEFAULT 0
+	holder         INTEGER NOT NULL DEFAULT 0,
+	CHECK (holder = 0 OR encrypted = 1)
 );`
 
 // Folder is a registered sync folder.
@@ -156,6 +157,9 @@ func migrate(ctx context.Context, tx *storage.Tx, from int) error {
 	if from < 3 {
 		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("config: migrate v3: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE folders SET key_generation = ? WHERE master_key IS NOT NULL`, FirstKeyGeneration); err != nil {
+			return fmt.Errorf("config: migrate v3 backfill: %w", err)
 		}
 	}
 	if from < 4 {

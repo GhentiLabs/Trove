@@ -95,6 +95,7 @@ func TestExportRestoreBitExact(t *testing.T) {
 	secret := []byte("TOP SECRET CONTENTS that must never appear on the holder")
 	writeFile(t, src.root, "secret-filename.txt", secret)
 	writeFile(t, src.root, "dir/notes.md", []byte("more private notes"))
+	writeFile(t, src.root, "empty.txt", nil)
 	writeFile(t, src.root, "big.bin", pseudoRandom(4<<20, 9))
 	if err := os.Symlink("secret-filename.txt", filepath.Join(src.root, "link")); err != nil {
 		t.Fatalf("symlink: %v", err)
@@ -141,7 +142,7 @@ func TestRestoreRejectsTamperedChunk(t *testing.T) {
 	if err := Export(ctx, key, src.model, src.chunks, src.fc, put); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
-	tamperOneChunkBlob(t, store.dir)
+	tamperChunkBlob(t, store, key)
 
 	dst := newFolder(t, key)
 	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
@@ -186,17 +187,32 @@ func testKey(b byte) [crypto.MasterKeyLen]byte {
 	return k
 }
 
+func holderBlobs(t *testing.T, dir string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk holder dir: %v", err)
+	}
+	return files
+}
+
 func assertHolderLeaksNothing(t *testing.T, dir string, needles ...any) {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read holder dir: %v", err)
-	}
-	if len(entries) == 0 {
+	files := holderBlobs(t, dir)
+	if len(files) == 0 {
 		t.Fatal("holder stored nothing")
 	}
-	for _, e := range entries {
-		blob, err := os.ReadFile(filepath.Join(dir, e.Name()))
+	for _, f := range files {
+		blob, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read blob: %v", err)
 		}
@@ -209,41 +225,32 @@ func assertHolderLeaksNothing(t *testing.T, dir string, needles ...any) {
 				probe = []byte(v)
 			}
 			if bytes.Contains(blob, probe) {
-				t.Fatalf("blob %s leaks plaintext %q", e.Name(), probe)
+				t.Fatalf("blob %s leaks plaintext %q", f, probe)
 			}
 		}
 	}
 }
 
-func tamperOneChunkBlob(t *testing.T, dir string) {
+// tamperChunkBlob flips a byte in a stored chunk blob, skipping the catalog so the test
+// exercises chunk verification rather than catalog AEAD.
+func tamperChunkBlob(t *testing.T, store *Store, key [crypto.MasterKeyLen]byte) {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read holder dir: %v", err)
-	}
-	var biggest os.DirEntry
-	var biggestSize int64
-	for _, e := range entries {
-		fi, err := e.Info()
+	_, catalogFile := store.path(crypto.BlindID(key, []byte(catalogLabel)))
+	for _, f := range holderBlobs(t, store.dir) {
+		if f == catalogFile {
+			continue
+		}
+		blob, err := os.ReadFile(f)
 		if err != nil {
-			t.Fatalf("stat: %v", err)
+			t.Fatalf("read blob: %v", err)
 		}
-		if fi.Size() > biggestSize {
-			biggest, biggestSize = e, fi.Size()
+		blob[len(blob)/2] ^= 0xFF
+		if err := os.WriteFile(f, blob, 0o600); err != nil {
+			t.Fatalf("write blob: %v", err)
 		}
+		return
 	}
-	if biggest == nil {
-		t.Fatal("no blob to tamper")
-	}
-	p := filepath.Join(dir, biggest.Name())
-	blob, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read blob: %v", err)
-	}
-	blob[len(blob)/2] ^= 0xFF
-	if err := os.WriteFile(p, blob, 0o600); err != nil {
-		t.Fatalf("write blob: %v", err)
-	}
+	t.Fatal("no chunk blob to tamper")
 }
 
 func assertTreesEqual(t *testing.T, wantRoot, gotRoot string) {

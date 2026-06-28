@@ -44,6 +44,16 @@ func TestStoreRoundTrip(t *testing.T) {
 	if got, _ := s.Get(id); !bytes.Equal(got, []byte("replacement")) {
 		t.Fatalf("Get after replace = %q", got)
 	}
+
+	if err := s.Delete(id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if s.Has(id) {
+		t.Fatal("Has true after Delete")
+	}
+	if err := s.Delete(id); err != nil {
+		t.Fatalf("Delete of absent blob: %v", err)
+	}
 }
 
 func TestCatalogRoundTrip(t *testing.T) {
