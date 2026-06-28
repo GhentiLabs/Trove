@@ -17,10 +17,10 @@ import (
 const catalogLabel = "trove/holder/catalog/v1"
 
 // PutBlob stores one opaque blob under its blinded id on a holder.
-type PutBlob func(ctx context.Context, blinded [crypto.BlindLen]byte, data []byte) error
+type PutBlob func(ctx context.Context, blinded [crypto.BlindIDLen]byte, data []byte) error
 
 // GetBlob fetches one opaque blob by its blinded id from a holder.
-type GetBlob func(ctx context.Context, blinded [crypto.BlindLen]byte) ([]byte, error)
+type GetBlob func(ctx context.Context, blinded [crypto.BlindIDLen]byte) ([]byte, error)
 
 // Export seals a folder's live manifests and unique chunks and pushes them to a holder
 // as blinded blobs: one catalog blob plus one blob per chunk. The holder receives only

@@ -15,7 +15,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	var id [crypto.BlindLen]byte
+	var id [crypto.BlindIDLen]byte
 	id[0] = 0x7
 	data := []byte("opaque ciphertext")
 

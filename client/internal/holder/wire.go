@@ -47,14 +47,14 @@ var (
 	errBlobTooLarge    = errors.New("holder: blob exceeds maximum length")
 )
 
-func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindLen]byte, payload []byte) error {
+func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindIDLen]byte, payload []byte) error {
 	if len(folderID) > MaxFolderIDLen {
 		return errHolderIDTooLong
 	}
 	if uint32(len(payload)) > MaxBlobBytes {
 		return errBlobTooLarge
 	}
-	buf := make([]byte, 0, 8+len(folderID)+crypto.BlindLen+4+len(payload))
+	buf := make([]byte, 0, 8+len(folderID)+crypto.BlindIDLen+4+len(payload))
 	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
 	buf = append(buf, HolderVersion, op)
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
@@ -72,7 +72,7 @@ func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindLe
 
 // readRequestHeader reads the fixed-size request head (op, folder id, blinded id) but not
 // a put's payload, so the server can authorize a put before allocating its bytes.
-func readRequestHeader(r io.Reader) (op byte, folderID string, blinded [crypto.BlindLen]byte, err error) {
+func readRequestHeader(r io.Reader) (op byte, folderID string, blinded [crypto.BlindIDLen]byte, err error) {
 	var head [8]byte
 	if _, err = io.ReadFull(r, head[:]); err != nil {
 		return 0, "", blinded, fmt.Errorf("holder: read request header: %w", err)
@@ -91,7 +91,7 @@ func readRequestHeader(r io.Reader) (op byte, folderID string, blinded [crypto.B
 	if folderLen > MaxFolderIDLen {
 		return 0, "", blinded, errHolderIDTooLong
 	}
-	body := make([]byte, int(folderLen)+crypto.BlindLen)
+	body := make([]byte, int(folderLen)+crypto.BlindIDLen)
 	if _, err = io.ReadFull(r, body); err != nil {
 		return 0, "", blinded, fmt.Errorf("holder: read request body: %w", err)
 	}

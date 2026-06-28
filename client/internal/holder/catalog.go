@@ -47,7 +47,7 @@ func DecodeCatalog(b []byte) ([]manifest.Manifest, error) {
 	if len(b) < len(catalogDomain) || string(b[:len(catalogDomain)]) != catalogDomain {
 		return nil, errBadCatalog
 	}
-	r := &reader{b: b[len(catalogDomain):]}
+	r := &catalogReader{b: b[len(catalogDomain):]}
 	n, err := r.uvarint()
 	if err != nil || n > maxCatalogEntries {
 		return nil, errBadCatalog
@@ -102,9 +102,9 @@ func appendBytes(b, v []byte) []byte {
 	return append(b, v...)
 }
 
-type reader struct{ b []byte }
+type catalogReader struct{ b []byte }
 
-func (r *reader) byte() (byte, error) {
+func (r *catalogReader) byte() (byte, error) {
 	if len(r.b) < 1 {
 		return 0, errBadCatalog
 	}
@@ -113,7 +113,7 @@ func (r *reader) byte() (byte, error) {
 	return v, nil
 }
 
-func (r *reader) uvarint() (uint64, error) {
+func (r *catalogReader) uvarint() (uint64, error) {
 	v, n := binary.Uvarint(r.b)
 	if n <= 0 {
 		return 0, errBadCatalog
@@ -122,7 +122,7 @@ func (r *reader) uvarint() (uint64, error) {
 	return v, nil
 }
 
-func (r *reader) bytes() ([]byte, error) {
+func (r *catalogReader) bytes() ([]byte, error) {
 	n, err := r.uvarint()
 	if err != nil || n > uint64(len(r.b)) {
 		return nil, errBadCatalog
@@ -132,7 +132,7 @@ func (r *reader) bytes() ([]byte, error) {
 	return v, nil
 }
 
-func (r *reader) chunkID() (hasher.ChunkID, error) {
+func (r *catalogReader) chunkID() (hasher.ChunkID, error) {
 	var id hasher.ChunkID
 	if len(r.b) < hasher.IDLen {
 		return id, errBadCatalog

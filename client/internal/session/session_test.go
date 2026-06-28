@@ -126,9 +126,9 @@ func TestHandshakeRefusesKeyMismatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ac, bc := connPair(t, idA, idB)
 			aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("enc"),
-				Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "enc", Encrypted: true, Verifier: tc.aVer}}}}
+				Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "enc", Encrypted: true, EncryptionVerifier: tc.aVer}}}}
 			bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("enc"),
-				Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "enc", Encrypted: true, Verifier: tc.bVer}}}}
+				Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "enc", Encrypted: true, EncryptionVerifier: tc.bVer}}}}
 
 			as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
 			if aErr != nil || bErr != nil {

@@ -11,7 +11,7 @@ import (
 // GetBlobOverConn returns a GetBlob that fetches a folder's blobs from a holder over conn,
 // one stream per blob.
 func GetBlobOverConn(conn netio.Conn, folderID string) GetBlob {
-	return func(ctx context.Context, blinded [crypto.BlindLen]byte) ([]byte, error) {
+	return func(ctx context.Context, blinded [crypto.BlindIDLen]byte) ([]byte, error) {
 		stream, err := conn.OpenStream(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("holder: open stream: %w", err)
@@ -38,7 +38,7 @@ func GetBlobOverConn(conn netio.Conn, folderID string) GetBlob {
 // PutBlobOverConn returns a PutBlob that stores a folder's blobs on a holder over conn,
 // one stream per blob.
 func PutBlobOverConn(conn netio.Conn, folderID string) PutBlob {
-	return func(ctx context.Context, blinded [crypto.BlindLen]byte, data []byte) error {
+	return func(ctx context.Context, blinded [crypto.BlindIDLen]byte, data []byte) error {
 		stream, err := conn.OpenStream(ctx)
 		if err != nil {
 			return fmt.Errorf("holder: open stream: %w", err)

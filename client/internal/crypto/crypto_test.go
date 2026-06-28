@@ -36,8 +36,8 @@ func TestBlindID(t *testing.T) {
 	}
 	id1 := []byte("chunk-one")
 	blind := BlindID(a, id1)
-	if len(blind) != BlindLen {
-		t.Fatalf("blind len = %d, want %d", len(blind), BlindLen)
+	if len(blind) != BlindIDLen {
+		t.Fatalf("blind len = %d, want %d", len(blind), BlindIDLen)
 	}
 	if blind != BlindID(a, id1) {
 		t.Fatal("blind id not deterministic")

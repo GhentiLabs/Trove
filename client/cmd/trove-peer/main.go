@@ -249,6 +249,9 @@ func cmdJoin(args []string) error {
 	default:
 		return err
 	}
+	if *holderFlag {
+		fmt.Println("joined as a holder: this node stores ciphertext only and never receives the key")
+	}
 	fmt.Printf("joined %s; run `trove-peer run -trove ...` to sync\n", *group)
 	return nil
 }

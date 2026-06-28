@@ -64,9 +64,9 @@ func (s State) String() string {
 type Folder struct {
 	ShareID   string
 	Encrypted bool
-	// Verifier is the non-secret key-mismatch token for an encrypted folder, empty
+	// EncryptionVerifier is the non-secret key-mismatch token for an encrypted folder, empty
 	// when this node holds no key for it yet.
-	Verifier []byte
+	EncryptionVerifier []byte
 }
 
 // Local identifies this node for the Hello and the folders it offers.
@@ -96,13 +96,14 @@ type Config struct {
 
 // Session is an authenticated, Active, framed, multiplexed peer connection.
 type Session struct {
-	conn       netio.Conn
-	ctrl       netio.Stream
-	peerNodeID string
-	shared     []string
-	keepalive  time.Duration
-	started    time.Time
-	log        *slog.Logger
+	conn          netio.Conn
+	ctrl          netio.Stream
+	peerNodeID    string
+	shared        []string
+	peerVerifiers map[string][]byte
+	keepalive     time.Duration
+	started       time.Time
+	log           *slog.Logger
 
 	handler ControlHandler
 
@@ -182,14 +183,15 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		log.Warn("session: refusing folders on key mismatch", "peer", peerID, "folders", mismatched)
 	}
 	s := &Session{
-		conn:       cfg.Conn,
-		ctrl:       ctrl,
-		peerNodeID: peerID,
-		shared:     shared,
-		keepalive:  keepalive,
-		started:    time.Now(),
-		log:        log,
-		done:       make(chan struct{}),
+		conn:          cfg.Conn,
+		ctrl:          ctrl,
+		peerNodeID:    peerID,
+		shared:        shared,
+		peerVerifiers: peerVerifiers(peerCfg),
+		keepalive:     keepalive,
+		started:       time.Now(),
+		log:           log,
+		done:          make(chan struct{}),
 	}
 	s.state.Store(int32(StateActive))
 	log.Info("session active", "peer", peerID, "shared_folders", len(s.shared))
@@ -252,7 +254,7 @@ func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
 			FolderId:           f.ShareID,
 			FolderType:         wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
 			Encrypted:          f.Encrypted,
-			EncryptionVerifier: f.Verifier,
+			EncryptionVerifier: f.EncryptionVerifier,
 		})
 	}
 	return &wirepb.NetworkConfig{Folders: folders}
@@ -303,7 +305,7 @@ func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) (shared, mis
 		if _, ok := peerSet[f.ShareID]; !ok {
 			continue
 		}
-		if pv := peerVerifier[f.ShareID]; len(f.Verifier) > 0 && len(pv) > 0 && !bytes.Equal(f.Verifier, pv) {
+		if pv := peerVerifier[f.ShareID]; len(f.EncryptionVerifier) > 0 && len(pv) > 0 && !bytes.Equal(f.EncryptionVerifier, pv) {
 			mismatched = append(mismatched, f.ShareID)
 			continue
 		}
@@ -313,6 +315,20 @@ func intersectFolders(offered []Folder, peer *wirepb.NetworkConfig) (shared, mis
 	sort.Strings(mismatched)
 	return shared, mismatched
 }
+
+// peerVerifiers maps each folder the peer offered to the encryption verifier it announced.
+func peerVerifiers(peer *wirepb.NetworkConfig) map[string][]byte {
+	out := make(map[string][]byte, len(peer.GetFolders()))
+	for _, f := range peer.GetFolders() {
+		if id := f.GetFolderId(); id != "" {
+			out[id] = f.GetEncryptionVerifier()
+		}
+	}
+	return out
+}
+
+// PeerEncryptionVerifier returns the verifier the peer announced for a folder, or nil.
+func (s *Session) PeerEncryptionVerifier(folderID string) []byte { return s.peerVerifiers[folderID] }
 
 // PeerNodeID is the authenticated peer identity.
 func (s *Session) PeerNodeID() string { return s.peerNodeID }

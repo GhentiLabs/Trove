@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
@@ -73,16 +74,44 @@ func TestReceiveFolderKeyFromWriter(t *testing.T) {
 	var key [config.MasterKeyLen]byte
 	key[0] = 0x11
 	fk := &wirepb.FolderKey{FolderId: group, Key: key[:], KeyGeneration: 1}
+	verifier := crypto.FolderVerifier(key, group)
 
-	if err := rt.receiveFolderKey(ctx, log, founderID, fk); !errors.Is(err, errReattachAfterKey) {
+	if err := rt.receiveFolderKey(ctx, log, founderID, fk, verifier); !errors.Is(err, errReattachAfterKey) {
 		t.Fatalf("first delivery err = %v, want errReattachAfterKey", err)
 	}
 	got, gen, err := cfg.GetFolderKey(ctx, group)
 	if err != nil || got != key || gen != 1 {
 		t.Fatalf("stored key=%x gen=%d err=%v, want key=%x gen=1", got, gen, err, key)
 	}
-	if err := rt.receiveFolderKey(ctx, log, founderID, fk); err != nil {
+	if err := rt.receiveFolderKey(ctx, log, founderID, fk, verifier); err != nil {
 		t.Fatalf("replay delivery err = %v, want nil", err)
+	}
+}
+
+// TestReceiveFolderKeyRejectsVerifierMismatch checks a key whose verifier disagrees with
+// the one the sender announced is refused and not stored.
+func TestReceiveFolderKeyRejectsVerifierMismatch(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	cfg := openConfig(t, "self-node")
+	if err := cfg.AddFolder(ctx, config.Folder{ID: group, Root: "/r", ShareID: group, Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	rt := &syncRuntime{self: "self-node", members: members, cfg: cfg, byShare: map[string]config.Folder{
+		group: {ID: group, Root: "/r", ShareID: group, Encrypted: true},
+	}}
+	var key [config.MasterKeyLen]byte
+	key[0] = 0x55
+	fk := &wirepb.FolderKey{FolderId: group, Key: key[:], KeyGeneration: 1}
+	if err := rt.receiveFolderKey(ctx, slog.New(slog.DiscardHandler), founderID, fk, []byte("wrong-verifier")); err != nil {
+		t.Fatalf("mismatch delivery err = %v, want nil", err)
+	}
+	if _, _, err := cfg.GetFolderKey(ctx, group); !errors.Is(err, config.ErrNoKey) {
+		t.Fatalf("key stored despite verifier mismatch; want ErrNoKey")
 	}
 }
 
@@ -107,7 +136,7 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 	var key [config.MasterKeyLen]byte
 	key[0] = 0x22
 	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-	if err := rt.receiveFolderKey(ctx, log, stranger, &wirepb.FolderKey{FolderId: group, Key: key[:], KeyGeneration: 1}); err != nil {
+	if err := rt.receiveFolderKey(ctx, log, stranger, &wirepb.FolderKey{FolderId: group, Key: key[:], KeyGeneration: 1}, nil); err != nil {
 		t.Fatalf("non-writer delivery err = %v, want nil", err)
 	}
 	if _, _, err := cfg.GetFolderKey(ctx, group); !errors.Is(err, config.ErrNoKey) {
@@ -126,7 +155,7 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 		group2: {ID: group2, Root: "/r", ShareID: group2, Encrypted: true},
 	}}
 	short := []byte{1, 2, 3}
-	if err := rt2.receiveFolderKey(ctx, log, founderID, &wirepb.FolderKey{FolderId: group2, Key: short, KeyGeneration: 1}); err != nil {
+	if err := rt2.receiveFolderKey(ctx, log, founderID, &wirepb.FolderKey{FolderId: group2, Key: short, KeyGeneration: 1}, nil); err != nil {
 		t.Fatalf("short-key delivery err = %v, want nil", err)
 	}
 	if _, _, err := cfg2.GetFolderKey(ctx, group2); !errors.Is(err, config.ErrNoKey) {
@@ -193,11 +222,11 @@ func TestDeliverableOnlyToTrustedMembers(t *testing.T) {
 	cf := config.Folder{ID: group, Root: "/r", ShareID: group, Encrypted: true}
 	var key [config.MasterKeyLen]byte
 
-	if d := rt.deliverable(ctx, slog.New(slog.DiscardHandler), cf, readerID, key, 1); d == nil || d.GetFolderId() != group {
-		t.Fatalf("deliverable to reader = %v, want a message for %s", d, group)
+	if d := rt.folderKeyForPeer(ctx, slog.New(slog.DiscardHandler), cf, readerID, key, 1); d == nil || d.GetFolderId() != group {
+		t.Fatalf("folderKeyForPeer to reader = %v, want a message for %s", d, group)
 	}
 	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-	if d := rt.deliverable(ctx, slog.New(slog.DiscardHandler), cf, stranger, key, 1); d != nil {
+	if d := rt.folderKeyForPeer(ctx, slog.New(slog.DiscardHandler), cf, stranger, key, 1); d != nil {
 		t.Fatal("delivered a key to a non-member")
 	}
 }

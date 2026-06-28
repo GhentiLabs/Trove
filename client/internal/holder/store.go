@@ -32,13 +32,13 @@ func Open(dir string) (*Store, error) {
 
 // path shards blobs by the first byte of the blinded id so no single directory holds the
 // whole folder's chunks.
-func (s *Store) path(blinded [crypto.BlindLen]byte) (dir, file string) {
+func (s *Store) path(blinded [crypto.BlindIDLen]byte) (dir, file string) {
 	name := hex.EncodeToString(blinded[:])
 	return filepath.Join(s.dir, name[:2]), filepath.Join(s.dir, name[:2], name)
 }
 
 // Put stores data under the blinded id, replacing any existing blob atomically.
-func (s *Store) Put(blinded [crypto.BlindLen]byte, data []byte) error {
+func (s *Store) Put(blinded [crypto.BlindIDLen]byte, data []byte) error {
 	shard, final := s.path(blinded)
 	if err := os.MkdirAll(shard, 0o700); err != nil {
 		return fmt.Errorf("holder: shard dir: %w", err)
@@ -67,7 +67,7 @@ func (s *Store) Put(blinded [crypto.BlindLen]byte, data []byte) error {
 }
 
 // Get returns the blob stored under the blinded id, or ErrNotFound.
-func (s *Store) Get(blinded [crypto.BlindLen]byte) ([]byte, error) {
+func (s *Store) Get(blinded [crypto.BlindIDLen]byte) ([]byte, error) {
 	_, file := s.path(blinded)
 	data, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
@@ -80,7 +80,7 @@ func (s *Store) Get(blinded [crypto.BlindLen]byte) ([]byte, error) {
 }
 
 // Has reports whether a blob is stored under the blinded id.
-func (s *Store) Has(blinded [crypto.BlindLen]byte) bool {
+func (s *Store) Has(blinded [crypto.BlindIDLen]byte) bool {
 	_, file := s.path(blinded)
 	_, err := os.Stat(file)
 	return err == nil
@@ -88,7 +88,7 @@ func (s *Store) Has(blinded [crypto.BlindLen]byte) bool {
 
 // Delete removes the blob stored under the blinded id, if present. It is the primitive a
 // future sweep uses to reclaim blobs no longer referenced by the catalog.
-func (s *Store) Delete(blinded [crypto.BlindLen]byte) error {
+func (s *Store) Delete(blinded [crypto.BlindIDLen]byte) error {
 	_, file := s.path(blinded)
 	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("holder: delete: %w", err)

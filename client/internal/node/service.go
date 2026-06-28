@@ -558,7 +558,7 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 		if f.Encrypted {
 			switch key, _, err := s.opts.Config.GetFolderKey(ctx, f.ID); {
 			case err == nil:
-				sf.Verifier = crypto.FolderVerifier(key, f.ShareID)
+				sf.EncryptionVerifier = crypto.FolderVerifier(key, f.ShareID)
 			case errors.Is(err, config.ErrNoKey):
 			default:
 				return session.Local{}, err
@@ -566,7 +566,7 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 		}
 		offered = append(offered, sf)
 	}
-	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m4"}, nil
+	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m6"}, nil
 }
 
 // peerIDs is the set of nodes to proactively connect to: every co-member across all

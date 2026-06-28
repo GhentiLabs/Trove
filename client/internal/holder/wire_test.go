@@ -11,7 +11,7 @@ import (
 )
 
 func TestRequestGoldenLayout(t *testing.T) {
-	var blinded [crypto.BlindLen]byte
+	var blinded [crypto.BlindIDLen]byte
 	for i := range blinded {
 		blinded[i] = byte(i)
 	}
@@ -49,7 +49,7 @@ func TestResponseGoldenLayout(t *testing.T) {
 }
 
 func TestRequestResponseRoundTrip(t *testing.T) {
-	var blinded [crypto.BlindLen]byte
+	var blinded [crypto.BlindIDLen]byte
 	blinded[1] = 0x9
 	payload := []byte("sealed bytes")
 
@@ -146,7 +146,7 @@ func TestServeRejectsUnauthorizedPut(t *testing.T) {
 			srv := NewServer(map[string]*Store{fid: store}, tc.allowPut, nil)
 			go srv.Serve(ctx, holderConn)
 
-			var blinded [crypto.BlindLen]byte
+			var blinded [crypto.BlindIDLen]byte
 			blinded[0] = 0xAB
 			err = PutBlobOverConn(peerConn, fid)(ctx, blinded, []byte("ciphertext"))
 			if err == nil {

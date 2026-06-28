@@ -109,8 +109,8 @@ func TestExportRestoreBitExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Open: %v", err)
 	}
-	put := func(_ context.Context, b [crypto.BlindLen]byte, data []byte) error { return store.Put(b, data) }
-	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
 
 	if err := Export(ctx, key, src.model, src.chunks, src.fc, put); err != nil {
 		t.Fatalf("Export: %v", err)
@@ -138,14 +138,14 @@ func TestRestoreRejectsTamperedChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Open: %v", err)
 	}
-	put := func(_ context.Context, b [crypto.BlindLen]byte, data []byte) error { return store.Put(b, data) }
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
 	if err := Export(ctx, key, src.model, src.chunks, src.fc, put); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 	tamperChunkBlob(t, store, key)
 
 	dst := newFolder(t, key)
-	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
 	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err == nil {
 		t.Fatal("Restore accepted a tampered chunk blob")
 	}
@@ -170,7 +170,7 @@ func TestRestoreRejectsEscapingSymlink(t *testing.T) {
 	}
 
 	dst := newFolder(t, key)
-	get := func(_ context.Context, b [crypto.BlindLen]byte) ([]byte, error) { return store.Get(b) }
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
 	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err == nil {
 		t.Fatal("Restore accepted a catalog with an escaping symlink")
 	}

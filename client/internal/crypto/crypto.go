@@ -51,8 +51,8 @@ var (
 // VerifierLen is the length of a folder key-mismatch verifier.
 const VerifierLen = 32
 
-// BlindLen is the length of a holder-blinded id.
-const BlindLen = 32
+// BlindIDLen is the length of a holder-blinded id.
+const BlindIDLen = 32
 
 // MutableOverhead is the byte overhead SealMutable adds: a prepended nonce plus the AEAD tag.
 const MutableOverhead = chacha20poly1305.NonceSize + chacha20poly1305.Overhead
@@ -111,12 +111,12 @@ func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 
 // BlindID derives the opaque id under which a holder stores a blob, from the folder
 // master key and the blob's true id.
-func BlindID(master [MasterKeyLen]byte, id []byte) [BlindLen]byte {
+func BlindID(master [MasterKeyLen]byte, id []byte) [BlindIDLen]byte {
 	info := make([]byte, 0, len(blindLabel)+len(id))
 	info = append(info, blindLabel...)
 	info = append(info, id...)
 	r := hkdf.New(sha256.New, master[:], blindSalt, info)
-	var out [BlindLen]byte
+	var out [BlindIDLen]byte
 	if _, err := io.ReadFull(r, out[:]); err != nil {
 		panic(fmt.Sprintf("crypto: hkdf blind: %v", err))
 	}

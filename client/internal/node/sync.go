@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/holder"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/model"
@@ -233,7 +235,7 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 					log.Warn("node: folder key with unexpected payload", "peer", peerID)
 					return nil
 				}
-				return rt.receiveFolderKey(hctx, log, peerID, fk)
+				return rt.receiveFolderKey(hctx, log, peerID, fk, sess.PeerEncryptionVerifier(fk.GetFolderId()))
 			default:
 				if eng != nil {
 					return eng.Handle(hctx, typ, msg)
@@ -324,9 +326,9 @@ func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess
 		if err != nil {
 			continue
 		}
-		fctx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+		exportCtx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
 		put := holder.PutBlobOverConn(sess.Conn(), cf.ShareID)
-		if err := holder.Export(ctx, key, fc.Model, fc.Chunks, fctx, put); err != nil {
+		if err := holder.Export(ctx, key, fc.Model, fc.Chunks, exportCtx, put); err != nil {
 			log.Warn("node: push to holder", "folder", cf.ShareID, "peer", peerID, "err", err)
 		}
 	}
@@ -356,16 +358,16 @@ func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peer
 		fc.FolderCtx = fctx
 		fc.Coord.SetFolderContext(fctx)
 		fcs = append(fcs, fc)
-		if d := rt.deliverable(ctx, log, cf, peerID, key, gen); d != nil {
+		if d := rt.folderKeyForPeer(ctx, log, cf, peerID, key, gen); d != nil {
 			deliveries = append(deliveries, d)
 		}
 	}
 	return fcs, deliveries
 }
 
-// deliverable returns a folder-key message for peerID when this node is a writer and the
+// folderKeyForPeer returns a folder-key message for peerID when this node is a writer and the
 // peer is a trusted member; a holder or non-member gets nil.
-func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
+func (rt *syncRuntime) folderKeyForPeer(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
 	mine, err := rt.isWriter(ctx, cf.ShareID, rt.self)
 	if err != nil {
 		log.Warn("node: folder key delivery skipped", "folder", cf.ShareID, "err", err)
@@ -388,7 +390,7 @@ func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf con
 // receiveFolderKey persists a key delivered by a roster writer for a folder this node
 // still lacks, then ends the session to reattach. A delivery from a non-writer or for an
 // unknown or already-keyed folder is ignored.
-func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey) error {
+func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey, peerVerifier []byte) error {
 	cf, ok := rt.byShare[fk.GetFolderId()]
 	if !ok || !cf.Encrypted || cf.Holder {
 		return nil
@@ -407,6 +409,10 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 	}
 	var key [config.MasterKeyLen]byte
 	copy(key[:], fk.GetKey())
+	if len(peerVerifier) > 0 && !bytes.Equal(crypto.FolderVerifier(key, cf.ShareID), peerVerifier) {
+		log.Warn("node: rejecting folder key inconsistent with the sender's verifier", "folder", cf.ShareID, "peer", peerID)
+		return nil
+	}
 	switch err := rt.cfg.DeliverFolderKey(ctx, cf.ID, key, int(fk.GetKeyGeneration())); {
 	case err == nil:
 		log.Info("node: folder key received; reattaching", "folder", cf.ShareID, "peer", peerID)
