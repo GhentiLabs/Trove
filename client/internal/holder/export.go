@@ -3,6 +3,7 @@ package holder
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
@@ -88,6 +89,10 @@ func uniqueChunks(live []manifest.Manifest) []hasher.ChunkID {
 	return ids
 }
 
+// pushConcurrency bounds how many chunk blobs are sealed and pushed at once, exploiting
+// QUIC's independent streams instead of one round-trip at a time.
+const pushConcurrency = 16
+
 func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, chunkIDs []hasher.ChunkID, has HasBlobs, put PutBlob) error {
 	blinded := make([][crypto.BlindIDLen]byte, len(chunkIDs))
 	for i, id := range chunkIDs {
@@ -97,10 +102,14 @@ func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, ch
 	if err != nil {
 		return err
 	}
-	for i, id := range chunkIDs {
-		if present[i] {
-			continue
+	var absent []int
+	for i := range chunkIDs {
+		if !present[i] {
+			absent = append(absent, i)
 		}
+	}
+	return parallelDo(ctx, pushConcurrency, absent, func(ctx context.Context, i int) error {
+		id := chunkIDs[i]
 		plaintext, err := chunks.Get(ctx, fc, id)
 		if err != nil {
 			return fmt.Errorf("holder: read chunk %s: %w", id, err)
@@ -109,11 +118,43 @@ func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, ch
 		if err != nil {
 			return fmt.Errorf("holder: seal chunk %s: %w", id, err)
 		}
-		if err := put(ctx, blinded[i], sealed); err != nil {
-			return err
-		}
+		return put(ctx, blinded[i], sealed)
+	})
+}
+
+// parallelDo runs fn over items with at most limit in flight, returning the first error and
+// cancelling the rest. It is the barrier before the catalog and pointer are written.
+func parallelDo(ctx context.Context, limit int, items []int, fn func(context.Context, int) error) error {
+	if len(items) == 0 {
+		return nil
 	}
-	return nil
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for _, it := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := fn(ctx, it); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // hasAll batches a has query into MaxHasBatch-sized requests.

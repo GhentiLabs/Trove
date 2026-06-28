@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
@@ -140,25 +141,24 @@ func TestReconcileSkipsExistingBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Open: %v", err)
 	}
-	var puts int
+	var puts atomic.Int64
 	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error {
-		puts++
+		puts.Add(1)
 		return store.Put(b, data)
 	}
 	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
-	first := puts
-	if first < 3 {
+	if first := puts.Load(); first < 3 {
 		t.Fatalf("first reconcile pushed only %d blobs", first)
 	}
 
-	puts = 0
+	puts.Store(0)
 	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
-	if puts != 1 {
-		t.Fatalf("second reconcile pushed %d blobs, want 1 (the pointer only)", puts)
+	if n := puts.Load(); n != 1 {
+		t.Fatalf("second reconcile pushed %d blobs, want 1 (the pointer only)", n)
 	}
 }
 
