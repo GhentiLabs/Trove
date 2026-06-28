@@ -50,6 +50,45 @@ func TestBlindID(t *testing.T) {
 	}
 }
 
+func TestSealMutable(t *testing.T) {
+	var master [MasterKeyLen]byte
+	for i := range master {
+		master[i] = byte(i)
+	}
+	plain := []byte("a mutable catalog blob")
+
+	c1, err := SealMutable(master, "trove/holder/catalog/v1", plain)
+	if err != nil {
+		t.Fatalf("SealMutable: %v", err)
+	}
+	c2, err := SealMutable(master, "trove/holder/catalog/v1", plain)
+	if err != nil {
+		t.Fatalf("SealMutable: %v", err)
+	}
+	if bytes.Equal(c1, c2) {
+		t.Fatal("SealMutable is deterministic; the same plaintext must seal differently (nonce reuse)")
+	}
+
+	got, err := OpenMutable(master, "trove/holder/catalog/v1", c1)
+	if err != nil {
+		t.Fatalf("OpenMutable: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("OpenMutable = %q, want %q", got, plain)
+	}
+	if _, err := OpenMutable(master, "trove/holder/other", c1); err == nil {
+		t.Fatal("OpenMutable accepted a wrong label")
+	}
+	tampered := append([]byte(nil), c1...)
+	tampered[len(tampered)-1] ^= 0xFF
+	if _, err := OpenMutable(master, "trove/holder/catalog/v1", tampered); err == nil {
+		t.Fatal("OpenMutable accepted a tampered blob")
+	}
+	if _, err := OpenMutable(master, "trove/holder/catalog/v1", c1[:4]); err == nil {
+		t.Fatal("OpenMutable accepted a truncated blob")
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	var master [MasterKeyLen]byte
 	for i := range master {

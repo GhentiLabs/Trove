@@ -21,11 +21,11 @@ var errChunkMismatch = errors.New("holder: restored chunk failed verification")
 
 // Restore rebuilds a folder's plaintext tree under root from a holder's blinded blobs.
 func Restore(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, root string, get GetBlob) error {
-	sealedCatalog, err := get(ctx, crypto.BlindID(master, catalogID[:]))
+	sealedCatalog, err := get(ctx, crypto.BlindID(master, []byte(catalogLabel)))
 	if err != nil {
 		return fmt.Errorf("holder: fetch catalog: %w", err)
 	}
-	catalogBytes, err := crypto.Open(master, catalogID, sealedCatalog)
+	catalogBytes, err := crypto.OpenMutable(master, catalogLabel, sealedCatalog)
 	if err != nil {
 		return fmt.Errorf("holder: open catalog: %w", err)
 	}

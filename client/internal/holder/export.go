@@ -11,8 +11,10 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
-// catalogID is the fixed content id of the sealed catalog blob.
-var catalogID = hasher.Sum([]byte("trove/holder/catalog/v1"))
+// catalogLabel identifies the sealed catalog blob: the holder stores it under
+// BlindID(masterKey, catalogLabel), and it is sealed with a non-convergent random nonce
+// because its content is mutable under this fixed id.
+const catalogLabel = "trove/holder/catalog/v1"
 
 // PutBlob stores one opaque blob under its blinded id on a holder.
 type PutBlob func(ctx context.Context, blinded [crypto.BlindLen]byte, data []byte) error
@@ -35,11 +37,15 @@ func Export(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Stor
 		}
 	}
 
-	sealedCatalog, err := crypto.Seal(master, catalogID, EncodeCatalog(live))
+	catalog := EncodeCatalog(live)
+	if uint32(len(catalog)+crypto.MutableOverhead) > MaxBlobBytes {
+		return fmt.Errorf("holder: catalog too large (%d live manifests, %d bytes exceeds %d limit)", len(live), len(catalog), MaxBlobBytes)
+	}
+	sealedCatalog, err := crypto.SealMutable(master, catalogLabel, catalog)
 	if err != nil {
 		return fmt.Errorf("holder: seal catalog: %w", err)
 	}
-	if err := put(ctx, crypto.BlindID(master, catalogID[:]), sealedCatalog); err != nil {
+	if err := put(ctx, crypto.BlindID(master, []byte(catalogLabel)), sealedCatalog); err != nil {
 		return err
 	}
 

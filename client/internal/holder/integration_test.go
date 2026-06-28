@@ -160,11 +160,11 @@ func TestRestoreRejectsEscapingSymlink(t *testing.T) {
 		t.Fatalf("holder Open: %v", err)
 	}
 	evil := []manifest.Manifest{{Kind: manifest.KindSymlink, Path: "evil", SymlinkTarget: "../../escape"}}
-	sealed, err := crypto.Seal(key, catalogID, EncodeCatalog(evil))
+	sealed, err := crypto.SealMutable(key, catalogLabel, EncodeCatalog(evil))
 	if err != nil {
-		t.Fatalf("Seal: %v", err)
+		t.Fatalf("SealMutable: %v", err)
 	}
-	if err := store.Put(crypto.BlindID(key, catalogID[:]), sealed); err != nil {
+	if err := store.Put(crypto.BlindID(key, []byte(catalogLabel)), sealed); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
