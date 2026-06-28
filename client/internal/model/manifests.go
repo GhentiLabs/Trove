@@ -176,6 +176,11 @@ func (s *Store) ListManifests(ctx context.Context) ([]Record, error) {
 	return s.queryRecords(ctx, `SELECT path FROM manifests ORDER BY path`)
 }
 
+// ListLiveManifests returns every non-deleted manifest in path order, skipping tombstones.
+func (s *Store) ListLiveManifests(ctx context.Context) ([]Record, error) {
+	return s.queryRecords(ctx, `SELECT path FROM manifests WHERE deleted = 0 ORDER BY path`)
+}
+
 // ManifestsSince returns the manifests whose sequence is greater than seq,
 // ordered by sequence: the cursor that drives incremental exchange.
 func (s *Store) ManifestsSince(ctx context.Context, seq int64) ([]Record, error) {

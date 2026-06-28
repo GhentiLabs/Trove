@@ -137,6 +137,9 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 		rt.folders = append(rt.folders, fc)
 		rt.byShare[shareID] = f
 	}
+	if len(rt.holders) > 0 && len(rt.folders) > 0 {
+		return nil, fmt.Errorf("node: a holder node cannot also sync folders; run a dedicated holder")
+	}
 	ok = true
 	return rt, nil
 }
@@ -255,17 +258,15 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				_ = eng.Drive(sctx)
 			}()
 		}
+		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
+		// both, so the holder server and the sync engine never contend for the connection.
 		if held := rt.sharedHolderStores(shared); len(held) > 0 {
-			if eng != nil {
-				log.Warn("node: holder serving suppressed on a session that also syncs", "peer", peerID)
-			} else {
-				srv := holder.NewServer(held, rt.holderPutAllowed, log)
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					srv.Serve(sctx, sess.Conn())
-				}()
-			}
+			srv := holder.NewServer(held, rt.holderPutAllowed, log)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				srv.Serve(sctx, sess.Conn())
+			}()
 		}
 		if len(rt.folders) > 0 {
 			wg.Add(1)
@@ -493,8 +494,18 @@ func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 // this node only reads is never scanned, so it never originates.
 func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 	var wg sync.WaitGroup
+	var zeroKey [config.MasterKeyLen]byte
 	for _, fc := range rt.folders {
 		if fc.Role != syncengine.RoleWriter {
+			continue
+		}
+		fctx, err := rt.folderContext(ctx, rt.byShare[fc.FolderID])
+		if err != nil {
+			log.Warn("node: scanner folder key", "folder", fc.FolderID, "err", err)
+			continue
+		}
+		if fctx.Encrypted && fctx.MasterKey == zeroKey {
+			log.Info("node: scanner awaiting folder key; restart after it is delivered", "folder", fc.FolderID)
 			continue
 		}
 		w, err := watcher.New(fc.Root)
@@ -503,7 +514,7 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		sc, err := scanner.New(scanner.Options{
-			Root: fc.Root, FolderCtx: fc.FolderCtx, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
+			Root: fc.Root, FolderCtx: fctx, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
 		})
 		if err != nil {
 			_ = w.Close()

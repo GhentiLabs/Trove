@@ -26,29 +26,22 @@ type GetBlob func(ctx context.Context, blinded [crypto.BlindLen]byte) ([]byte, e
 // as blinded blobs: one catalog blob plus one blob per chunk. The holder receives only
 // ciphertext under blinded ids; it never learns the key, names, paths, or content.
 func Export(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Store, chunks *chunkstore.Store, fc chunkstore.FolderContext, put PutBlob) error {
-	records, err := m.ListManifests(ctx)
+	records, err := m.ListLiveManifests(ctx)
 	if err != nil {
 		return fmt.Errorf("holder: list manifests: %w", err)
 	}
-	live := make([]manifest.Manifest, 0, len(records))
-	for _, r := range records {
-		if !r.Deleted {
-			live = append(live, r.Manifest)
-		}
+	live := make([]manifest.Manifest, len(records))
+	for i, r := range records {
+		live[i] = r.Manifest
 	}
 
 	catalog := EncodeCatalog(live)
 	if uint32(len(catalog)+crypto.MutableOverhead) > MaxBlobBytes {
 		return fmt.Errorf("holder: catalog too large (%d live manifests, %d bytes exceeds %d limit)", len(live), len(catalog), MaxBlobBytes)
 	}
-	sealedCatalog, err := crypto.SealMutable(master, catalogLabel, catalog)
-	if err != nil {
-		return fmt.Errorf("holder: seal catalog: %w", err)
-	}
-	if err := put(ctx, crypto.BlindID(master, []byte(catalogLabel)), sealedCatalog); err != nil {
-		return err
-	}
 
+	// Push the chunks first and the catalog last: if the push is interrupted, the holder
+	// keeps its previous consistent catalog rather than one that references missing chunks.
 	seen := make(map[hasher.ChunkID]struct{})
 	for _, mf := range live {
 		for _, c := range mf.Chunks {
@@ -69,5 +62,10 @@ func Export(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Stor
 			}
 		}
 	}
-	return nil
+
+	sealedCatalog, err := crypto.SealMutable(master, catalogLabel, catalog)
+	if err != nil {
+		return fmt.Errorf("holder: seal catalog: %w", err)
+	}
+	return put(ctx, crypto.BlindID(master, []byte(catalogLabel)), sealedCatalog)
 }
