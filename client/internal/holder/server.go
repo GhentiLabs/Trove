@@ -9,22 +9,27 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 )
 
+// maxConcurrentRequests bounds the holder's in-flight request handlers per connection,
+// shedding excess streams so a peer cannot exhaust memory by opening many at once.
+const maxConcurrentRequests = 64
+
 // Server answers blind blob requests over a peer connection from the per-folder stores
 // this holder keeps.
 type Server struct {
 	stores   map[string]*Store
 	allowPut func(ctx context.Context, folderID, peerID string) (bool, error)
 	log      *slog.Logger
+	sem      chan struct{}
 	wg       sync.WaitGroup
 }
 
 // NewServer builds a holder server over folderID->store. allowPut authorizes a peer to
-// store blobs for a folder; nil allows any connected peer.
+// store blobs for a folder; a nil allowPut rejects every put (fail closed).
 func NewServer(stores map[string]*Store, allowPut func(ctx context.Context, folderID, peerID string) (bool, error), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Server{stores: stores, allowPut: allowPut, log: log}
+	return &Server{stores: stores, allowPut: allowPut, log: log, sem: make(chan struct{}, maxConcurrentRequests)}
 }
 
 // Serve answers blind blob requests on conn until ctx is cancelled or the connection
@@ -36,13 +41,23 @@ func (s *Server) Serve(ctx context.Context, conn netio.Conn) {
 			s.wg.Wait()
 			return
 		}
-		s.wg.Go(func() { s.handle(ctx, stream, conn.PeerNodeID()) })
+		select {
+		case s.sem <- struct{}{}:
+		default:
+			s.log.Warn("holder: shedding request, too many in flight", "peer", conn.PeerNodeID())
+			_ = stream.Close()
+			continue
+		}
+		s.wg.Go(func() {
+			defer func() { <-s.sem }()
+			s.handle(ctx, stream, conn.PeerNodeID())
+		})
 	}
 }
 
 func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string) {
 	defer func() { _ = stream.Close() }()
-	op, folderID, blinded, payload, err := readRequest(stream)
+	op, folderID, blinded, err := readRequestHeader(stream)
 	if err != nil {
 		s.log.Debug("holder: read request", "peer", peerID, "err", err)
 		return
@@ -67,7 +82,13 @@ func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string)
 	case opPut:
 		if !s.putAllowed(ctx, folderID, peerID) {
 			s.log.Warn("holder: rejecting put from unauthorized peer", "folder", folderID, "peer", peerID)
+			_ = drainPayload(stream)
 			_ = writeResponse(stream, StatusError, nil)
+			return
+		}
+		payload, err := readPayload(stream)
+		if err != nil {
+			s.log.Debug("holder: read payload", "folder", folderID, "err", err)
 			return
 		}
 		if err := store.Put(blinded, payload); err != nil {
@@ -81,7 +102,8 @@ func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string)
 
 func (s *Server) putAllowed(ctx context.Context, folderID, peerID string) bool {
 	if s.allowPut == nil {
-		return true
+		s.log.Error("holder: no put authorization configured, rejecting", "peer", peerID)
+		return false
 	}
 	ok, err := s.allowPut(ctx, folderID, peerID)
 	if err != nil {

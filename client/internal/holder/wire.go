@@ -20,8 +20,8 @@ const (
 	HolderVersion uint8 = 1
 	// MaxBlobBytes bounds one blob (a sealed chunk or the sealed catalog).
 	MaxBlobBytes uint32 = 64 << 20
-	// MaxHolderFolderIDLen bounds the folder id in a request.
-	MaxHolderFolderIDLen = 512
+	// MaxFolderIDLen bounds the folder id in a request.
+	MaxFolderIDLen = 512
 
 	opGet byte = 0x01
 	opPut byte = 0x02
@@ -48,7 +48,7 @@ var (
 )
 
 func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindLen]byte, payload []byte) error {
-	if len(folderID) > MaxHolderFolderIDLen {
+	if len(folderID) > MaxFolderIDLen {
 		return errHolderIDTooLong
 	}
 	if uint32(len(payload)) > MaxBlobBytes {
@@ -70,46 +70,69 @@ func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindLe
 	return nil
 }
 
-func readRequest(r io.Reader) (op byte, folderID string, blinded [crypto.BlindLen]byte, payload []byte, err error) {
+// readRequestHeader reads the fixed-size request head (op, folder id, blinded id) but not
+// a put's payload, so the server can authorize a put before allocating its bytes.
+func readRequestHeader(r io.Reader) (op byte, folderID string, blinded [crypto.BlindLen]byte, err error) {
 	var head [8]byte
 	if _, err = io.ReadFull(r, head[:]); err != nil {
-		return 0, "", blinded, nil, fmt.Errorf("holder: read request header: %w", err)
+		return 0, "", blinded, fmt.Errorf("holder: read request header: %w", err)
 	}
 	if binary.BigEndian.Uint32(head[0:4]) != HolderMagic {
-		return 0, "", blinded, nil, errBadHolderMagic
+		return 0, "", blinded, errBadHolderMagic
 	}
 	if head[4] != HolderVersion {
-		return 0, "", blinded, nil, errHolderVersion
+		return 0, "", blinded, errHolderVersion
 	}
 	op = head[5]
 	if op != opGet && op != opPut {
-		return 0, "", blinded, nil, errBadOp
+		return 0, "", blinded, errBadOp
 	}
 	folderLen := binary.BigEndian.Uint16(head[6:8])
-	if folderLen > MaxHolderFolderIDLen {
-		return 0, "", blinded, nil, errHolderIDTooLong
+	if folderLen > MaxFolderIDLen {
+		return 0, "", blinded, errHolderIDTooLong
 	}
 	body := make([]byte, int(folderLen)+crypto.BlindLen)
 	if _, err = io.ReadFull(r, body); err != nil {
-		return 0, "", blinded, nil, fmt.Errorf("holder: read request body: %w", err)
+		return 0, "", blinded, fmt.Errorf("holder: read request body: %w", err)
 	}
 	folderID = string(body[:folderLen])
 	copy(blinded[:], body[folderLen:])
-	if op == opPut {
-		var lenBuf [4]byte
-		if _, err = io.ReadFull(r, lenBuf[:]); err != nil {
-			return 0, "", blinded, nil, fmt.Errorf("holder: read payload length: %w", err)
-		}
-		n := binary.BigEndian.Uint32(lenBuf[:])
-		if n > MaxBlobBytes {
-			return 0, "", blinded, nil, errBlobTooLarge
-		}
-		payload = make([]byte, n)
-		if _, err = io.ReadFull(r, payload); err != nil {
-			return 0, "", blinded, nil, fmt.Errorf("holder: read payload: %w", err)
-		}
+	return op, folderID, blinded, nil
+}
+
+func readPayload(r io.Reader) ([]byte, error) {
+	n, err := payloadLen(r)
+	if err != nil {
+		return nil, err
 	}
-	return op, folderID, blinded, payload, nil
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, fmt.Errorf("holder: read payload: %w", err)
+	}
+	return payload, nil
+}
+
+// drainPayload reads and discards a put payload without allocating it, so the server can
+// reject an unauthorized put without holding its bytes or stalling the sender.
+func drainPayload(r io.Reader) error {
+	n, err := payloadLen(r)
+	if err != nil {
+		return err
+	}
+	_, err = io.CopyN(io.Discard, r, int64(n))
+	return err
+}
+
+func payloadLen(r io.Reader) (uint32, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return 0, fmt.Errorf("holder: read payload length: %w", err)
+	}
+	n := binary.BigEndian.Uint32(lenBuf[:])
+	if n > MaxBlobBytes {
+		return 0, errBlobTooLarge
+	}
+	return n, nil
 }
 
 func writeResponse(w io.Writer, status BlobStatus, payload []byte) error {

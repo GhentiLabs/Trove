@@ -57,9 +57,13 @@ func TestRequestResponseRoundTrip(t *testing.T) {
 	if err := writeRequest(&buf, opPut, "folder-x", blinded, payload); err != nil {
 		t.Fatalf("writeRequest: %v", err)
 	}
-	op, fid, gotBlinded, gotPayload, err := readRequest(&buf)
+	op, fid, gotBlinded, err := readRequestHeader(&buf)
 	if err != nil {
-		t.Fatalf("readRequest: %v", err)
+		t.Fatalf("readRequestHeader: %v", err)
+	}
+	gotPayload, err := readPayload(&buf)
+	if err != nil {
+		t.Fatalf("readPayload: %v", err)
 	}
 	if op != opPut || fid != "folder-x" || gotBlinded != blinded || !bytes.Equal(gotPayload, payload) {
 		t.Fatalf("round-trip mismatch: op=%d fid=%q payload=%q", op, fid, gotPayload)
@@ -79,12 +83,14 @@ func TestRequestResponseRoundTrip(t *testing.T) {
 }
 
 func TestReadRequestRejectsBadMagic(t *testing.T) {
-	buf := make([]byte, 12)
+	buf := make([]byte, 8)
 	binary.BigEndian.PutUint32(buf, 0xDEADBEEF)
-	if _, _, _, _, err := readRequest(bytes.NewReader(buf)); err == nil {
-		t.Fatal("readRequest accepted bad magic")
+	if _, _, _, err := readRequestHeader(bytes.NewReader(buf)); err == nil {
+		t.Fatal("readRequestHeader accepted bad magic")
 	}
 }
+
+func allowAll(context.Context, string, string) (bool, error) { return true, nil }
 
 // TestServeExportRestoreOverConn drives Export and Restore through the live holder wire
 // protocol over a MemNet connection: a writer pushes blinded blobs to a holder server,
@@ -104,7 +110,7 @@ func TestServeExportRestoreOverConn(t *testing.T) {
 		t.Fatalf("holder Open: %v", err)
 	}
 	holderConn, peerConn := connPair(t, ctx)
-	srv := NewServer(map[string]*Store{fid: store}, nil, nil)
+	srv := NewServer(map[string]*Store{fid: store}, allowAll, nil)
 	go srv.Serve(ctx, holderConn)
 
 	if err := Export(ctx, key, src.model, src.chunks, src.fc, PutBlobOverConn(peerConn, fid)); err != nil {
@@ -115,6 +121,42 @@ func TestServeExportRestoreOverConn(t *testing.T) {
 		t.Fatalf("Restore over conn: %v", err)
 	}
 	assertTreesEqual(t, src.root, dst.root)
+}
+
+// TestServeRejectsUnauthorizedPut checks a holder refuses to store a blob from a peer that
+// allowPut denies (a reader, or an authorization error), failing closed.
+func TestServeRejectsUnauthorizedPut(t *testing.T) {
+	cases := []struct {
+		name     string
+		allowPut func(context.Context, string, string) (bool, error)
+	}{
+		{"denied", func(context.Context, string, string) (bool, error) { return false, nil }},
+		{"error", func(context.Context, string, string) (bool, error) { return false, errBadOp }},
+		{"nil callback", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			const fid = "fid"
+			holderConn, peerConn := connPair(t, ctx)
+			srv := NewServer(map[string]*Store{fid: store}, tc.allowPut, nil)
+			go srv.Serve(ctx, holderConn)
+
+			var blinded [crypto.BlindLen]byte
+			blinded[0] = 0xAB
+			err = PutBlobOverConn(peerConn, fid)(ctx, blinded, []byte("ciphertext"))
+			if err == nil {
+				t.Fatal("unauthorized put succeeded")
+			}
+			if store.Has(blinded) {
+				t.Fatal("unauthorized put was stored")
+			}
+		})
+	}
 }
 
 func connPair(t *testing.T, ctx context.Context) (a, b netio.Conn) {
