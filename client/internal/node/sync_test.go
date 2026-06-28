@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
@@ -162,6 +163,42 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 	}
 	if _, _, err := cfg2.GetFolderKey(ctx, group2); !errors.Is(err, config.ErrNoKey) {
 		t.Fatalf("short key was stored; want ErrNoKey")
+	}
+}
+
+// TestHolderPushCoalesces checks the live-mirror pusher collapses a burst of change triggers
+// during one in-flight push into a single queued re-run, and that stop prevents new runs.
+func TestHolderPushCoalesces(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	set := &holderPushSet{ctx: ctx}
+
+	var runs atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p := &holderPusher{folder: "f", log: slog.New(slog.DiscardHandler), do: func(context.Context) error {
+		runs.Add(1)
+		started <- struct{}{}
+		<-release
+		return nil
+	}}
+
+	set.trigger(p)
+	<-started // run 1 is in do
+	set.trigger(p)
+	set.trigger(p)
+	set.trigger(p) // coalesced: dirty, no new run
+	release <- struct{}{}
+	<-started // run 2 (the single queued re-run) is in do
+	release <- struct{}{}
+	set.stop()
+
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("runs = %d, want 2 (initial + one coalesced re-run)", got)
+	}
+	set.trigger(p)
+	if runs.Load() != 2 {
+		t.Fatal("trigger after stop started a new run")
 	}
 }
 

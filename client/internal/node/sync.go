@@ -270,15 +270,15 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				srv.Serve(sctx, sess.Conn())
 			}()
 		}
+		var stopHolderPush func()
 		if len(rt.folders) > 0 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				rt.pushToHolders(sctx, log, sess, shared)
-			}()
+			stopHolderPush = rt.startHolderPush(sctx, log, sess, shared)
 		}
 		return func() {
 			cancel()
+			if stopHolderPush != nil {
+				stopHolderPush()
+			}
 			wg.Wait()
 			gossip.removePeer(peerID, sess)
 		}
@@ -301,9 +301,14 @@ func (rt *syncRuntime) holderPutAllowed(ctx context.Context, folderID, peerID st
 	return rt.isWriter(ctx, folderID, peerID)
 }
 
-// pushToHolders exports each shared encrypted folder this node writes to a peer that holds it.
-func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool) {
+// startHolderPush mirrors each shared encrypted folder this node writes to a peer that holds
+// it: an initial reconcile, then a coalesced re-reconcile on every local change. The returned
+// stop unsubscribes and waits for in-flight pushes; call it before cancelling the session ctx.
+func (rt *syncRuntime) startHolderPush(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool) func() {
+	set := &holderPushSet{ctx: ctx}
+	var cancels []func()
 	peerID := sess.PeerNodeID()
+	conn := sess.Conn()
 	for _, fc := range rt.folders {
 		if !shared[fc.FolderID] {
 			continue
@@ -326,12 +331,84 @@ func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess
 		if err != nil {
 			continue
 		}
-		exportCtx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
-		conn := sess.Conn()
-		if err := holder.Reconcile(ctx, key, fc.Model, fc.Chunks, exportCtx, holder.HasBlobsOverConn(conn, cf.ShareID), holder.PutBlobOverConn(conn, cf.ShareID)); err != nil {
-			log.Warn("node: push to holder", "folder", cf.ShareID, "peer", peerID, "err", err)
-		}
+		target, shareID, folderKey := fc, cf.ShareID, key
+		p := &holderPusher{folder: shareID, log: log, do: func(ctx context.Context) error {
+			exportCtx := chunkstore.FolderContext{Encrypted: true, MasterKey: folderKey}
+			return holder.Reconcile(ctx, folderKey, target.Model, target.Chunks, exportCtx, holder.HasBlobsOverConn(conn, shareID), holder.PutBlobOverConn(conn, shareID))
+		}}
+		set.trigger(p)
+		cancels = append(cancels, target.Coord.OnAnnounce(func() { set.trigger(p) }))
 	}
+	return func() {
+		for _, c := range cancels {
+			c()
+		}
+		set.stop()
+	}
+}
+
+// holderPusher reconciles one folder to one holder, coalescing concurrent triggers into a
+// single in-flight run plus at most one queued re-run.
+type holderPusher struct {
+	do     func(context.Context) error
+	folder string
+	log    *slog.Logger
+
+	mu      sync.Mutex
+	running bool
+	dirty   bool
+}
+
+// holderPushSet owns the goroutines of a session's holder pushers, so they can be drained
+// without racing a late trigger from an in-flight change notification.
+type holderPushSet struct {
+	ctx context.Context
+
+	mu      sync.Mutex
+	stopped bool
+	wg      sync.WaitGroup
+}
+
+func (s *holderPushSet) trigger(p *holderPusher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+	p.mu.Lock()
+	if p.running {
+		p.dirty = true
+		p.mu.Unlock()
+		return
+	}
+	p.running = true
+	p.mu.Unlock()
+	s.wg.Add(1)
+	go s.run(p)
+}
+
+func (s *holderPushSet) run(p *holderPusher) {
+	defer s.wg.Done()
+	for {
+		if err := p.do(s.ctx); err != nil && s.ctx.Err() == nil {
+			p.log.Warn("node: push to holder", "folder", p.folder, "err", err)
+		}
+		p.mu.Lock()
+		if !p.dirty || s.ctx.Err() != nil {
+			p.running = false
+			p.mu.Unlock()
+			return
+		}
+		p.dirty = false
+		p.mu.Unlock()
+	}
+}
+
+func (s *holderPushSet) stop() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+	s.wg.Wait()
 }
 
 // attachFolders returns the engine configs to attach for a session and the folder keys
