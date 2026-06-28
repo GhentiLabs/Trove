@@ -116,7 +116,7 @@ func writeBlindedList(w io.Writer, op byte, folderID string, ids [][crypto.Blind
 		return errHolderIDTooLong
 	}
 	if len(ids) > MaxHasBatch {
-		return fmt.Errorf("holder: has-batch of %d exceeds %d", len(ids), MaxHasBatch)
+		return fmt.Errorf("holder: id list of %d exceeds %d", len(ids), MaxHasBatch)
 	}
 	buf := make([]byte, 0, 8+len(folderID)+2+len(ids)*crypto.BlindIDLen)
 	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
@@ -140,7 +140,7 @@ func readBlindedList(r io.Reader) ([][crypto.BlindIDLen]byte, error) {
 	}
 	n := binary.BigEndian.Uint16(countBuf[:])
 	if n > MaxHasBatch {
-		return nil, fmt.Errorf("holder: has-batch of %d exceeds %d", n, MaxHasBatch)
+		return nil, fmt.Errorf("holder: id list of %d exceeds %d", n, MaxHasBatch)
 	}
 	ids := make([][crypto.BlindIDLen]byte, n)
 	for i := range ids {
@@ -204,8 +204,8 @@ func decodeBlobRefs(payload []byte) ([]BlobRef, error) {
 	n := int(binary.BigEndian.Uint16(payload[:2]))
 	rest := payload[2:]
 	const sz = crypto.BlindIDLen + 8
-	if len(rest) < n*sz {
-		return nil, fmt.Errorf("holder: truncated list response")
+	if len(rest) != n*sz {
+		return nil, fmt.Errorf("holder: list response has %d bytes for %d refs", len(rest), n)
 	}
 	refs := make([]BlobRef, n)
 	for i := range refs {

@@ -122,6 +122,48 @@ func TestHasBatchGoldenLayout(t *testing.T) {
 	}
 }
 
+func TestListAndDeleteGoldenLayout(t *testing.T) {
+	var after [crypto.BlindIDLen]byte
+	for i := range after {
+		after[i] = byte(i)
+	}
+	var buf bytes.Buffer
+	if err := writeListRequest(&buf, "fid", after, 100); err != nil {
+		t.Fatalf("writeListRequest: %v", err)
+	}
+	want := []byte{0x54, 0x48, 0x4C, 0x44, 0x01, 0x05, 0x00, 0x03, 'f', 'i', 'd'}
+	want = append(want, after[:]...)
+	want = append(want, 0x00, 0x64) // limit=100
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("list request layout:\n got %x\nwant %x", buf.Bytes(), want)
+	}
+
+	refs := []BlobRef{{ID: [crypto.BlindIDLen]byte{0xAA}, ModMillis: 0x0102030405060708}}
+	payload := encodeBlobRefs(refs)
+	wantPayload := []byte{0x00, 0x01}
+	wantPayload = append(wantPayload, refs[0].ID[:]...)
+	wantPayload = append(wantPayload, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08)
+	if !bytes.Equal(payload, wantPayload) {
+		t.Fatalf("BlobRef encoding:\n got %x\nwant %x", payload, wantPayload)
+	}
+	got, err := decodeBlobRefs(payload)
+	if err != nil || len(got) != 1 || got[0] != refs[0] {
+		t.Fatalf("BlobRef round-trip = %v err=%v", got, err)
+	}
+	if _, err := decodeBlobRefs(append(payload, 0xFF)); err == nil {
+		t.Fatal("decodeBlobRefs accepted trailing bytes")
+	}
+
+	buf.Reset()
+	var id [crypto.BlindIDLen]byte
+	if err := writeBlindedList(&buf, opDelete, "f", [][crypto.BlindIDLen]byte{id}); err != nil {
+		t.Fatalf("writeBlindedList opDelete: %v", err)
+	}
+	if buf.Bytes()[5] != 0x06 {
+		t.Fatalf("opDelete opcode = %#x, want 0x06", buf.Bytes()[5])
+	}
+}
+
 func TestReadRequestRejectsBadMagic(t *testing.T) {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint32(buf, 0xDEADBEEF)

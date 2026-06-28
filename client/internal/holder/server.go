@@ -16,20 +16,20 @@ const maxConcurrentRequests = 64
 // Server answers blind blob requests over a peer connection from the per-folder stores
 // this holder keeps.
 type Server struct {
-	stores   map[string]*Store
-	allowPut func(ctx context.Context, folderID, peerID string) (bool, error)
-	log      *slog.Logger
-	sem      chan struct{}
-	wg       sync.WaitGroup
+	stores     map[string]*Store
+	allowWrite func(ctx context.Context, folderID, peerID string) (bool, error)
+	log        *slog.Logger
+	sem        chan struct{}
+	wg         sync.WaitGroup
 }
 
-// NewServer builds a holder server over folderID->store. allowPut authorizes a peer to
-// store blobs for a folder; a nil allowPut rejects every put (fail closed).
-func NewServer(stores map[string]*Store, allowPut func(ctx context.Context, folderID, peerID string) (bool, error), log *slog.Logger) *Server {
+// NewServer builds a holder server over folderID->store. allowWrite authorizes a peer to
+// store blobs for a folder; a nil allowWrite rejects every put (fail closed).
+func NewServer(stores map[string]*Store, allowWrite func(ctx context.Context, folderID, peerID string) (bool, error), log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Server{stores: stores, allowPut: allowPut, log: log, sem: make(chan struct{}, maxConcurrentRequests)}
+	return &Server{stores: stores, allowWrite: allowWrite, log: log, sem: make(chan struct{}, maxConcurrentRequests)}
 }
 
 // Serve answers blind blob requests on conn until ctx is cancelled or the connection
@@ -103,7 +103,7 @@ func (s *Server) serveDelete(ctx context.Context, stream netio.Stream, store *St
 		s.log.Debug("holder: read delete", "folder", folderID, "err", err)
 		return
 	}
-	if store == nil || !s.putAllowed(ctx, folderID, peerID) {
+	if store == nil || !s.writeAllowed(ctx, folderID, peerID) {
 		s.log.Warn("holder: rejecting delete", "folder", folderID, "peer", peerID)
 		_ = writeResponse(stream, StatusError, nil)
 		return
@@ -156,7 +156,7 @@ func (s *Server) servePut(ctx context.Context, stream netio.Stream, store *Store
 	if err != nil {
 		return
 	}
-	if store == nil || !s.putAllowed(ctx, folderID, peerID) {
+	if store == nil || !s.writeAllowed(ctx, folderID, peerID) {
 		s.log.Warn("holder: rejecting put", "folder", folderID, "peer", peerID)
 		_ = drainPayload(stream)
 		_ = writeResponse(stream, StatusError, nil)
@@ -175,12 +175,12 @@ func (s *Server) servePut(ctx context.Context, stream netio.Stream, store *Store
 	_ = writeResponse(stream, StatusOK, nil)
 }
 
-func (s *Server) putAllowed(ctx context.Context, folderID, peerID string) bool {
-	if s.allowPut == nil {
+func (s *Server) writeAllowed(ctx context.Context, folderID, peerID string) bool {
+	if s.allowWrite == nil {
 		s.log.Error("holder: no put authorization configured, rejecting", "peer", peerID)
 		return false
 	}
-	ok, err := s.allowPut(ctx, folderID, peerID)
+	ok, err := s.allowWrite(ctx, folderID, peerID)
 	if err != nil {
 		s.log.Warn("holder: put authorization", "folder", folderID, "peer", peerID, "err", err)
 		return false
