@@ -10,7 +10,7 @@ import (
 )
 
 // Server answers blind blob requests over a peer connection from the per-folder stores
-// this holder keeps. It holds no key and serves only opaque ciphertext.
+// this holder keeps.
 type Server struct {
 	stores   map[string]*Store
 	allowPut func(ctx context.Context, folderID, peerID string) (bool, error)
@@ -27,8 +27,8 @@ func NewServer(stores map[string]*Store, allowPut func(ctx context.Context, fold
 	return &Server{stores: stores, allowPut: allowPut, log: log}
 }
 
-// Serve accepts streams on conn and answers each as a blind get or put until ctx is
-// cancelled or the connection closes, then waits for in-flight requests to finish.
+// Serve answers blind blob requests on conn until ctx is cancelled or the connection
+// closes, then waits for in-flight requests to finish.
 func (s *Server) Serve(ctx context.Context, conn netio.Conn) {
 	for {
 		stream, err := conn.AcceptStream(ctx)

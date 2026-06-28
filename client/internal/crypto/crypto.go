@@ -33,8 +33,7 @@ const (
 	ArgonThreads   uint8  = 4
 )
 
-// The chunk identity is bound through the HKDF info; the salt is a fixed,
-// non-secret domain separator.
+// Fixed, non-secret domain separators.
 var (
 	hkdfLabel = []byte("trove/chunk/v1")
 	hkdfSalt  = []byte("trove/chunk-keys")
@@ -91,8 +90,7 @@ func Open(master [MasterKeyLen]byte, id hasher.ChunkID, ciphertext []byte) ([]by
 	return out, nil
 }
 
-// FolderVerifier derives a non-secret token from the folder master key, used to
-// detect a key mismatch between members before syncing.
+// FolderVerifier derives a non-secret key-mismatch token from the folder master key.
 func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 	info := make([]byte, 0, len(verifyLabel)+len(folderID))
 	info = append(info, verifyLabel...)
@@ -106,9 +104,7 @@ func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 }
 
 // BlindID derives the opaque id under which a holder stores a blob, from the folder
-// master key and the blob's true id. A holder, lacking the key, cannot map a blinded id
-// back to the content id or correlate it across folders; key-holders derive it
-// deterministically, so identical content dedups within a folder.
+// master key and the blob's true id.
 func BlindID(master [MasterKeyLen]byte, id []byte) [BlindLen]byte {
 	info := make([]byte, 0, len(blindLabel)+len(id))
 	info = append(info, blindLabel...)

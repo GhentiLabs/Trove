@@ -213,7 +213,7 @@ func (x *Header) GetCompression() uint32 {
 // nodes solely by folder_id (the shared string agreed at pairing), independent of
 // the encryption key. encryption_verifier is a non-secret token derived from the
 // folder key (empty when the peer holds no key); two key-holders refuse to sync a
-// folder whose verifiers differ, surfacing a key mismatch instead of corrupting.
+// folder whose verifiers differ.
 type Folder struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	FolderId           string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`
@@ -1004,8 +1004,7 @@ func (x *SyncReceipt) GetHighWaterSequence() int64 {
 }
 
 // FolderKey delivers an encrypted folder's master key to a trusted member over the
-// mutually-authenticated session. Only a roster writer's delivery is accepted, and a
-// holder is never sent one. The key never touches the discovery server.
+// mutually-authenticated session; the key never touches the discovery server.
 type FolderKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FolderId      string                 `protobuf:"bytes,1,opt,name=folder_id,json=folderId,proto3" json:"folder_id,omitempty"`

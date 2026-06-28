@@ -70,8 +70,8 @@ type Folder struct {
 	// ShareID is the cross-node match key agreed at pairing, distinct from ID and the
 	// encryption key. Empty until the folder is paired.
 	ShareID string
-	// Holder marks a folder this node stores only as untrusted ciphertext: it keeps
-	// blinded blobs and never holds the key, a root tree, or plaintext.
+	// Holder marks a folder this node stores only as untrusted ciphertext, never the
+	// key or plaintext.
 	Holder bool
 }
 
@@ -271,8 +271,7 @@ func (s *Store) GenerateFolderKey(ctx context.Context, id string) ([MasterKeyLen
 }
 
 // DeliverFolderKey stores a key received from a trusted member, only if the folder
-// has none yet. A replayed or duplicate delivery returns ErrKeyExists, which the
-// caller treats as already-keyed; it never clobbers a stored key.
+// has none yet. A replay or duplicate returns ErrKeyExists.
 func (s *Store) DeliverFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte, generation int) error {
 	return s.setKeyIfAbsent(ctx, id, key[:], generation, nil, nil, nil, nil)
 }

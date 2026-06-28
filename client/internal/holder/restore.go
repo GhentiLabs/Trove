@@ -19,10 +19,7 @@ import (
 // errChunkMismatch means a restored chunk's plaintext did not hash to its expected id.
 var errChunkMismatch = errors.New("holder: restored chunk failed verification")
 
-// Restore rebuilds a folder's plaintext tree under root from a holder's blinded blobs:
-// it fetches and decrypts the catalog, fetches and verifies each chunk into the local
-// chunk store, then materializes every manifest. A tampered or wrong-key blob fails the
-// AEAD or the hash check rather than corrupting the tree.
+// Restore rebuilds a folder's plaintext tree under root from a holder's blinded blobs.
 func Restore(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, root string, get GetBlob) error {
 	sealedCatalog, err := get(ctx, crypto.BlindID(master, catalogID[:]))
 	if err != nil {
@@ -71,8 +68,7 @@ func restoreChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks
 }
 
 func materialize(ctx context.Context, chunks *chunkstore.Store, fc chunkstore.FolderContext, root string, manifests []manifest.Manifest) error {
-	// Validate the whole catalog before touching the filesystem: a hostile writer's
-	// sealed catalog must not plant a path or symlink target that escapes the root.
+	// Validate every manifest before touching the filesystem.
 	for _, mf := range manifests {
 		if err := model.ValidateManifest(mf); err != nil {
 			return fmt.Errorf("holder: reject manifest %q: %w", mf.Path, err)

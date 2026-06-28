@@ -19,8 +19,7 @@ const (
 
 var errBadCatalog = errors.New("holder: malformed catalog")
 
-// EncodeCatalog renders the folder's live manifests as canonical bytes, sorted by path so
-// the same tree always yields identical bytes (and thus identical sealed ciphertext).
+// EncodeCatalog renders the folder's live manifests as canonical bytes, sorted by path.
 func EncodeCatalog(manifests []manifest.Manifest) []byte {
 	sorted := append([]manifest.Manifest(nil), manifests...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })

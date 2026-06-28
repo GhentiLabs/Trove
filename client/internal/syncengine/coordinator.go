@@ -56,8 +56,7 @@ func NewCoordinator(folderID string, fc chunkstore.FolderContext, chunks *chunks
 	}
 }
 
-// SetFolderContext updates the encryption context used when storing pulled chunks,
-// so a folder whose key arrives after startup begins sealing once it is delivered.
+// SetFolderContext updates the encryption context used when storing pulled chunks.
 func (c *Coordinator) SetFolderContext(fc chunkstore.FolderContext) {
 	c.fcMu.Lock()
 	c.fc = fc

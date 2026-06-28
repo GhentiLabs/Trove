@@ -193,10 +193,8 @@ func (rt *syncRuntime) close() {
 // errReattachAfterKey ends a session once a folder key has just been delivered.
 var errReattachAfterKey = errors.New("node: reattach after folder key delivery")
 
-// onSession returns a peermgr hook that, for each session, registers the peer with the
-// gossiper and (when the two share folders) attaches a sync engine. A composite control
-// handler routes membership gossip to the gossiper, folder-key delivery to the key sink,
-// and everything else to the engine. Encrypted folders attach only once keyed.
+// onSession returns a peermgr hook that registers each session's peer with the gossiper
+// and attaches a sync engine when the two share folders.
 func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(context.Context, *session.Session) func() {
 	return func(ctx context.Context, sess *session.Session) func() {
 		peerID := sess.PeerNodeID()
@@ -300,8 +298,7 @@ func (rt *syncRuntime) holderPutAllowed(ctx context.Context, folderID, peerID st
 	return rt.isWriter(ctx, folderID, peerID)
 }
 
-// pushToHolders exports each shared encrypted folder this node writes to any peer that is
-// a holder of it, sealing the catalog and chunks under blinded ids over the session.
+// pushToHolders exports each shared encrypted folder this node writes to a peer that holds it.
 func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool) {
 	peerID := sess.PeerNodeID()
 	for _, fc := range rt.folders {
@@ -334,10 +331,8 @@ func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess
 	}
 }
 
-// attachFolders resolves the shared folders for a session: it returns the engine
-// configs to attach (an encrypted folder is included only once its key is known, with
-// the live key threaded into its coordinator) and the folder keys to deliver to a
-// trusted peer that may still lack them.
+// attachFolders returns the engine configs to attach for a session and the folder keys
+// to deliver to the peer. An encrypted folder is attached only once its key is known.
 func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peerID string, shared map[string]bool) (fcs []syncengine.FolderConfig, deliveries []*wirepb.FolderKey) {
 	for _, fc := range rt.folders {
 		if !shared[fc.FolderID] {
@@ -367,10 +362,8 @@ func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peer
 	return fcs, deliveries
 }
 
-// deliverable returns a folder-key message for peerID when this node is a writer able
-// to share the key and the peer is a trusted member; a holder or non-member gets nil.
-// The key is re-offered on every reconnect; that is safe because the receiver stores it
-// only if absent (DeliverFolderKey), and it never leaves the authenticated session.
+// deliverable returns a folder-key message for peerID when this node is a writer and the
+// peer is a trusted member; a holder or non-member gets nil.
 func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string, key [config.MasterKeyLen]byte, gen int) *wirepb.FolderKey {
 	mine, err := rt.isWriter(ctx, cf.ShareID, rt.self)
 	if err != nil {
@@ -392,8 +385,8 @@ func (rt *syncRuntime) deliverable(ctx context.Context, log *slog.Logger, cf con
 }
 
 // receiveFolderKey persists a key delivered by a roster writer for a folder this node
-// still lacks, then ends the session so it reconnects and attaches the folder. A
-// delivery from a non-writer, for an unknown or already-keyed folder, is ignored.
+// still lacks, then ends the session to reattach. A delivery from a non-writer or for an
+// unknown or already-keyed folder is ignored.
 func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey) error {
 	cf, ok := rt.byShare[fk.GetFolderId()]
 	if !ok || !cf.Encrypted || cf.Holder {
@@ -425,8 +418,8 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 	}
 }
 
-// peerTrusted reports whether nodeID is a member entitled to the folder key — a reader,
-// writer, or founder. A holder or non-member is not.
+// peerTrusted reports whether nodeID is a member entitled to the folder key: a reader,
+// writer, or founder.
 func (rt *syncRuntime) peerTrusted(ctx context.Context, groupID, nodeID string) (bool, error) {
 	role, ok, err := rt.effectiveRole(ctx, groupID, nodeID)
 	return ok && (role == membership.RoleWriter || role == membership.RoleReader), err

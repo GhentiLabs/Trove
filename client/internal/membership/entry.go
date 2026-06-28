@@ -33,8 +33,7 @@ const (
 	RoleReader Role = 0
 	// RoleWriter may read, write, and add members. The owner is the founding writer.
 	RoleWriter Role = 1
-	// RoleHolder stores a folder's ciphertext without its key: it serves opaque blinded
-	// blobs back to trusted members but cannot read, write, or add members.
+	// RoleHolder stores a folder's ciphertext without its key; it cannot read, write, or add members.
 	RoleHolder Role = 2
 )
 
