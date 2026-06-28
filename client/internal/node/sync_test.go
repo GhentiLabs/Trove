@@ -171,7 +171,7 @@ func TestReceiveFolderKeyRejectsNonWriter(t *testing.T) {
 func TestHolderPushCoalesces(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	set := &holderPushSet{ctx: ctx}
+	set := &holderPusherSet{ctx: ctx}
 
 	var runs atomic.Int64
 	started := make(chan struct{})

@@ -22,7 +22,7 @@ const (
 	MaxBlobBytes uint32 = 64 << 20
 	// MaxFolderIDLen bounds the folder id in a request.
 	MaxFolderIDLen = 512
-	// MaxHasBatch bounds the number of blinded ids in one has-batch request.
+	// MaxHasBatch bounds the number of blinded ids in one has-batch or delete request.
 	MaxHasBatch = 4096
 
 	opGet      byte = 0x01
@@ -202,6 +202,9 @@ func decodeBlobRefs(payload []byte) ([]BlobRef, error) {
 		return nil, fmt.Errorf("holder: short list response")
 	}
 	n := int(binary.BigEndian.Uint16(payload[:2]))
+	if n > MaxListPage {
+		return nil, fmt.Errorf("holder: list response count %d exceeds %d", n, MaxListPage)
+	}
 	rest := payload[2:]
 	const sz = crypto.BlindIDLen + 8
 	if len(rest) != n*sz {

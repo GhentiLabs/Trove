@@ -198,8 +198,6 @@ func (rt *syncRuntime) close() {
 // errReattachAfterKey ends a session once a folder key has just been delivered.
 var errReattachAfterKey = errors.New("node: reattach after folder key delivery")
 
-// holderGCGraceMillis keeps a holder GC sweep from reaping any blob written within the last
-// hour, so a concurrent writer's in-flight push is never deleted.
 const holderGCGraceMillis = int64(time.Hour / time.Millisecond)
 
 // onSession returns a peermgr hook that registers each session's peer with the gossiper
@@ -306,10 +304,10 @@ func (rt *syncRuntime) holderPutAllowed(ctx context.Context, folderID, peerID st
 }
 
 // startHolderPush mirrors each shared encrypted folder this node writes to a peer that holds
-// it: an initial reconcile, then a coalesced re-reconcile on every local change. The returned
-// stop unsubscribes and waits for in-flight pushes; call it before cancelling the session ctx.
+// it, re-reconciling on every local change. The returned stop unsubscribes and waits for
+// in-flight pushes; cancel the session ctx before calling it so reconciles abort promptly.
 func (rt *syncRuntime) startHolderPush(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool) func() {
-	set := &holderPushSet{ctx: ctx}
+	set := &holderPusherSet{ctx: ctx}
 	var cancels []func()
 	peerID := sess.PeerNodeID()
 	conn := sess.Conn()
@@ -357,8 +355,6 @@ func (rt *syncRuntime) startHolderPush(ctx context.Context, log *slog.Logger, se
 	}
 }
 
-// holderPusher reconciles one folder to one holder, coalescing concurrent triggers into a
-// single in-flight run plus at most one queued re-run.
 type holderPusher struct {
 	do     func(context.Context) error
 	folder string
@@ -369,9 +365,7 @@ type holderPusher struct {
 	dirty   bool
 }
 
-// holderPushSet owns the goroutines of a session's holder pushers, so they can be drained
-// without racing a late trigger from an in-flight change notification.
-type holderPushSet struct {
+type holderPusherSet struct {
 	ctx context.Context
 
 	mu      sync.Mutex
@@ -379,7 +373,7 @@ type holderPushSet struct {
 	wg      sync.WaitGroup
 }
 
-func (s *holderPushSet) trigger(p *holderPusher) {
+func (s *holderPusherSet) trigger(p *holderPusher) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
@@ -393,12 +387,10 @@ func (s *holderPushSet) trigger(p *holderPusher) {
 	}
 	p.running = true
 	p.mu.Unlock()
-	s.wg.Add(1)
-	go s.run(p)
+	s.wg.Go(func() { s.run(p) })
 }
 
-func (s *holderPushSet) run(p *holderPusher) {
-	defer s.wg.Done()
+func (s *holderPusherSet) run(p *holderPusher) {
 	for {
 		if err := p.do(s.ctx); err != nil && s.ctx.Err() == nil {
 			p.log.Warn("node: push to holder", "folder", p.folder, "err", err)
@@ -414,7 +406,7 @@ func (s *holderPushSet) run(p *holderPusher) {
 	}
 }
 
-func (s *holderPushSet) stop() {
+func (s *holderPusherSet) stop() {
 	s.mu.Lock()
 	s.stopped = true
 	s.mu.Unlock()

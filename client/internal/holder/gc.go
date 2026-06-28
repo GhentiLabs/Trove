@@ -11,11 +11,8 @@ import (
 )
 
 // Collect reclaims a holder's blobs that the folder's current version no longer references
-// — superseded catalogs and chunks of deleted files. It pages the holder's blobs, keeps the
-// pointer, the live catalog, and every live chunk, and deletes the rest, skipping any blob
-// written within graceMillis so a concurrent writer's in-flight push is never reaped (the
-// holder cannot self-collect: it can't read the encrypted catalog). A wrongly-reaped blob
-// self-heals on the next reconcile.
+// — superseded catalogs and chunks of deleted files — skipping any blob written within
+// graceMillis to protect a concurrent writer's in-flight push.
 func Collect(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Store, list ListBlobs, del DeleteBlobs, graceMillis, nowMillis int64) error {
 	records, err := m.ListLiveManifests(ctx)
 	if err != nil {

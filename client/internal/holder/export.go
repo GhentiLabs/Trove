@@ -89,8 +89,7 @@ func uniqueChunks(live []manifest.Manifest) []hasher.ChunkID {
 	return ids
 }
 
-// pushConcurrency bounds how many chunk blobs are sealed and pushed at once, exploiting
-// QUIC's independent streams instead of one round-trip at a time.
+// pushConcurrency bounds how many chunk blobs are sealed and pushed at once.
 const pushConcurrency = 16
 
 func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, chunkIDs []hasher.ChunkID, has HasBlobs, put PutBlob) error {
@@ -122,10 +121,10 @@ func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, ch
 	})
 }
 
-// parallelDo runs fn over items with at most limit in flight, returning the first error and
-// cancelling the rest. It is the barrier before the catalog and pointer are written.
-func parallelDo(ctx context.Context, limit int, items []int, fn func(context.Context, int) error) error {
-	if len(items) == 0 {
+// parallelDo runs fn over each index with at most limit in flight, returning the first error
+// and cancelling the rest.
+func parallelDo(ctx context.Context, limit int, indices []int, fn func(context.Context, int) error) error {
+	if len(indices) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -134,16 +133,14 @@ func parallelDo(ctx context.Context, limit int, items []int, fn func(context.Con
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
-	for _, it := range items {
+	for _, i := range indices {
 		if ctx.Err() != nil {
 			break
 		}
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
-			if err := fn(ctx, it); err != nil {
+			if err := fn(ctx, i); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -151,7 +148,7 @@ func parallelDo(ctx context.Context, limit int, items []int, fn func(context.Con
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErr
