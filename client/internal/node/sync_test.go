@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
+	"github.com/GhentiLabs/Trove/client/internal/syncengine"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 	"github.com/GhentiLabs/Trove/pkg/identity"
 )
@@ -228,5 +230,82 @@ func TestDeliverableOnlyToTrustedMembers(t *testing.T) {
 	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 	if d := rt.folderKeyForPeer(ctx, slog.New(slog.DiscardHandler), cf, stranger, key, 1); d != nil {
 		t.Fatal("delivered a key to a non-member")
+	}
+
+	_, holderID, holderPub := openMembers(t)
+	if _, err := members.Add(ctx, group, holderID, holderPub, membership.RoleHolder); err != nil {
+		t.Fatalf("Add holder: %v", err)
+	}
+	if d := rt.folderKeyForPeer(ctx, slog.New(slog.DiscardHandler), cf, holderID, key, 1); d != nil {
+		t.Fatal("delivered a key to a holder")
+	}
+}
+
+// TestReceiveFolderKeyIgnoredForHolderFolder checks a holder node never stores a delivered
+// key, even from the founder.
+func TestReceiveFolderKeyIgnoredForHolderFolder(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	cfg := openConfig(t, "holder-self")
+	if err := cfg.AddFolder(ctx, config.Folder{ID: group, Root: "", ShareID: group, Encrypted: true, Holder: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	rt := &syncRuntime{self: "holder-self", members: members, cfg: cfg, byShare: map[string]config.Folder{
+		group: {ID: group, ShareID: group, Encrypted: true, Holder: true},
+	}}
+	var key [config.MasterKeyLen]byte
+	key[0] = 0x7
+	fk := &wirepb.FolderKey{FolderId: group, Key: key[:], KeyGeneration: 1}
+	if err := rt.receiveFolderKey(ctx, slog.New(slog.DiscardHandler), founderID, fk, nil); err != nil {
+		t.Fatalf("holder delivery err = %v, want nil", err)
+	}
+	if _, _, err := cfg.GetFolderKey(ctx, group); !errors.Is(err, config.ErrNoKey) {
+		t.Fatal("holder stored a delivered key; want ErrNoKey")
+	}
+}
+
+// TestAttachFoldersReconnectAfterKeyDelivery checks an encrypted folder is skipped while
+// unkeyed and attaches with the live key once delivered (the reconnect-to-attach flow).
+func TestAttachFoldersReconnectAfterKeyDelivery(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	cfg := openConfig(t, founderID)
+	if err := cfg.AddFolder(ctx, config.Folder{ID: group, Root: "/r", ShareID: group, Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	fc := syncengine.FolderConfig{
+		FolderID: group, Role: syncengine.RoleWriter,
+		Coord: syncengine.NewCoordinator(group, chunkstore.FolderContext{Encrypted: true}, nil, 0, nil),
+	}
+	rt := &syncRuntime{
+		self: founderID, members: members, cfg: cfg,
+		folders: []syncengine.FolderConfig{fc},
+		byShare: map[string]config.Folder{group: {ID: group, ShareID: group, Encrypted: true}},
+	}
+	log := slog.New(slog.DiscardHandler)
+	shared := map[string]bool{group: true}
+
+	if fcs, _ := rt.attachFolders(ctx, log, "peer", shared); len(fcs) != 0 {
+		t.Fatalf("unkeyed encrypted folder attached: %d configs", len(fcs))
+	}
+
+	key, err := cfg.GenerateFolderKey(ctx, group)
+	if err != nil {
+		t.Fatalf("GenerateFolderKey: %v", err)
+	}
+	fcs, _ := rt.attachFolders(ctx, log, "peer", shared)
+	if len(fcs) != 1 {
+		t.Fatalf("keyed folder not attached: %d configs", len(fcs))
+	}
+	if !fcs[0].FolderCtx.Encrypted || fcs[0].FolderCtx.MasterKey != key {
+		t.Fatal("attached folder context is not keyed")
 	}
 }

@@ -103,4 +103,7 @@ func TestDecodeCatalogRejectsGarbage(t *testing.T) {
 	if _, err := DecodeCatalog(enc[:len(enc)-1]); err == nil {
 		t.Fatal("DecodeCatalog accepted truncated input")
 	}
+	if _, err := DecodeCatalog(append(enc, 0xFF)); err == nil {
+		t.Fatal("DecodeCatalog accepted trailing bytes")
+	}
 }

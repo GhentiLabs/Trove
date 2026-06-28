@@ -62,11 +62,18 @@ func TestFolderCRUD(t *testing.T) {
 	if err := s.AddFolder(ctx, Folder{ID: "photos", Root: "/p"}); err != nil {
 		t.Fatalf("AddFolder photos: %v", err)
 	}
+	held := Folder{ID: "backup", ShareID: "g", Encrypted: true, Holder: true}
+	if err := s.AddFolder(ctx, held); err != nil {
+		t.Fatalf("AddFolder holder: %v", err)
+	}
+	if got, err := s.GetFolder(ctx, "backup"); err != nil || got != held {
+		t.Fatalf("GetFolder(backup) = %+v err=%v, want %+v", got, err, held)
+	}
 	list, err := s.ListFolders(ctx)
 	if err != nil {
 		t.Fatalf("ListFolders: %v", err)
 	}
-	if len(list) != 2 || list[0].ID != "docs" || list[1].ID != "photos" {
+	if len(list) != 3 || list[0].ID != "backup" || !list[0].Holder {
 		t.Fatalf("ListFolders = %+v", list)
 	}
 

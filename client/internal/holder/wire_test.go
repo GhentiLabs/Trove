@@ -159,6 +159,19 @@ func TestServeRejectsUnauthorizedPut(t *testing.T) {
 	}
 }
 
+// TestServeUnknownFolder checks a get for a folder the holder does not serve returns an error.
+func TestServeUnknownFolder(t *testing.T) {
+	ctx := t.Context()
+	holderConn, peerConn := connPair(t, ctx)
+	srv := NewServer(map[string]*Store{}, allowAll, nil)
+	go srv.Serve(ctx, holderConn)
+
+	var b [crypto.BlindIDLen]byte
+	if _, err := GetBlobOverConn(peerConn, "unknown")(ctx, b); err == nil {
+		t.Fatal("get for an unknown folder succeeded")
+	}
+}
+
 func connPair(t *testing.T, ctx context.Context) (a, b netio.Conn) {
 	t.Helper()
 	mn := netio.NewMemNet()

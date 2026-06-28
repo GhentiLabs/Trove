@@ -11,6 +11,20 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 )
 
+func TestSetFolderContextUpdatesChunkStorage(t *testing.T) {
+	c := NewCoordinator("f", chunkstore.FolderContext{}, nil, 0, nil)
+	if c.folderCtx().Encrypted {
+		t.Fatal("new coordinator should start unencrypted")
+	}
+	var key [32]byte
+	key[0] = 0x42
+	fctx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+	c.SetFolderContext(fctx)
+	if c.folderCtx() != fctx {
+		t.Fatal("SetFolderContext did not update the stored context")
+	}
+}
+
 type fakeConn struct{ id string }
 
 func (f *fakeConn) OpenStream(context.Context) (netio.Stream, error)   { return nil, errors.New("no") }

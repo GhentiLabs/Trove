@@ -151,6 +151,34 @@ func TestRestoreRejectsTamperedChunk(t *testing.T) {
 	}
 }
 
+// TestRestoreRejectsWrongKey checks restoring with the wrong master key fails and writes
+// nothing, rather than producing garbage.
+func TestRestoreRejectsWrongKey(t *testing.T) {
+	ctx := context.Background()
+	src := newFolder(t, testKey(0x10))
+	writeFile(t, src.root, "f.txt", []byte("data"))
+	src.scan(t)
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
+	if err := Export(ctx, testKey(0x10), src.model, src.chunks, src.fc, put); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	wrong := testKey(0x99)
+	dst := newFolder(t, wrong)
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
+	if err := Restore(ctx, wrong, dst.chunks, dst.fc, dst.root, get); err == nil {
+		t.Fatal("Restore with the wrong key succeeded")
+	}
+	if entries, _ := os.ReadDir(dst.root); len(entries) != 0 {
+		t.Fatalf("wrong-key restore wrote %d entries, want 0", len(entries))
+	}
+}
+
 // TestRestoreRejectsEscapingSymlink checks a hostile writer's sealed catalog cannot plant
 // a symlink whose target escapes the restore root.
 func TestRestoreRejectsEscapingSymlink(t *testing.T) {
