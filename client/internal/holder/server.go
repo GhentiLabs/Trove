@@ -57,47 +57,78 @@ func (s *Server) Serve(ctx context.Context, conn netio.Conn) {
 
 func (s *Server) handle(ctx context.Context, stream netio.Stream, peerID string) {
 	defer func() { _ = stream.Close() }()
-	op, folderID, blinded, err := readRequestHeader(stream)
+	op, folderID, err := readRequestHeader(stream)
 	if err != nil {
 		s.log.Debug("holder: read request", "peer", peerID, "err", err)
 		return
 	}
-	store := s.stores[folderID]
+	// Each handler reads the full request body before replying, so a synchronous transport
+	// never deadlocks with the sender mid-write on an early-error path.
+	switch op {
+	case opGet:
+		s.serveGet(stream, s.stores[folderID], folderID)
+	case opHasBatch:
+		s.serveHasBatch(stream, s.stores[folderID], folderID)
+	case opPut:
+		s.servePut(ctx, stream, s.stores[folderID], folderID, peerID)
+	}
+}
+
+func (s *Server) serveGet(stream netio.Stream, store *Store, folderID string) {
+	blinded, err := readBlinded(stream)
+	if err != nil {
+		return
+	}
 	if store == nil {
 		_ = writeResponse(stream, StatusError, nil)
 		return
 	}
-	switch op {
-	case opGet:
-		data, err := store.Get(blinded)
-		switch {
-		case errors.Is(err, ErrNotFound):
-			_ = writeResponse(stream, StatusNotFound, nil)
-		case err != nil:
-			s.log.Debug("holder: get", "folder", folderID, "err", err)
-			_ = writeResponse(stream, StatusError, nil)
-		default:
-			_ = writeResponse(stream, StatusOK, data)
-		}
-	case opPut:
-		if !s.putAllowed(ctx, folderID, peerID) {
-			s.log.Warn("holder: rejecting put from unauthorized peer", "folder", folderID, "peer", peerID)
-			_ = drainPayload(stream)
-			_ = writeResponse(stream, StatusError, nil)
-			return
-		}
-		payload, err := readPayload(stream)
-		if err != nil {
-			s.log.Debug("holder: read payload", "folder", folderID, "err", err)
-			return
-		}
-		if err := store.Put(blinded, payload); err != nil {
-			s.log.Debug("holder: put", "folder", folderID, "err", err)
-			_ = writeResponse(stream, StatusError, nil)
-			return
-		}
-		_ = writeResponse(stream, StatusOK, nil)
+	switch data, err := store.Get(blinded); {
+	case errors.Is(err, ErrNotFound):
+		_ = writeResponse(stream, StatusNotFound, nil)
+	case err != nil:
+		s.log.Debug("holder: get", "folder", folderID, "err", err)
+		_ = writeResponse(stream, StatusError, nil)
+	default:
+		_ = writeResponse(stream, StatusOK, data)
 	}
+}
+
+func (s *Server) serveHasBatch(stream netio.Stream, store *Store, folderID string) {
+	ids, err := readBlindedList(stream)
+	if err != nil {
+		s.log.Debug("holder: read has-batch", "folder", folderID, "err", err)
+		return
+	}
+	present := make([]bool, len(ids))
+	for i, id := range ids {
+		present[i] = store != nil && store.Has(id)
+	}
+	_ = writeBitmapResponse(stream, present)
+}
+
+func (s *Server) servePut(ctx context.Context, stream netio.Stream, store *Store, folderID, peerID string) {
+	blinded, err := readBlinded(stream)
+	if err != nil {
+		return
+	}
+	if store == nil || !s.putAllowed(ctx, folderID, peerID) {
+		s.log.Warn("holder: rejecting put", "folder", folderID, "peer", peerID)
+		_ = drainPayload(stream)
+		_ = writeResponse(stream, StatusError, nil)
+		return
+	}
+	payload, err := readPayload(stream)
+	if err != nil {
+		s.log.Debug("holder: read payload", "folder", folderID, "err", err)
+		return
+	}
+	if err := store.Put(blinded, payload); err != nil {
+		s.log.Debug("holder: put", "folder", folderID, "err", err)
+		_ = writeResponse(stream, StatusError, nil)
+		return
+	}
+	_ = writeResponse(stream, StatusOK, nil)
 }
 
 func (s *Server) putAllowed(ctx context.Context, folderID, peerID string) bool {

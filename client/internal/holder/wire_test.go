@@ -57,9 +57,13 @@ func TestRequestResponseRoundTrip(t *testing.T) {
 	if err := writeRequest(&buf, opPut, "folder-x", blinded, payload); err != nil {
 		t.Fatalf("writeRequest: %v", err)
 	}
-	op, fid, gotBlinded, err := readRequestHeader(&buf)
+	op, fid, err := readRequestHeader(&buf)
 	if err != nil {
 		t.Fatalf("readRequestHeader: %v", err)
+	}
+	gotBlinded, err := readBlinded(&buf)
+	if err != nil {
+		t.Fatalf("readBlinded: %v", err)
 	}
 	gotPayload, err := readPayload(&buf)
 	if err != nil {
@@ -82,10 +86,46 @@ func TestRequestResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHasBatchGoldenLayout(t *testing.T) {
+	var a, b [crypto.BlindIDLen]byte
+	a[0], b[0] = 0x11, 0x22
+	var buf bytes.Buffer
+	if err := writeBlindedList(&buf, opHasBatch, "fid", [][crypto.BlindIDLen]byte{a, b}); err != nil {
+		t.Fatalf("writeBlindedList: %v", err)
+	}
+	want := []byte{0x54, 0x48, 0x4C, 0x44, 0x01, 0x04, 0x00, 0x03, 'f', 'i', 'd', 0x00, 0x02}
+	want = append(want, a[:]...)
+	want = append(want, b[:]...)
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("has-batch layout:\n got %x\nwant %x", buf.Bytes(), want)
+	}
+
+	op, fid, err := readRequestHeader(&buf)
+	if err != nil || op != opHasBatch || fid != "fid" {
+		t.Fatalf("readRequestHeader op=%d fid=%q err=%v", op, fid, err)
+	}
+	ids, err := readBlindedList(&buf)
+	if err != nil || len(ids) != 2 || ids[0] != a || ids[1] != b {
+		t.Fatalf("readBlindedList = %v err=%v", ids, err)
+	}
+
+	buf.Reset()
+	if err := writeBitmapResponse(&buf, []bool{true, false, true}); err != nil {
+		t.Fatalf("writeBitmapResponse: %v", err)
+	}
+	present, err := readBitmapResponse(&buf, 3)
+	if err != nil {
+		t.Fatalf("readBitmapResponse: %v", err)
+	}
+	if !present[0] || present[1] || !present[2] {
+		t.Fatalf("bitmap round-trip = %v, want [true false true]", present)
+	}
+}
+
 func TestReadRequestRejectsBadMagic(t *testing.T) {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint32(buf, 0xDEADBEEF)
-	if _, _, _, err := readRequestHeader(bytes.NewReader(buf)); err == nil {
+	if _, _, err := readRequestHeader(bytes.NewReader(buf)); err == nil {
 		t.Fatal("readRequestHeader accepted bad magic")
 	}
 }
@@ -113,7 +153,7 @@ func TestServeExportRestoreOverConn(t *testing.T) {
 	srv := NewServer(map[string]*Store{fid: store}, allowAll, nil)
 	go srv.Serve(ctx, holderConn)
 
-	if err := Export(ctx, key, src.model, src.chunks, src.fc, PutBlobOverConn(peerConn, fid)); err != nil {
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, HasBlobsOverConn(peerConn, fid), PutBlobOverConn(peerConn, fid)); err != nil {
 		t.Fatalf("Export over conn: %v", err)
 	}
 	dst := newFolder(t, key)

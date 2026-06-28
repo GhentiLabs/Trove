@@ -10,6 +10,7 @@ import (
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
+	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/scanner"
@@ -112,7 +113,7 @@ func TestExportRestoreBitExact(t *testing.T) {
 	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
 	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
 
-	if err := Export(ctx, key, src.model, src.chunks, src.fc, put); err != nil {
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 
@@ -123,6 +124,87 @@ func TestExportRestoreBitExact(t *testing.T) {
 		t.Fatalf("Restore: %v", err)
 	}
 	assertTreesEqual(t, src.root, dst.root)
+}
+
+// TestReconcileSkipsExistingBlobs checks a second reconcile of an unchanged folder pushes
+// only the tiny pointer — never re-uploading chunks the holder already has.
+func TestReconcileSkipsExistingBlobs(t *testing.T) {
+	ctx := context.Background()
+	key := testKey(0x21)
+	src := newFolder(t, key)
+	writeFile(t, src.root, "a.txt", []byte("hello"))
+	writeFile(t, src.root, "big.bin", pseudoRandom(3<<20, 4))
+	src.scan(t)
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	var puts int
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error {
+		puts++
+		return store.Put(b, data)
+	}
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	first := puts
+	if first < 3 {
+		t.Fatalf("first reconcile pushed only %d blobs", first)
+	}
+
+	puts = 0
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if puts != 1 {
+		t.Fatalf("second reconcile pushed %d blobs, want 1 (the pointer only)", puts)
+	}
+}
+
+// TestReconcileInterruptedKeepsPriorVersion checks that a push interrupted before the
+// pointer flip leaves the holder serving its previous, consistent version.
+func TestReconcileInterruptedKeepsPriorVersion(t *testing.T) {
+	ctx := context.Background()
+	key := testKey(0x77)
+	src := newFolder(t, key)
+	writeFile(t, src.root, "a.txt", []byte("version one"))
+	src.scan(t)
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("holder Open: %v", err)
+	}
+	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	writeFile(t, src.root, "a.txt", []byte("version two, different and longer"))
+	src.scan(t)
+	pointerBlind := crypto.BlindID(key, []byte(pointerLabel))
+	failOnPointer := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error {
+		if b == pointerBlind {
+			return errBadOp
+		}
+		return store.Put(b, data)
+	}
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), failOnPointer); err == nil {
+		t.Fatal("interrupted reconcile returned no error")
+	}
+
+	dst := newFolder(t, key)
+	get := func(_ context.Context, b [crypto.BlindIDLen]byte) ([]byte, error) { return store.Get(b) }
+	if err := Restore(ctx, key, dst.chunks, dst.fc, dst.root, get); err != nil {
+		t.Fatalf("restore after interrupted push: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst.root, "a.txt"))
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(got) != "version one" {
+		t.Fatalf("restored %q, want the prior version (the pointer never flipped)", got)
+	}
 }
 
 // TestRestoreRejectsTamperedChunk checks a holder that flips a stored byte cannot corrupt
@@ -139,7 +221,7 @@ func TestRestoreRejectsTamperedChunk(t *testing.T) {
 		t.Fatalf("holder Open: %v", err)
 	}
 	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
-	if err := Export(ctx, key, src.model, src.chunks, src.fc, put); err != nil {
+	if err := Reconcile(ctx, key, src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 	tamperChunkBlob(t, store, key)
@@ -164,7 +246,7 @@ func TestRestoreRejectsWrongKey(t *testing.T) {
 		t.Fatalf("holder Open: %v", err)
 	}
 	put := func(_ context.Context, b [crypto.BlindIDLen]byte, data []byte) error { return store.Put(b, data) }
-	if err := Export(ctx, testKey(0x10), src.model, src.chunks, src.fc, put); err != nil {
+	if err := Reconcile(ctx, testKey(0x10), src.model, src.chunks, src.fc, storeHas(store), put); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 
@@ -188,13 +270,21 @@ func TestRestoreRejectsEscapingSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Open: %v", err)
 	}
-	evil := []manifest.Manifest{{Kind: manifest.KindSymlink, Path: "evil", SymlinkTarget: "../../escape"}}
-	sealed, err := crypto.SealMutable(key, catalogLabel, EncodeCatalog(evil))
+	evil := EncodeCatalog([]manifest.Manifest{{Kind: manifest.KindSymlink, Path: "evil", SymlinkTarget: "../../escape"}})
+	evilID := hasher.Sum(evil)
+	sealedCat, err := crypto.Seal(key, evilID, evil)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := store.Put(crypto.BlindID(key, evilID[:]), sealedCat); err != nil {
+		t.Fatalf("Put catalog: %v", err)
+	}
+	sealedPtr, err := crypto.SealMutable(key, pointerLabel, evilID[:])
 	if err != nil {
 		t.Fatalf("SealMutable: %v", err)
 	}
-	if err := store.Put(crypto.BlindID(key, []byte(catalogLabel)), sealed); err != nil {
-		t.Fatalf("Put: %v", err)
+	if err := store.Put(crypto.BlindID(key, []byte(pointerLabel)), sealedPtr); err != nil {
+		t.Fatalf("Put pointer: %v", err)
 	}
 
 	dst := newFolder(t, key)
@@ -259,26 +349,43 @@ func assertHolderLeaksNothing(t *testing.T, dir string, needles ...any) {
 	}
 }
 
-// tamperChunkBlob flips a byte in a stored chunk blob, skipping the catalog so the test
-// exercises chunk verification rather than catalog AEAD.
-func tamperChunkBlob(t *testing.T, store *Store, key [crypto.MasterKeyLen]byte) {
-	t.Helper()
-	_, catalogFile := store.path(crypto.BlindID(key, []byte(catalogLabel)))
-	for _, f := range holderBlobs(t, store.dir) {
-		if f == catalogFile {
-			continue
+// storeHas adapts a local Store to the HasBlobs reconcile callback.
+func storeHas(store *Store) HasBlobs {
+	return func(_ context.Context, ids [][crypto.BlindIDLen]byte) ([]bool, error) {
+		out := make([]bool, len(ids))
+		for i, id := range ids {
+			out[i] = store.Has(id)
 		}
-		blob, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read blob: %v", err)
-		}
-		blob[len(blob)/2] ^= 0xFF
-		if err := os.WriteFile(f, blob, 0o600); err != nil {
-			t.Fatalf("write blob: %v", err)
-		}
-		return
+		return out, nil
 	}
-	t.Fatal("no chunk blob to tamper")
+}
+
+// tamperChunkBlob flips a byte in the largest stored blob, which for a multi-chunk file is a
+// chunk (the catalog and pointer are small), exercising chunk verification.
+func tamperChunkBlob(t *testing.T, store *Store, _ [crypto.MasterKeyLen]byte) {
+	t.Helper()
+	var biggest string
+	var biggestSize int64
+	for _, f := range holderBlobs(t, store.dir) {
+		fi, err := os.Stat(f)
+		if err != nil {
+			t.Fatalf("stat blob: %v", err)
+		}
+		if fi.Size() > biggestSize {
+			biggest, biggestSize = f, fi.Size()
+		}
+	}
+	if biggest == "" {
+		t.Fatal("no blob to tamper")
+	}
+	blob, err := os.ReadFile(biggest)
+	if err != nil {
+		t.Fatalf("read blob: %v", err)
+	}
+	blob[len(blob)/2] ^= 0xFF
+	if err := os.WriteFile(biggest, blob, 0o600); err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
 }
 
 func assertTreesEqual(t *testing.T, wantRoot, gotRoot string) {

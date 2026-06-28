@@ -327,8 +327,8 @@ func (rt *syncRuntime) pushToHolders(ctx context.Context, log *slog.Logger, sess
 			continue
 		}
 		exportCtx := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
-		put := holder.PutBlobOverConn(sess.Conn(), cf.ShareID)
-		if err := holder.Export(ctx, key, fc.Model, fc.Chunks, exportCtx, put); err != nil {
+		conn := sess.Conn()
+		if err := holder.Reconcile(ctx, key, fc.Model, fc.Chunks, exportCtx, holder.HasBlobsOverConn(conn, cf.ShareID), holder.PutBlobOverConn(conn, cf.ShareID)); err != nil {
 			log.Warn("node: push to holder", "folder", cf.ShareID, "peer", peerID, "err", err)
 		}
 	}

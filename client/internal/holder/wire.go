@@ -22,9 +22,12 @@ const (
 	MaxBlobBytes uint32 = 64 << 20
 	// MaxFolderIDLen bounds the folder id in a request.
 	MaxFolderIDLen = 512
+	// MaxHasBatch bounds the number of blinded ids in one has-batch request.
+	MaxHasBatch = 4096
 
-	opGet byte = 0x01
-	opPut byte = 0x02
+	opGet      byte = 0x01
+	opPut      byte = 0x02
+	opHasBatch byte = 0x04
 )
 
 // BlobStatus is the result byte in a holder response.
@@ -70,34 +73,117 @@ func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindID
 	return nil
 }
 
-// readRequestHeader reads the fixed-size request head (op, folder id, blinded id) but not
-// a put's payload, so the server can authorize a put before allocating its bytes.
-func readRequestHeader(r io.Reader) (op byte, folderID string, blinded [crypto.BlindIDLen]byte, err error) {
+// readRequestHeader reads a request's op and folder id, leaving the op-specific body (a
+// blinded id, an id list, or a payload) for the handler to read once it has authorized.
+func readRequestHeader(r io.Reader) (op byte, folderID string, err error) {
 	var head [8]byte
 	if _, err = io.ReadFull(r, head[:]); err != nil {
-		return 0, "", blinded, fmt.Errorf("holder: read request header: %w", err)
+		return 0, "", fmt.Errorf("holder: read request header: %w", err)
 	}
 	if binary.BigEndian.Uint32(head[0:4]) != HolderMagic {
-		return 0, "", blinded, errBadHolderMagic
+		return 0, "", errBadHolderMagic
 	}
 	if head[4] != HolderVersion {
-		return 0, "", blinded, errHolderVersion
+		return 0, "", errHolderVersion
 	}
 	op = head[5]
-	if op != opGet && op != opPut {
-		return 0, "", blinded, errBadOp
+	if op != opGet && op != opPut && op != opHasBatch {
+		return 0, "", errBadOp
 	}
 	folderLen := binary.BigEndian.Uint16(head[6:8])
 	if folderLen > MaxFolderIDLen {
-		return 0, "", blinded, errHolderIDTooLong
+		return 0, "", errHolderIDTooLong
 	}
-	body := make([]byte, int(folderLen)+crypto.BlindIDLen)
-	if _, err = io.ReadFull(r, body); err != nil {
-		return 0, "", blinded, fmt.Errorf("holder: read request body: %w", err)
+	id := make([]byte, folderLen)
+	if _, err = io.ReadFull(r, id); err != nil {
+		return 0, "", fmt.Errorf("holder: read folder id: %w", err)
 	}
-	folderID = string(body[:folderLen])
-	copy(blinded[:], body[folderLen:])
-	return op, folderID, blinded, nil
+	return op, string(id), nil
+}
+
+func readBlinded(r io.Reader) ([crypto.BlindIDLen]byte, error) {
+	var b [crypto.BlindIDLen]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return b, fmt.Errorf("holder: read blinded id: %w", err)
+	}
+	return b, nil
+}
+
+func writeBlindedList(w io.Writer, op byte, folderID string, ids [][crypto.BlindIDLen]byte) error {
+	if len(folderID) > MaxFolderIDLen {
+		return errHolderIDTooLong
+	}
+	if len(ids) > MaxHasBatch {
+		return fmt.Errorf("holder: has-batch of %d exceeds %d", len(ids), MaxHasBatch)
+	}
+	buf := make([]byte, 0, 8+len(folderID)+2+len(ids)*crypto.BlindIDLen)
+	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
+	buf = append(buf, HolderVersion, op)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
+	buf = append(buf, folderID...)
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(ids)))
+	for _, id := range ids {
+		buf = append(buf, id[:]...)
+	}
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("holder: write id list: %w", err)
+	}
+	return nil
+}
+
+func readBlindedList(r io.Reader) ([][crypto.BlindIDLen]byte, error) {
+	var countBuf [2]byte
+	if _, err := io.ReadFull(r, countBuf[:]); err != nil {
+		return nil, fmt.Errorf("holder: read id count: %w", err)
+	}
+	n := binary.BigEndian.Uint16(countBuf[:])
+	if n > MaxHasBatch {
+		return nil, fmt.Errorf("holder: has-batch of %d exceeds %d", n, MaxHasBatch)
+	}
+	ids := make([][crypto.BlindIDLen]byte, n)
+	for i := range ids {
+		if _, err := io.ReadFull(r, ids[i][:]); err != nil {
+			return nil, fmt.Errorf("holder: read id list: %w", err)
+		}
+	}
+	return ids, nil
+}
+
+// writeBitmapResponse answers a has-batch: one bit per queried id, set when present.
+func writeBitmapResponse(w io.Writer, present []bool) error {
+	bitmap := make([]byte, (len(present)+7)/8)
+	for i, p := range present {
+		if p {
+			bitmap[i/8] |= 1 << (uint(i) % 8)
+		}
+	}
+	head := make([]byte, 0, 12+len(bitmap))
+	head = binary.BigEndian.AppendUint32(head, HolderMagic)
+	head = append(head, HolderVersion, byte(StatusOK), 0, 0)
+	head = binary.BigEndian.AppendUint32(head, uint32(len(bitmap)))
+	head = append(head, bitmap...)
+	if _, err := w.Write(head); err != nil {
+		return fmt.Errorf("holder: write bitmap: %w", err)
+	}
+	return nil
+}
+
+func readBitmapResponse(r io.Reader, count int) ([]bool, error) {
+	status, bitmap, err := readResponse(r)
+	if err != nil {
+		return nil, err
+	}
+	if status != StatusOK {
+		return nil, fmt.Errorf("holder: has-batch failed with status %d", status)
+	}
+	if len(bitmap) < (count+7)/8 {
+		return nil, fmt.Errorf("holder: short has-batch bitmap")
+	}
+	present := make([]bool, count)
+	for i := range present {
+		present[i] = bitmap[i/8]&(1<<(uint(i)%8)) != 0
+	}
+	return present, nil
 }
 
 func readPayload(r io.Reader) ([]byte, error) {

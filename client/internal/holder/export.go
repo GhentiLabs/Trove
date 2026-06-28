@@ -11,10 +11,10 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
-// catalogLabel identifies the sealed catalog blob: the holder stores it under
-// BlindID(masterKey, catalogLabel), and it is sealed with a non-convergent random nonce
-// because its content is mutable under this fixed id.
-const catalogLabel = "trove/holder/catalog/v1"
+// pointerLabel identifies the sealed catalog pointer, stored under a fixed blinded id. Its
+// content (the current catalog's id) changes, so it is sealed with a random nonce
+// (SealMutable). The catalog itself is content-addressed and convergently sealed.
+const pointerLabel = "trove/holder/catalog-pointer/v1"
 
 // PutBlob stores one opaque blob under its blinded id on a holder.
 type PutBlob func(ctx context.Context, blinded [crypto.BlindIDLen]byte, data []byte) error
@@ -22,10 +22,16 @@ type PutBlob func(ctx context.Context, blinded [crypto.BlindIDLen]byte, data []b
 // GetBlob fetches one opaque blob by its blinded id from a holder.
 type GetBlob func(ctx context.Context, blinded [crypto.BlindIDLen]byte) ([]byte, error)
 
-// Export seals a folder's live manifests and unique chunks and pushes them to a holder
-// as blinded blobs: one catalog blob plus one blob per chunk. The holder receives only
-// ciphertext under blinded ids; it never learns the key, names, paths, or content.
-func Export(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Store, chunks *chunkstore.Store, fc chunkstore.FolderContext, put PutBlob) error {
+// HasBlobs reports, for up to MaxHasBatch ids, which the holder already stores.
+type HasBlobs func(ctx context.Context, ids [][crypto.BlindIDLen]byte) ([]bool, error)
+
+// Reconcile brings a holder up to date with a folder's current live tree, pushing only the
+// blobs the holder does not already have: the unique chunks (content-addressed, sealed under
+// blinded ids), then the content-addressed catalog, then the pointer that commits the new
+// version. The holder receives only ciphertext under blinded ids — never the key, names,
+// paths, or content. Chunks and catalog before the pointer means an interrupted push leaves
+// the holder's previous consistent version intact.
+func Reconcile(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Store, chunks *chunkstore.Store, fc chunkstore.FolderContext, has HasBlobs, put PutBlob) error {
 	records, err := m.ListLiveManifests(ctx)
 	if err != nil {
 		return fmt.Errorf("holder: list manifests: %w", err)
@@ -39,33 +45,90 @@ func Export(ctx context.Context, master [crypto.MasterKeyLen]byte, m *model.Stor
 	if uint32(len(catalog)+crypto.MutableOverhead) > MaxBlobBytes {
 		return fmt.Errorf("holder: catalog too large (%d live manifests, %d bytes exceeds %d limit)", len(live), len(catalog), MaxBlobBytes)
 	}
+	catalogID := hasher.Sum(catalog)
 
-	// Push the chunks first and the catalog last: if the push is interrupted, the holder
-	// keeps its previous consistent catalog rather than one that references missing chunks.
+	chunkIDs := uniqueChunks(live)
+	if err := pushMissingChunks(ctx, master, chunks, fc, chunkIDs, has, put); err != nil {
+		return err
+	}
+
+	catalogBlind := crypto.BlindID(master, catalogID[:])
+	switch present, err := has(ctx, [][crypto.BlindIDLen]byte{catalogBlind}); {
+	case err != nil:
+		return err
+	case len(present) == 0 || !present[0]:
+		sealed, err := crypto.Seal(master, catalogID, catalog)
+		if err != nil {
+			return fmt.Errorf("holder: seal catalog: %w", err)
+		}
+		if err := put(ctx, catalogBlind, sealed); err != nil {
+			return err
+		}
+	}
+
+	sealedPointer, err := crypto.SealMutable(master, pointerLabel, catalogID[:])
+	if err != nil {
+		return fmt.Errorf("holder: seal pointer: %w", err)
+	}
+	return put(ctx, crypto.BlindID(master, []byte(pointerLabel)), sealedPointer)
+}
+
+func uniqueChunks(live []manifest.Manifest) []hasher.ChunkID {
 	seen := make(map[hasher.ChunkID]struct{})
+	var ids []hasher.ChunkID
 	for _, mf := range live {
 		for _, c := range mf.Chunks {
 			if _, ok := seen[c.ID]; ok {
 				continue
 			}
 			seen[c.ID] = struct{}{}
-			plaintext, err := chunks.Get(ctx, fc, c.ID)
-			if err != nil {
-				return fmt.Errorf("holder: read chunk %s: %w", c.ID, err)
-			}
-			sealed, err := crypto.Seal(master, c.ID, plaintext)
-			if err != nil {
-				return fmt.Errorf("holder: seal chunk %s: %w", c.ID, err)
-			}
-			if err := put(ctx, crypto.BlindID(master, c.ID[:]), sealed); err != nil {
-				return err
-			}
+			ids = append(ids, c.ID)
 		}
 	}
+	return ids
+}
 
-	sealedCatalog, err := crypto.SealMutable(master, catalogLabel, catalog)
-	if err != nil {
-		return fmt.Errorf("holder: seal catalog: %w", err)
+func pushMissingChunks(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, chunkIDs []hasher.ChunkID, has HasBlobs, put PutBlob) error {
+	blinded := make([][crypto.BlindIDLen]byte, len(chunkIDs))
+	for i, id := range chunkIDs {
+		blinded[i] = crypto.BlindID(master, id[:])
 	}
-	return put(ctx, crypto.BlindID(master, []byte(catalogLabel)), sealedCatalog)
+	present, err := hasAll(ctx, has, blinded)
+	if err != nil {
+		return err
+	}
+	for i, id := range chunkIDs {
+		if present[i] {
+			continue
+		}
+		plaintext, err := chunks.Get(ctx, fc, id)
+		if err != nil {
+			return fmt.Errorf("holder: read chunk %s: %w", id, err)
+		}
+		sealed, err := crypto.Seal(master, id, plaintext)
+		if err != nil {
+			return fmt.Errorf("holder: seal chunk %s: %w", id, err)
+		}
+		if err := put(ctx, blinded[i], sealed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hasAll batches a has query into MaxHasBatch-sized requests.
+func hasAll(ctx context.Context, has HasBlobs, ids [][crypto.BlindIDLen]byte) ([]bool, error) {
+	out := make([]bool, len(ids))
+	for start := 0; start < len(ids); start += MaxHasBatch {
+		end := min(start+MaxHasBatch, len(ids))
+		present, err := has(ctx, ids[start:end])
+		if err != nil {
+			return nil, err
+		}
+		if len(present) != end-start {
+			return nil, fmt.Errorf("holder: has-batch returned %d of %d", len(present), end-start)
+		}
+		copy(out[start:end], present)
+	}
+	return out, nil
 }

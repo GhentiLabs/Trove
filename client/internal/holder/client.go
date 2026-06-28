@@ -35,6 +35,25 @@ func GetBlobOverConn(conn netio.Conn, folderID string) GetBlob {
 	}
 }
 
+// HasBlobsOverConn returns a HasBlobs that asks a holder which of up to MaxHasBatch ids it
+// already stores, in one stream.
+func HasBlobsOverConn(conn netio.Conn, folderID string) HasBlobs {
+	return func(ctx context.Context, ids [][crypto.BlindIDLen]byte) ([]bool, error) {
+		if len(ids) == 0 {
+			return nil, nil
+		}
+		stream, err := conn.OpenStream(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("holder: open stream: %w", err)
+		}
+		defer func() { _ = stream.Close() }()
+		if err := writeBlindedList(stream, opHasBatch, folderID, ids); err != nil {
+			return nil, err
+		}
+		return readBitmapResponse(stream, len(ids))
+	}
+}
+
 // PutBlobOverConn returns a PutBlob that stores a folder's blobs on a holder over conn,
 // one stream per blob.
 func PutBlobOverConn(conn netio.Conn, folderID string) PutBlob {

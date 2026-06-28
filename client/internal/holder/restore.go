@@ -21,13 +21,28 @@ var errChunkMismatch = errors.New("holder: restored chunk failed verification")
 
 // Restore rebuilds a folder's plaintext tree under root from a holder's blinded blobs.
 func Restore(ctx context.Context, master [crypto.MasterKeyLen]byte, chunks *chunkstore.Store, fc chunkstore.FolderContext, root string, get GetBlob) error {
-	sealedCatalog, err := get(ctx, crypto.BlindID(master, []byte(catalogLabel)))
+	sealedPointer, err := get(ctx, crypto.BlindID(master, []byte(pointerLabel)))
+	if err != nil {
+		return fmt.Errorf("holder: fetch catalog pointer: %w", err)
+	}
+	rawID, err := crypto.OpenMutable(master, pointerLabel, sealedPointer)
+	if err != nil {
+		return fmt.Errorf("holder: open catalog pointer: %w", err)
+	}
+	catalogID, err := hasher.FromBytes(rawID)
+	if err != nil {
+		return fmt.Errorf("holder: bad catalog pointer: %w", err)
+	}
+	sealedCatalog, err := get(ctx, crypto.BlindID(master, catalogID[:]))
 	if err != nil {
 		return fmt.Errorf("holder: fetch catalog: %w", err)
 	}
-	catalogBytes, err := crypto.OpenMutable(master, catalogLabel, sealedCatalog)
+	catalogBytes, err := crypto.Open(master, catalogID, sealedCatalog)
 	if err != nil {
 		return fmt.Errorf("holder: open catalog: %w", err)
+	}
+	if hasher.Sum(catalogBytes) != catalogID {
+		return fmt.Errorf("holder: catalog failed verification")
 	}
 	manifests, err := DecodeCatalog(catalogBytes)
 	if err != nil {
