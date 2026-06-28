@@ -157,19 +157,27 @@ func parallelDo(ctx context.Context, limit int, items []int, fn func(context.Con
 	return firstErr
 }
 
-// hasAll batches a has query into MaxHasBatch-sized requests.
+// hasConcurrency bounds how many has-batch round-trips run at once.
+const hasConcurrency = 8
+
+// hasAll asks the holder which ids it holds, in concurrent MaxHasBatch-sized batches.
 func hasAll(ctx context.Context, has HasBlobs, ids [][crypto.BlindIDLen]byte) ([]bool, error) {
 	out := make([]bool, len(ids))
-	for start := 0; start < len(ids); start += MaxHasBatch {
+	batches := make([]int, (len(ids)+MaxHasBatch-1)/MaxHasBatch)
+	for i := range batches {
+		batches[i] = i * MaxHasBatch
+	}
+	err := parallelDo(ctx, hasConcurrency, batches, func(ctx context.Context, start int) error {
 		end := min(start+MaxHasBatch, len(ids))
 		present, err := has(ctx, ids[start:end])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(present) != end-start {
-			return nil, fmt.Errorf("holder: has-batch returned %d of %d", len(present), end-start)
+			return fmt.Errorf("holder: has-batch returned %d of %d", len(present), end-start)
 		}
 		copy(out[start:end], present)
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }

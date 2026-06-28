@@ -4,13 +4,11 @@
 package holder
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 )
@@ -105,18 +103,23 @@ type BlobRef struct {
 }
 
 // List returns up to limit stored blobs whose id sorts after the given id (the zero id
-// starts from the beginning), in id order, for paginated enumeration during GC.
+// starts from the beginning), in id order, for paginated enumeration during GC. WalkDir
+// visits shards and files in lexical (= blinded-id) order, so the walk is bounded to the
+// page: shards before the cursor are skipped and the walk stops once limit is reached.
 func (s *Store) List(after [crypto.BlindIDLen]byte, limit int) ([]BlobRef, error) {
 	afterHex := hex.EncodeToString(after[:])
-	var refs []BlobRef
+	refs := make([]BlobRef, 0, limit)
 	err := filepath.WalkDir(s.dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || len(d.Name()) != 2*crypto.BlindIDLen {
+		if d.IsDir() {
+			if path != s.dir && d.Name() < afterHex[:2] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if d.Name() <= afterHex {
+		if len(d.Name()) != 2*crypto.BlindIDLen || d.Name() <= afterHex {
 			return nil
 		}
 		raw, err := hex.DecodeString(d.Name())
@@ -131,14 +134,13 @@ func (s *Store) List(after [crypto.BlindIDLen]byte, limit int) ([]BlobRef, error
 		copy(ref.ID[:], raw)
 		ref.ModMillis = info.ModTime().UnixMilli()
 		refs = append(refs, ref)
+		if len(refs) >= limit {
+			return filepath.SkipAll
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("holder: list: %w", err)
-	}
-	sort.Slice(refs, func(i, j int) bool { return bytes.Compare(refs[i].ID[:], refs[j].ID[:]) < 0 })
-	if len(refs) > limit {
-		refs = refs[:limit]
 	}
 	return refs, nil
 }
