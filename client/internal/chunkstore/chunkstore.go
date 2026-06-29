@@ -60,15 +60,12 @@ var (
 )
 
 // maxStoredLen bounds a stored chunk's bytes: at most a max-size plaintext chunk
-// plus compression framing and the AEAD tag (a clone chunk is plaintext, so it is
-// well under this). Reads reject any index length beyond it rather than allocating
-// blindly.
+// plus compression framing and the AEAD tag. Reads reject any index length beyond
+// it rather than allocating blindly.
 const maxStoredLen = chunker.MaxSize + 1024
 
 // SchemaVersion is the chunkindex database layout version. Open rejects a
-// database written by a newer binary. Bumped to 2 for the clone-object layout
-// (objects table, object_id, backing_offset); pre-release there is no migration,
-// so an older database is recreated rather than upgraded.
+// database written by a newer binary.
 const SchemaVersion = 2
 
 const schema = `
@@ -236,8 +233,7 @@ func (s *Store) recoverBlob(ctx context.Context) error {
 }
 
 // recoverObjects sets the next object id past the highest recorded one and unlinks
-// any clone object file with no row, which a crash between creating the file and
-// committing its index row would leave behind.
+// orphan clone files (a file on disk with no committed row).
 func (s *Store) recoverObjects(ctx context.Context) error {
 	var maxID int64
 	if err := s.db.QueryRow(ctx, `SELECT COALESCE(MAX(object_id), 0) FROM objects`).Scan(&maxID); err != nil {
@@ -270,7 +266,7 @@ func (s *Store) recoverObjects(ctx context.Context) error {
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".clone") {
-			continue // only ever reclaim files this store wrote
+			continue
 		}
 		p := filepath.Join(s.objectDir, e.Name())
 		if _, ok := known[p]; ok {
@@ -349,9 +345,8 @@ func (s *Store) Put(ctx context.Context, fc FolderContext, plaintext []byte) (ha
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Any existing chunk is already servable (physical or clone), so a Put for it
-	// is a dedup hit: refresh last-seen and write nothing. This includes a chunk a
-	// concurrent ingest just re-pointed to a clone while this pull was in flight.
+	// An existing chunk, in any backing, is already servable: refresh last-seen and
+	// write nothing.
 	switch exists, err := s.has(ctx, id); {
 	case err != nil:
 		return id, err
@@ -468,16 +463,11 @@ type cloneRef struct {
 	length int
 }
 
-// IngestClone makes a copy-on-write clone of the file at srcPath, then chunks the
-// immutable clone and points every chunk at its (object, offset, length) range,
-// re-pointing chunks that already exist (physical or another clone) so current
-// data consolidates onto the clone sharing extents with the working file. It
-// returns the ordered chunk references for the caller to build the manifest.
-//
-// Chunking the clone, not the live file, makes the manifest and the stored bytes
-// provably consistent: a concurrent write to srcPath cannot make a recorded range
-// disagree with its identity. On a non-CoW filesystem the clone is a physical
-// copy, which is correct but costs a second copy.
+// IngestClone clones the file at srcPath, chunks the clone, and points every chunk
+// at its (object, offset, length) range, re-pointing chunks that already exist so
+// current data consolidates onto the clone that shares extents with the working
+// file. It returns the ordered chunk references for the caller's manifest. Chunking
+// the immutable clone keeps the recorded ranges consistent with their identities.
 func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.ChunkRef, error) {
 	objID, objPath := s.reserveObject()
 	committed := false
@@ -496,8 +486,7 @@ func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.Chu
 			s.log.Warn("chunkstore: filesystem does not support reflink; using a physical copy, so current data costs about 2x disk")
 		})
 	}
-	// Durable before any chunk row points at it, so a crash never commits a row
-	// referencing bytes that are not on disk.
+	// Durable before indexing, so a committed row never points at bytes not on disk.
 	if err := fsyncFile(objPath); err != nil {
 		return nil, err
 	}
@@ -510,7 +499,7 @@ func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.Chu
 		return nil, err
 	}
 	if len(crefs) == 0 {
-		// An empty file has no chunks; keep no object (the defer removes the clone).
+		// An empty file has no chunks and needs no object.
 		return refs, nil
 	}
 	if err := s.indexCloneRows(ctx, objID, objPath, crefs); err != nil {
@@ -556,9 +545,7 @@ func chunkObject(path string) ([]manifest.ChunkRef, []cloneRef, error) {
 }
 
 // indexCloneRows commits the object row and points each chunk at its range in one
-// transaction, serialized with Put via s.mu so a concurrent physical write and a
-// re-point cannot race on the same identity. Re-pointing clears any prior blob
-// backing; the emptied blob is reclaimed later by ReclaimBlobs.
+// transaction, re-pointing existing chunks off any prior backing.
 func (s *Store) indexCloneRows(ctx context.Context, objID int64, objPath string, refs []cloneRef) error {
 	now := time.Now().UnixMilli()
 	s.mu.Lock()
@@ -599,9 +586,7 @@ func fsyncFile(path string) error {
 	return f.Close()
 }
 
-// Get returns the verified plaintext for a chunk, regardless of backing. A clone
-// chunk's bytes are plaintext (codec none, unencrypted), so verify hashes them
-// directly; a physical chunk's bytes are decompressed and decrypted first.
+// Get returns the verified plaintext for a chunk, regardless of backing.
 func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([]byte, error) {
 	var (
 		backing  int
@@ -859,10 +844,9 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 	}
 	_ = rows.Close()
 
-	// The open blob backs no chunk (e.g. a replica re-pointed its pulled chunks to
-	// clones): reclaim its space in place rather than unlink a file still in use,
-	// so even a small replica settles to ~1x. The size is committed to 0 before the
-	// truncate, so a crash leaves recoverBlob truncating to 0, never re-extending.
+	// The open blob backs no chunk: reclaim its space in place rather than unlink a
+	// file still in use. Commit size 0 before truncating so recoverBlob never
+	// re-extends after a crash.
 	if openEmpty && s.cur.size > 0 {
 		if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE blobs SET size = 0 WHERE blob_id = ?`, s.cur.id)
@@ -895,10 +879,7 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 
 // ReclaimObjects deletes clone objects that no longer back any chunk, along with
 // their rows, and returns how many it removed. A clone is a separate inode, so
-// unlinking it frees only the extents it does not share with the working file;
-// the user's file is untouched. The row is dropped before the file is unlinked,
-// so an interrupted reclaim leaves at worst an orphan file (cleaned up at Open)
-// rather than a row pointing at a missing file.
+// unlinking it never touches the working file's bytes.
 func (s *Store) ReclaimObjects(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

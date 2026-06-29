@@ -100,13 +100,9 @@ func (fs *folderState) materializeBatch(ctx context.Context, batch []model.Remot
 		}
 	}
 
-	// Collapse each materialized file to a copy-on-write clone so current data
-	// settles to ~1x; the transient pulled chunks become unreferenced and are
-	// reclaimed by GC. A clone failure is not fatal: the file is correct and stays
-	// servable from the pulled chunks until a later ingest clones it. IngestClone
-	// re-chunks the file rather than trusting the manifest's offsets: that keeps the
-	// stored bytes provably consistent with their identities even if the file is
-	// rewritten between rename and clone, at the cost of one mostly-cached reread.
+	// Clone each materialized file so current data settles to ~1x; the pulled chunks
+	// are then unreferenced and GC reclaims them. Best-effort: on failure the file
+	// stays servable from those chunks.
 	if !fs.cfg.SkipClone {
 		for i, rm := range batch {
 			if rm.Deleted || rm.Manifest.Kind != manifest.KindRegular {

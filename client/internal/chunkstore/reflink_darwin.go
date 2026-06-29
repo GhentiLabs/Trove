@@ -9,8 +9,7 @@ import (
 )
 
 // clone makes dst a whole-file copy-on-write clone of src via clonefile(2). dst
-// must not exist. clonefile shares src's extents, so the clone costs ~0 bytes
-// until either file diverges.
+// must not exist.
 func clone(src, dst string) error {
 	switch err := unix.Clonefile(src, dst, 0); {
 	case err == nil:

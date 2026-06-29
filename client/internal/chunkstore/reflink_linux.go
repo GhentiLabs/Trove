@@ -11,8 +11,7 @@ import (
 )
 
 // clone makes dst a whole-file copy-on-write clone of src via the FICLONE ioctl.
-// dst must not exist. FICLONE shares src's extents, so the clone costs ~0 bytes
-// until either file diverges.
+// dst must not exist.
 func clone(src, dst string) error {
 	s, err := os.Open(src)
 	if err != nil {
@@ -27,8 +26,7 @@ func clone(src, dst string) error {
 	case err == nil:
 		return d.Close()
 	case errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.EXDEV), errors.Is(err, unix.ENOTTY), errors.Is(err, unix.EINVAL):
-		// EINVAL also covers an immutable or otherwise unclonable source; a
-		// physical copy still works, so treat all of these as unsupported.
+		// EINVAL covers an immutable or otherwise unclonable source; fall back to a copy.
 		_ = d.Close()
 		_ = os.Remove(dst)
 		return errReflinkUnsupported

@@ -60,8 +60,7 @@ func Sweep(ctx context.Context, m *model.Store, cs *chunkstore.Store, graceAge t
 	if err != nil {
 		return Result{}, fmt.Errorf("gc: delete chunks: %w", err)
 	}
-	// Reclaim blobs then clone objects, both after the grace-checked chunk delete,
-	// so a backing is freed only once its last referencing chunk row is gone.
+	// After the chunk delete, so a backing is freed only once unreferenced.
 	blobs, err := cs.ReclaimBlobs(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("gc: reclaim blobs: %w", err)

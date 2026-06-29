@@ -153,10 +153,7 @@ func (s *Scanner) process(ctx context.Context, rel string) scanResult {
 	return scanResult{rel: rel, m: m, md: model.Metadata{Mtime: fi.ModTime(), Size: fi.Size(), Inode: inode(fi)}}
 }
 
-// chunkFile stores abs as a whole-file copy-on-write clone and returns the
-// ordered chunk references. The clone shares extents with the working file, so
-// current data costs ~1x disk; on a non-CoW filesystem it falls back to a
-// physical copy.
+// chunkFile stores abs as a clone and returns its ordered chunk references.
 func (s *Scanner) chunkFile(ctx context.Context, abs string) ([]manifest.ChunkRef, error) {
 	return s.chunks.IngestClone(ctx, abs)
 }
