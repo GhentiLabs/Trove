@@ -96,6 +96,9 @@ type FolderConfig struct {
 	// When set, an incoming manifest from a non-writer is rejected on apply; nil disables
 	// the check.
 	AuthorWriter func(ctx context.Context, nodeID string) (bool, error)
+	// SkipClone leaves materialized files un-cloned. The transient recovery store
+	// sets it, since its chunks are discarded.
+	SkipClone bool
 }
 
 // Options configures an Engine bound to one Active session.

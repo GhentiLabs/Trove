@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"math/rand/v2"
 	"os"
@@ -10,10 +11,42 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
+
+// backingOf reports how a chunk is stored; used by tests to assert re-pointing.
+func (s *Store) backingOf(ctx context.Context, id hasher.ChunkID) (Backing, bool, error) {
+	var b int
+	err := s.db.QueryRow(ctx, `SELECT backing FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&b)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, err
+	}
+	return Backing(b), true, nil
+}
+
+func idsOf(refs []manifest.ChunkRef) []hasher.ChunkID {
+	ids := make([]hasher.ChunkID, len(refs))
+	for i, r := range refs {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+func blobBytes(t *testing.T, s *Store) int64 {
+	t.Helper()
+	var total int64
+	if err := s.db.QueryRow(context.Background(), `SELECT COALESCE(SUM(size), 0) FROM blobs`).Scan(&total); err != nil {
+		t.Fatalf("sum blob sizes: %v", err)
+	}
+	return total
+}
 
 func genData(n int, seed uint64) []byte {
 	r := rand.New(rand.NewPCG(seed, 0x1234))
@@ -107,7 +140,7 @@ func TestCorruptBlobDetected(t *testing.T) {
 	var path string
 	var offset int64
 	if err := s.db.QueryRow(ctx,
-		`SELECT b.path, c.blob_offset FROM chunks c JOIN blobs b ON b.blob_id = c.blob_id WHERE c.chunk_id = ?`,
+		`SELECT b.path, c.backing_offset FROM chunks c JOIN blobs b ON b.blob_id = c.blob_id WHERE c.chunk_id = ?`,
 		id.Bytes()).Scan(&path, &offset); err != nil {
 		t.Fatalf("locate: %v", err)
 	}
@@ -241,67 +274,6 @@ func TestCrashRecoveryTruncatesOrphanTail(t *testing.T) {
 	}
 }
 
-func TestVirtualBackingAndFileChange(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	data := genData(3<<20, 5)
-	path := filepath.Join(dir, "work.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	ids, err := s.MirrorFile(ctx, path)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if len(ids) < 2 {
-		t.Fatalf("expected multiple chunks, got %d", len(ids))
-	}
-
-	var out bytes.Buffer
-	if err := s.Reassemble(ctx, FolderContext{}, ids, &out); err != nil {
-		t.Fatalf("Reassemble: %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), data) {
-		t.Fatal("virtual reassembly mismatch")
-	}
-
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("reopen file: %v", err)
-	}
-	if _, err := f.WriteAt([]byte{^data[0]}, 0); err != nil {
-		t.Fatalf("mutate: %v", err)
-	}
-	_ = f.Close()
-
-	if _, err := s.Get(ctx, FolderContext{}, ids[0]); !errors.Is(err, ErrFileChanged) {
-		t.Fatalf("Get after file change err = %v, want ErrFileChanged", err)
-	}
-}
-
-func TestVirtualFileDeletedIsNotFound(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	data := genData(2<<20, 11)
-	path := filepath.Join(dir, "gone.bin")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	ids, err := s.MirrorFile(ctx, path)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if _, err := s.Get(ctx, FolderContext{}, ids[0]); !errors.Is(err, ErrChunkNotFound) {
-		t.Fatalf("Get after delete err = %v, want ErrChunkNotFound", err)
-	}
-}
-
 func TestImportReassembleMatrix(t *testing.T) {
 	ctx := context.Background()
 	data := genData(5<<20, 6)
@@ -331,25 +303,6 @@ func TestImportReassembleMatrix(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("virtual", func(t *testing.T) {
-		s, dir := newStore(t, 0)
-		path := filepath.Join(dir, "f.bin")
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		ids, err := s.MirrorFile(ctx, path)
-		if err != nil {
-			t.Fatalf("MirrorFile: %v", err)
-		}
-		var out bytes.Buffer
-		if err := s.Reassemble(ctx, FolderContext{}, ids, &out); err != nil {
-			t.Fatalf("Reassemble: %v", err)
-		}
-		if !bytes.Equal(out.Bytes(), data) {
-			t.Fatal("virtual restore not bit-exact")
-		}
-	})
 }
 
 func TestSchemaTooNew(t *testing.T) {
@@ -379,73 +332,6 @@ func TestZeroKeyRejected(t *testing.T) {
 	s, _ := newStore(t, 0)
 	if _, err := s.Put(context.Background(), FolderContext{Encrypted: true}, []byte("x")); !errors.Is(err, ErrZeroKey) {
 		t.Fatalf("Put with zero key err = %v, want ErrZeroKey", err)
-	}
-}
-
-func TestMirrorRequiresAbsolutePath(t *testing.T) {
-	s, _ := newStore(t, 0)
-	if _, err := s.MirrorFile(context.Background(), "relative/path.bin"); err == nil {
-		t.Fatal("expected error for relative path")
-	}
-}
-
-func TestBackingMismatch(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	// Physical first, then attempt virtual for the same identity.
-	data := genData(2000, 1)
-	id, err := s.Put(ctx, FolderContext{}, data)
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	path := filepath.Join(dir, "f.bin")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := s.PutVirtual(ctx, id, path, 0, len(data), len(data)); !errors.Is(err, ErrBackingMismatch) {
-		t.Fatalf("PutVirtual over physical err = %v, want ErrBackingMismatch", err)
-	}
-
-	// Virtual first, then attempt physical for the same identity.
-	other := genData(2000, 2)
-	otherPath := filepath.Join(dir, "g.bin")
-	if err := os.WriteFile(otherPath, other, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	vids, err := s.MirrorFile(ctx, otherPath)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if _, err := s.Put(ctx, FolderContext{}, other); !errors.Is(err, ErrBackingMismatch) {
-		t.Fatalf("Put over virtual err = %v, want ErrBackingMismatch", err)
-	}
-	_ = vids
-}
-
-func TestPutVirtualValidation(t *testing.T) {
-	ctx := context.Background()
-	s, _ := newStore(t, 0)
-	id := hasher.Sum([]byte("x"))
-	cases := []struct {
-		name   string
-		path   string
-		offset int64
-		length int
-		plen   int
-	}{
-		{"relative path", "rel/path.bin", 0, 10, 10},
-		{"negative offset", "/abs.bin", -1, 10, 10},
-		{"zero length", "/abs.bin", 0, 0, 10},
-		{"zero plaintext", "/abs.bin", 0, 10, 0},
-		{"oversize length", "/abs.bin", 0, maxStoredLen + 1, 10},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if err := s.PutVirtual(ctx, id, c.path, c.offset, c.length, c.plen); err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
 	}
 }
 
@@ -676,5 +562,357 @@ func TestOpenRejectsFutureSchema(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := Open(Options{DB: db, BlobDir: filepath.Join(filepath.Dir(s.db.Path()), "blobs")}); !errors.Is(err, ErrSchemaTooNew) {
 		t.Fatalf("Open future schema err = %v, want ErrSchemaTooNew", err)
+	}
+}
+
+func TestIngestCloneRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(5<<20, 21)
+	path := filepath.Join(dir, "work.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if len(refs) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(refs))
+	}
+
+	var out bytes.Buffer
+	if err := s.Reassemble(ctx, FolderContext{}, idsOf(refs), &out); err != nil {
+		t.Fatalf("Reassemble: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), data) {
+		t.Fatal("clone reassembly not bit-exact")
+	}
+	if b, ok, _ := s.backingOf(ctx, refs[0].ID); !ok || b != BackingClone {
+		t.Fatalf("backing = %v exists=%v, want clone", b, ok)
+	}
+}
+
+// TestIngestCloneFrozenIdentity asserts the storage layout does not leak into
+// identity: clone-backed chunk ids equal the physical ids for the same content.
+func TestIngestCloneFrozenIdentity(t *testing.T) {
+	ctx := context.Background()
+	data := genData(5<<20, 22)
+
+	sClone, dir := newStore(t, 0)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cloneRefs, err := sClone.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+
+	sPhys, _ := newStore(t, 0)
+	physIDs, err := sPhys.ImportStream(ctx, FolderContext{}, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ImportStream: %v", err)
+	}
+	if len(cloneRefs) != len(physIDs) {
+		t.Fatalf("chunk count differs: clone %d, physical %d", len(cloneRefs), len(physIDs))
+	}
+	for i := range physIDs {
+		if cloneRefs[i].ID != physIDs[i] {
+			t.Fatalf("identity differs at chunk %d", i)
+		}
+	}
+}
+
+// TestCloneSurvivesWorkingFileOverwrite is the storage-layer half of the
+// history-survival property: the clone is an independent inode, so overwriting
+// the working file in place leaves its chunks byte-exact (the OS forks the old
+// blocks). No promote is needed.
+func TestCloneSurvivesWorkingFileOverwrite(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	orig := genData(4<<20, 23)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, orig, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if len(refs) < 2 {
+		t.Fatalf("expected a multi-chunk file, got %d chunks", len(refs))
+	}
+
+	newData := genData(4<<20, 24)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := f.WriteAt(newData, 0); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	_ = f.Close()
+
+	// The whole old version still reassembles bit-exact from the preserved clone.
+	var out bytes.Buffer
+	if err := s.Reassemble(ctx, FolderContext{}, idsOf(refs), &out); err != nil {
+		t.Fatalf("reassemble old version: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), orig) {
+		t.Fatal("old version not byte-exact after the working file was overwritten in place")
+	}
+}
+
+// TestRepointPhysicalToClone covers a chunk first stored physically (e.g. pulled
+// over the wire) being re-pointed to a clone on a later ingest of the same content.
+func TestRepointPhysicalToClone(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(3000, 25)
+	id, err := s.Put(ctx, FolderContext{}, data)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if b, _, _ := s.backingOf(ctx, id); b != BackingPhysical {
+		t.Fatalf("backing = %v, want physical", b)
+	}
+
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.IngestClone(ctx, path); err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if b, ok, _ := s.backingOf(ctx, id); !ok || b != BackingClone {
+		t.Fatalf("backing = %v exists=%v, want clone", b, ok)
+	}
+	got, err := s.Get(ctx, FolderContext{}, id)
+	if err != nil {
+		t.Fatalf("Get after re-point: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("re-pointed chunk not byte-exact")
+	}
+}
+
+// TestPutDedupsAgainstClone covers the pull path racing an ingest: a chunk a peer
+// sends physically, already re-pointed to a clone locally, must dedup rather than
+// fail with a backing conflict.
+func TestPutDedupsAgainstClone(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(3000, 41)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	id := refs[0].ID
+
+	got, err := s.Put(ctx, FolderContext{}, data)
+	if err != nil {
+		t.Fatalf("Put over existing clone: %v", err)
+	}
+	if got != id {
+		t.Fatalf("Put returned %s, want %s", got, id)
+	}
+	if b, _, _ := s.backingOf(ctx, id); b != BackingClone {
+		t.Fatalf("backing = %v after dedup Put, want clone", b)
+	}
+	out, err := s.Get(ctx, FolderContext{}, id)
+	if err != nil || !bytes.Equal(out, data) {
+		t.Fatalf("Get after dedup Put: err=%v equal=%v", err, bytes.Equal(out, data))
+	}
+}
+
+// TestIngestCloneEmptyFile checks an empty file produces no chunks and leaves no
+// clone object behind (it would otherwise be an immediately-orphaned object row
+// and 0-byte file on every rescan).
+func TestIngestCloneEmptyFile(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	path := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone empty: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("refs = %d, want 0 for an empty file", len(refs))
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("ReclaimObjects after empty ingest = %d, %v; want 0 (no orphan)", n, err)
+	}
+}
+
+// TestIngestCloneSharedChunkReclaimsOldObject covers cross-file dedup: ingesting a
+// second file with identical content re-points the shared chunks onto its clone,
+// orphaning the first file's clone, which GC then reclaims while the chunk stays
+// servable.
+func TestIngestCloneSharedChunkReclaimsOldObject(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(1<<20, 42)
+	a := filepath.Join(dir, "a.bin")
+	b := filepath.Join(dir, "b.bin")
+	if err := os.WriteFile(a, data, 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(b, data, 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+
+	refsA, err := s.IngestClone(ctx, a)
+	if err != nil {
+		t.Fatalf("IngestClone a: %v", err)
+	}
+	refsB, err := s.IngestClone(ctx, b)
+	if err != nil {
+		t.Fatalf("IngestClone b: %v", err)
+	}
+	if refsA[0].ID != refsB[0].ID {
+		t.Fatal("identical content produced different chunk ids")
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 1 {
+		t.Fatalf("ReclaimObjects = %d, %v; want 1 (a's superseded clone)", n, err)
+	}
+	got, err := s.Get(ctx, FolderContext{}, refsB[0].ID)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("Get after orphan reclaim: err=%v equal=%v", err, bytes.Equal(got, data))
+	}
+}
+
+// TestReclaimObjects covers the clone reclaimer: an object still backing a chunk
+// is kept; once its chunks are deleted it is reclaimed; and reclaiming it leaves
+// the user's working file intact (the separate-inode refcount property).
+func TestReclaimObjects(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(4<<20, 26)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("ReclaimObjects with live chunks = %d, %v; want 0, nil", n, err)
+	}
+
+	cutoff := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := s.DeleteChunks(ctx, idsOf(refs), cutoff); err != nil {
+		t.Fatalf("DeleteChunks: %v", err)
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 1 {
+		t.Fatalf("ReclaimObjects after delete = %d, %v; want 1, nil", n, err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("working file harmed by object reclaim: err=%v equal=%v", err, bytes.Equal(got, data))
+	}
+	if _, err := s.Get(ctx, FolderContext{}, refs[0].ID); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("Get after reclaim err = %v, want ErrChunkNotFound", err)
+	}
+}
+
+// TestRepointReclaimsOpenPullBlob mirrors the replica path: chunks pulled
+// physically into the open blob are re-pointed to a clone on materialize, after
+// which the now-empty pull blob's space is reclaimed in place so the replica
+// settles to ~1x.
+func TestRepointReclaimsOpenPullBlob(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(5<<20, 31)
+	ids, err := s.ImportStream(ctx, FolderContext{}, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ImportStream (pull): %v", err)
+	}
+	if blobBytes(t, s) == 0 {
+		t.Fatal("expected pulled bytes in the open blob")
+	}
+
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if len(refs) != len(ids) {
+		t.Fatalf("chunk count differs: clone %d, pulled %d", len(refs), len(ids))
+	}
+
+	if _, err := s.ReclaimBlobs(ctx); err != nil {
+		t.Fatalf("ReclaimBlobs: %v", err)
+	}
+	if b := blobBytes(t, s); b != 0 {
+		t.Fatalf("open pull blob holds %d bytes after re-point and reclaim, want 0", b)
+	}
+	if _, err := s.Get(ctx, FolderContext{}, refs[0].ID); err != nil {
+		t.Fatalf("Get after reclaim: %v", err)
+	}
+	if b, _, _ := s.backingOf(ctx, refs[0].ID); b != BackingClone {
+		t.Fatalf("backing = %v, want clone", b)
+	}
+}
+
+// TestOpenSweepsOrphanObjects covers crash recovery: a clone object file with no
+// committed row is removed at Open, while committed clones still serve.
+func TestOpenSweepsOrphanObjects(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(2<<20, 27)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+
+	orphan := filepath.Join(dir, "objects", "99999999999999999999.clone")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o600); err != nil {
+		t.Fatalf("plant orphan: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	s2, err := Open(Options{DB: s.db, BlobDir: filepath.Join(dir, "blobs")})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan object not swept at Open: %v", err)
+	}
+	if _, err := s2.Get(ctx, FolderContext{}, refs[0].ID); err != nil {
+		t.Fatalf("committed clone unreadable after reopen: %v", err)
 	}
 }

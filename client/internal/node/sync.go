@@ -124,7 +124,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 			return nil, fmt.Errorf("node: open chunk db %q: %w", dir, err)
 		}
 		rt.closers = append(rt.closers, cdb.Close)
-		cs, err := chunkstore.Open(chunkstore.Options{DB: cdb, BlobDir: filepath.Join(dir, "blobs"), Logger: s.log})
+		cs, err := chunkstore.Open(chunkstore.Options{DB: cdb, BlobDir: filepath.Join(dir, "blobs"), ObjectDir: filepath.Join(dir, "objects"), Logger: s.log})
 		if err != nil {
 			return nil, fmt.Errorf("node: open chunk store %q: %w", f.ShareID, err)
 		}
@@ -770,7 +770,7 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		sc, err := scanner.New(scanner.Options{
-			Root: fc.Root, FolderCtx: fctx, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
+			Root: fc.Root, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
 		})
 		if err != nil {
 			_ = w.Close()

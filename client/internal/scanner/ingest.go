@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
 	"sync"
 
-	"github.com/GhentiLabs/Trove/client/internal/chunker"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
@@ -155,32 +153,9 @@ func (s *Scanner) process(ctx context.Context, rel string) scanResult {
 	return scanResult{rel: rel, m: m, md: model.Metadata{Mtime: fi.ModTime(), Size: fi.Size(), Inode: inode(fi)}}
 }
 
-// chunkFile streams abs through the chunker, stores each chunk physically, and
-// returns the ordered chunk references. Streaming bounds memory to one chunk at a
-// time per worker.
+// chunkFile stores abs as a clone and returns its ordered chunk references.
 func (s *Scanner) chunkFile(ctx context.Context, abs string) ([]manifest.ChunkRef, error) {
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	c := chunker.New(chunker.Options{Reader: f})
-	var refs []manifest.ChunkRef
-	for {
-		_, data, err := c.NextChunk()
-		if errors.Is(err, io.EOF) {
-			return refs, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		id, err := s.chunks.Put(ctx, s.fc, data)
-		if err != nil {
-			return nil, err
-		}
-		refs = append(refs, manifest.ChunkRef{ID: id, Length: int64(len(data))})
-	}
+	return s.chunks.IngestClone(ctx, abs)
 }
 
 func (s *Scanner) commit(ctx context.Context, res scanResult) {

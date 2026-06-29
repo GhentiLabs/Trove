@@ -3,7 +3,6 @@ package syncengine
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +25,9 @@ func encrypt(p *peer, key [crypto.MasterKeyLen]byte) {
 }
 
 // TestEncryptedFolderConvergesBitExact syncs an encrypted folder between two peers
-// sharing a key, bit-exact, with the chunks landing sealed at rest on both.
+// sharing a key, bit-exact. Under M7 the owner's current data is a plaintext clone
+// of the working file (not sealed at rest); transit and history sealing are
+// unaffected.
 func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 	t.Parallel()
 	owner := newPeer(t, ownerID)
@@ -47,8 +48,8 @@ func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 	waitConverged(t, owner, replica)
 	assertTreesEqual(t, owner.root, replica.root)
 	assertLeafSetsEqual(t, owner, replica)
-	assertChunkSealedAtRest(t, owner, []byte("hello world"), key)
-	assertChunkSealedAtRest(t, replica, []byte("hello world"), key)
+	assertCurrentChunkPlaintext(t, owner, []byte("hello world"))
+	assertCurrentChunkPlaintext(t, replica, []byte("hello world"))
 }
 
 // TestEncryptedSnapshotRootMatchesPlaintext checks that encrypting a folder changes
@@ -75,20 +76,15 @@ func TestEncryptedSnapshotRootMatchesPlaintext(t *testing.T) {
 	}
 }
 
-// assertChunkSealedAtRest proves a single-chunk file's content is stored sealed:
-// a keyless read fails with ErrNoKey, while a keyed read returns the plaintext.
-func assertChunkSealedAtRest(t *testing.T, p peer, content []byte, key [crypto.MasterKeyLen]byte) {
+// assertCurrentChunkPlaintext proves M7 stores current data as a plaintext clone
+// even for an encrypted folder: the chunk reads back without the folder key.
+func assertCurrentChunkPlaintext(t *testing.T, p peer, content []byte) {
 	t.Helper()
-	id := hasher.Sum(content)
-	ctx := context.Background()
-	if _, err := p.chunks.Get(ctx, chunkstore.FolderContext{}, id); !errors.Is(err, chunkstore.ErrNoKey) {
-		t.Fatalf("keyless Get err = %v, want ErrNoKey (chunk not sealed at rest)", err)
-	}
-	got, err := p.chunks.Get(ctx, chunkstore.FolderContext{Encrypted: true, MasterKey: key}, id)
+	got, err := p.chunks.Get(context.Background(), chunkstore.FolderContext{}, hasher.Sum(content))
 	if err != nil {
-		t.Fatalf("keyed Get: %v", err)
+		t.Fatalf("keyless Get of current clone chunk: %v", err)
 	}
 	if !bytes.Equal(got, content) {
-		t.Fatalf("keyed Get returned %q, want %q", got, content)
+		t.Fatalf("keyless Get returned %q, want %q", got, content)
 	}
 }

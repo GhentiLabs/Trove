@@ -24,16 +24,17 @@ const DefaultGraceAge = time.Hour
 
 // Result reports what a sweep reclaimed.
 type Result struct {
-	ChunksDeleted  int
-	BlobsReclaimed int
+	ChunksDeleted    int
+	BlobsReclaimed   int
+	ObjectsReclaimed int
 }
 
 // Sweep deletes every chunk that is unreachable from the model and was last seen
-// before now minus graceAge, then reclaims any wholly empty blob. now is taken as
-// the mark point: the cutoff is now-graceAge, so any chunk touched (Put, even a
-// dedup) after the mark survives. Sweeping is crash-safe — it only ever deletes
-// provably-unreachable, past-grace chunks, in independent transactions, so an
-// interrupted sweep just leaves slack for the next run.
+// before now minus graceAge, then reclaims any blob or clone object no longer
+// backing a chunk. now is the mark point: the cutoff is now-graceAge, so any
+// chunk touched (Put, even a dedup) after the mark survives. Sweeping is
+// crash-safe — it only ever deletes provably-unreachable, past-grace chunks, in
+// independent transactions, so an interrupted sweep just leaves slack for the next run.
 func Sweep(ctx context.Context, m *model.Store, cs *chunkstore.Store, graceAge time.Duration, now time.Time) (Result, error) {
 	reachable, err := m.ReachableChunkIDs(ctx)
 	if err != nil {
@@ -59,9 +60,14 @@ func Sweep(ctx context.Context, m *model.Store, cs *chunkstore.Store, graceAge t
 	if err != nil {
 		return Result{}, fmt.Errorf("gc: delete chunks: %w", err)
 	}
-	reclaimed, err := cs.ReclaimBlobs(ctx)
+	// After the chunk delete, so a backing is freed only once unreferenced.
+	blobs, err := cs.ReclaimBlobs(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("gc: reclaim blobs: %w", err)
 	}
-	return Result{ChunksDeleted: deleted, BlobsReclaimed: reclaimed}, nil
+	objects, err := cs.ReclaimObjects(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("gc: reclaim objects: %w", err)
+	}
+	return Result{ChunksDeleted: deleted, BlobsReclaimed: blobs, ObjectsReclaimed: objects}, nil
 }

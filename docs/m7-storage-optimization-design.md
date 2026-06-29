@@ -55,8 +55,14 @@ Reflink changes only where the *bytes* live:
 
 - **Current data:** one whole-file **clone object** per file. The index maps each
   `chunk_id → (clone_object, offset, len)` using the CDC boundaries.
-- **History** (chunks in a retained snapshot, no longer in any current file): packed blobs,
-  as today.
+- **History** (chunks in a retained snapshot, no longer in any current file): in M7 a
+  superseded chunk stays where it was last written. On the owner that is its old whole-file
+  clone, which becomes a private inode once the working file is overwritten and is reclaimed
+  when the retaining snapshot is forgotten; it is **not** repacked into a deduped blob.
+  (Chunks pulled over the wire but superseded before they are cloned remain in packed blobs.)
+  So owner history under M7 is whole-file clones bounded by the retention policy, not packed,
+  deduped history. Actively repacking superseded clone chunks into deduped blobs (async
+  clone→pack compaction) is deferred past M7; see "What changes when".
 
 macOS `clonefile()` is whole-file (one syscall, ~0 bytes). Linux `FICLONE` is whole-file;
 `FICLONE_RANGE` (extent-level, Linux-only) is a possible later refinement for per-chunk
@@ -108,9 +114,16 @@ live file.
   physical-uniform; its complexity budget goes to the sync engine. The chunks schema already
   carries a per-chunk `backing` field and a separate locations table, so the optionality for
   a future `BackingClone` is already present — no migration, no pre-work.
-- **M7:** whole-file/large-object storage for current data, the `clonefile`/`FICLONE` path +
-  physical fallback, the `BackingClone` location kind, and the clone-object reclaimer.
-- **Open decision at M7:** the existing virtual-pointer machinery (`PutVirtual`,
-  `MirrorFile`, `BackingVirtual`, `chunk_locations`) is currently unused. If reflink is
-  confirmed, prune the virtual path then rather than carry it as latent bloat. Left in place
-  until the M7 mechanism is final (it is tested and harmless).
+- **M7 (built):** whole-file clone storage for current data, the `clonefile`/`FICLONE` path +
+  physical-copy fallback, the `BackingClone` location kind, and the clone-object reclaimer.
+  Clones are plaintext at rest (they must share the plaintext working file's extents), so
+  current data — and snapshot-retained superseded data — is plaintext at rest even for an
+  encrypted folder; transit, holder blobs, and recovery stay sealed. Replicas clone after the
+  crash-safe materialize and reclaim the pulled chunks. The virtual-pointer machinery
+  (`PutVirtual`, `MirrorFile`, `BackingVirtual`, `chunk_locations`) was pruned, confirmed
+  unused.
+- **Deferred past M7:** async clone→pack compaction — a background pass that reads
+  still-snapshot-pinned chunks out of a superseded clone, repacks them into deduped blobs,
+  and frees the clone. It is what delivers the "packed, deduped history" the Granularity
+  section originally implied; without it, owner history is whole-file clones bounded by
+  retention. Out of M7's acceptance scope (the 1× target covers current data, not history).

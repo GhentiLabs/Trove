@@ -48,7 +48,6 @@ type request struct {
 // Scanner drives one folder's local state.
 type Scanner struct {
 	root    string
-	fc      chunkstore.FolderContext
 	chunks  *chunkstore.Store
 	model   *model.Store
 	watcher watcher.Watcher
@@ -63,12 +62,11 @@ type Scanner struct {
 // Options configures New. Root, Chunks, Model, and Watcher are required; the rest
 // default.
 type Options struct {
-	Root      string
-	FolderCtx chunkstore.FolderContext
-	Chunks    *chunkstore.Store
-	Model     *model.Store
-	Watcher   watcher.Watcher
-	Logger    *slog.Logger
+	Root    string
+	Chunks  *chunkstore.Store
+	Model   *model.Store
+	Watcher watcher.Watcher
+	Logger  *slog.Logger
 
 	DebounceWindow  time.Duration
 	SnapshotQuiesce time.Duration
@@ -91,7 +89,6 @@ func New(opts Options) (*Scanner, error) {
 	}
 	s := &Scanner{
 		root:     opts.Root,
-		fc:       opts.FolderCtx,
 		chunks:   opts.Chunks,
 		model:    opts.Model,
 		watcher:  opts.Watcher,
