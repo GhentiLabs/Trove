@@ -32,7 +32,7 @@ commands:
   invite     admit a reader to a group you own (-group -node -key)
   join       join a group founded by someone else (-group -root)
   run        run the peer: sync and membership gossip (-trove)
-  restore    recover an encrypted folder from a holder (-group -code -holder-id -root)
+  restore    recover a folder from any source (-group -code -from -root)
   status     show each folder's role, root, and last-synced receipts
 `
 
@@ -268,20 +268,24 @@ func cmdRestore(args []string) error {
 	trove := fs.String("trove", "", "trove://host:port?id=<fingerprint> discovery server")
 	group := fs.String("group", "", "group id of the folder to restore")
 	code := fs.String("code", "", "recovery code printed when the folder was founded")
-	holderID := fs.String("holder-id", "", "node id of a holder that stores the folder")
+	var sources []string
+	fs.Func("from", "node id to recover from (any member or holder; repeatable)", func(s string) error {
+		sources = append(sources, s)
+		return nil
+	})
 	root := fs.String("root", "", "local directory to restore the folder into")
 	listen := fs.String("listen", "0.0.0.0:0", "local QUIC UDP bind address")
 	debug := fs.Bool("debug", false, "verbose debug logging")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *trove == "" || *group == "" || *code == "" || *holderID == "" || *root == "" {
-		return errors.New("restore: -trove, -group, -code, -holder-id, and -root are required")
+	if *trove == "" || *group == "" || *code == "" || len(sources) == 0 || *root == "" {
+		return errors.New("restore: -trove, -group, -code, -from, and -root are required")
 	}
 	if _, ok := membership.Founder(*group); !ok {
 		return fmt.Errorf("restore: %q is not a valid group id", *group)
 	}
-	key, err := config.DecodeRecoveryCode(*code)
+	secret, err := config.DecodeRecoveryCode(*code)
 	if err != nil {
 		return err
 	}
@@ -300,14 +304,14 @@ func cmdRestore(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	fmt.Printf("restoring %s from holder %s...\n", *group, *holderID)
-	if err := node.RestoreFromHolder(ctx, node.RestoreOptions{
+	fmt.Printf("recovering %s from %v...\n", *group, sources)
+	if err := node.Recover(ctx, node.RecoverOptions{
 		Cert: cert, NodeID: nodeID, TroveURL: *trove, UDPAddr: *listen,
-		HolderID: *holderID, ShareID: *group, MasterKey: key, Root: *root, Logger: log,
+		Sources: sources, ShareID: *group, Secret: secret, Root: *root, Logger: log,
 	}); err != nil {
 		return err
 	}
-	fmt.Printf("restored %s into %s\n", *group, *root)
+	fmt.Printf("recovered %s into %s\n", *group, *root)
 	return nil
 }
 
