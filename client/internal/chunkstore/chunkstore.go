@@ -1,6 +1,9 @@
 // Package chunkstore is the content-addressed store. It maps a chunk identity to
 // its stored bytes, deduplicating on write, and reassembles the original bytes on
-// read. Chunks are packed into append-only blob files. Every read is verified
+// read. A chunk is backed either physically (compressed, optionally sealed bytes
+// packed into append-only blob files) or by a clone (a byte range in a whole-file
+// copy-on-write clone of a current file, holding plaintext that shares extents
+// with the working file, so current data costs ~1x disk). Every read is verified
 // against the requested identity before any bytes are returned.
 package chunkstore
 
@@ -22,6 +25,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/compression"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/hasher"
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
 
@@ -33,7 +37,10 @@ const BlobTargetSize = 64 << 20
 type Backing uint8
 
 const (
+	// BackingPhysical: compressed (optionally sealed) bytes packed in a blob.
 	BackingPhysical Backing = 0
+	// BackingClone: a plaintext byte range in a whole-file copy-on-write clone.
+	BackingClone Backing = 1
 )
 
 var (
@@ -73,7 +80,8 @@ CREATE TABLE IF NOT EXISTS chunks (
 	chunk_id         BLOB PRIMARY KEY,
 	backing          INTEGER NOT NULL,
 	blob_id          INTEGER,
-	blob_offset      INTEGER,
+	object_id        INTEGER,
+	backing_offset   INTEGER,
 	length           INTEGER NOT NULL,
 	codec            INTEGER NOT NULL DEFAULT 0,
 	encrypted        INTEGER NOT NULL DEFAULT 0,
@@ -84,6 +92,10 @@ CREATE TABLE IF NOT EXISTS blobs (
 	blob_id INTEGER PRIMARY KEY,
 	path    TEXT    NOT NULL,
 	size    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS objects (
+	object_id INTEGER PRIMARY KEY,
+	path      TEXT NOT NULL
 );`
 
 // FolderContext carries the per-operation encryption decision for a folder.
@@ -101,20 +113,26 @@ type openBlob struct {
 
 // Store is the content-addressed store.
 type Store struct {
-	db  *storage.DB
-	dir string
-	log *slog.Logger
+	db        *storage.DB
+	dir       string
+	objectDir string
+	log       *slog.Logger
 
-	mu     sync.Mutex
-	cur    *openBlob
-	nextID int64
-	target int64
+	mu           sync.Mutex
+	cur          *openBlob
+	nextID       int64
+	nextObjectID int64
+	target       int64
 }
 
 // Options configures Open. BlobTargetSize defaults to the package constant.
+// ObjectDir holds whole-file clone objects; it defaults to an "objects" sibling
+// of BlobDir. For ~1x disk it must be on the same filesystem as the working files
+// (else clonefile falls back to a physical copy).
 type Options struct {
 	DB             *storage.DB
 	BlobDir        string
+	ObjectDir      string
 	Logger         *slog.Logger
 	BlobTargetSize int64
 }
@@ -128,12 +146,18 @@ func Open(opts Options) (*Store, error) {
 	if opts.BlobDir == "" {
 		return nil, errors.New("chunkstore: empty blob dir")
 	}
-	if err := os.MkdirAll(opts.BlobDir, 0o700); err != nil {
-		return nil, fmt.Errorf("chunkstore: blob dir: %w", err)
+	objectDir := opts.ObjectDir
+	if objectDir == "" {
+		objectDir = filepath.Join(filepath.Dir(opts.BlobDir), "objects")
 	}
-	// MkdirAll leaves an existing directory's mode untouched, so tighten it.
-	if err := os.Chmod(opts.BlobDir, 0o700); err != nil {
-		return nil, fmt.Errorf("chunkstore: blob dir perms: %w", err)
+	for _, d := range [...]string{opts.BlobDir, objectDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, fmt.Errorf("chunkstore: store dir: %w", err)
+		}
+		// MkdirAll leaves an existing directory's mode untouched, so tighten it.
+		if err := os.Chmod(d, 0o700); err != nil {
+			return nil, fmt.Errorf("chunkstore: store dir perms: %w", err)
+		}
 	}
 	log := opts.Logger
 	if log == nil {
@@ -143,7 +167,7 @@ func Open(opts Options) (*Store, error) {
 	if target <= 0 {
 		target = BlobTargetSize
 	}
-	s := &Store{db: opts.DB, dir: opts.BlobDir, log: log, nextID: 1, target: target}
+	s := &Store{db: opts.DB, dir: opts.BlobDir, objectDir: objectDir, log: log, nextID: 1, nextObjectID: 1, target: target}
 	if err := s.init(context.Background()); err != nil {
 		return nil, err
 	}
@@ -177,7 +201,10 @@ func (s *Store) init(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return s.recoverBlob(ctx)
+	if err := s.recoverBlob(ctx); err != nil {
+		return err
+	}
+	return s.recoverObjects(ctx)
 }
 
 // recoverBlob reopens the most recent blob and truncates any bytes written past
@@ -203,6 +230,54 @@ func (s *Store) recoverBlob(ctx context.Context) error {
 	}
 	s.cur = &openBlob{id: id, f: f, size: size, path: path}
 	s.nextID = id + 1
+	return nil
+}
+
+// recoverObjects sets the next object id past the highest recorded one and unlinks
+// any clone object file with no row, which a crash between creating the file and
+// committing its index row would leave behind.
+func (s *Store) recoverObjects(ctx context.Context) error {
+	var maxID int64
+	if err := s.db.QueryRow(ctx, `SELECT COALESCE(MAX(object_id), 0) FROM objects`).Scan(&maxID); err != nil {
+		return fmt.Errorf("chunkstore: recover objects: %w", err)
+	}
+	s.nextObjectID = maxID + 1
+
+	known := make(map[string]struct{})
+	rows, err := s.db.Query(ctx, `SELECT path FROM objects`)
+	if err != nil {
+		return fmt.Errorf("chunkstore: list objects: %w", err)
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("chunkstore: scan object: %w", err)
+		}
+		known[p] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	entries, err := os.ReadDir(s.objectDir)
+	if err != nil {
+		return fmt.Errorf("chunkstore: read object dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(s.objectDir, e.Name())
+		if _, ok := known[p]; ok {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("chunkstore: remove orphan object: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -298,7 +373,7 @@ func (s *Store) Put(ctx context.Context, fc FolderContext, plaintext []byte) (ha
 
 	err = s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO chunks (chunk_id, backing, blob_id, blob_offset, length, codec, encrypted, plaintext_length, last_seen_ms)
+			`INSERT INTO chunks (chunk_id, backing, blob_id, backing_offset, length, codec, encrypted, plaintext_length, last_seen_ms)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id.Bytes(), int(BackingPhysical), blob.id, offset, len(stored), int(codec), fc.Encrypted, len(plaintext), time.Now().UnixMilli()); err != nil {
 			return err
@@ -395,37 +470,181 @@ func (s *Store) touchLastSeen(ctx context.Context, id hasher.ChunkID) error {
 	})
 }
 
-// Get returns the verified plaintext for a chunk, regardless of backing.
+// cloneRef locates one chunk's plaintext within a clone object.
+type cloneRef struct {
+	id     hasher.ChunkID
+	offset int64
+	length int
+}
+
+// IngestClone makes a copy-on-write clone of the file at srcPath, then chunks the
+// immutable clone and points every chunk at its (object, offset, length) range,
+// re-pointing chunks that already exist (physical or another clone) so current
+// data consolidates onto the clone sharing extents with the working file. It
+// returns the ordered chunk references for the caller to build the manifest.
+//
+// Chunking the clone, not the live file, makes the manifest and the stored bytes
+// provably consistent: a concurrent write to srcPath cannot make a recorded range
+// disagree with its identity. On a non-CoW filesystem the clone is a physical
+// copy, which is correct but costs a second copy.
+func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.ChunkRef, error) {
+	objID, objPath := s.reserveObject()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(objPath)
+		}
+	}()
+
+	if _, err := cloneOrCopy(srcPath, objPath); err != nil {
+		return nil, fmt.Errorf("chunkstore: clone %q: %w", srcPath, err)
+	}
+	// Durable before any chunk row points at it, so a crash never commits a row
+	// referencing bytes that are not on disk.
+	if err := fsyncFile(objPath); err != nil {
+		return nil, err
+	}
+	if err := syncDir(s.objectDir); err != nil {
+		return nil, err
+	}
+
+	refs, crefs, err := chunkObject(objPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.indexCloneRows(ctx, objID, objPath, crefs); err != nil {
+		return nil, err
+	}
+	committed = true
+	return refs, nil
+}
+
+func (s *Store) reserveObject() (int64, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.nextObjectID
+	s.nextObjectID++
+	return id, filepath.Join(s.objectDir, fmt.Sprintf("%020d.obj", id))
+}
+
+// chunkObject runs the chunker over an immutable clone, returning both the
+// manifest references (identity, plaintext length) and the clone locations
+// (identity, byte offset, length) for the index.
+func chunkObject(path string) ([]manifest.ChunkRef, []cloneRef, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("chunkstore: open clone: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	c := chunker.New(chunker.Options{Reader: f})
+	var refs []manifest.ChunkRef
+	var crefs []cloneRef
+	for {
+		ch, data, err := c.NextChunk()
+		if errors.Is(err, io.EOF) {
+			return refs, crefs, nil
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("chunkstore: chunk clone: %w", err)
+		}
+		id := hasher.Sum(data)
+		refs = append(refs, manifest.ChunkRef{ID: id, Length: int64(ch.Length)})
+		crefs = append(crefs, cloneRef{id: id, offset: ch.Offset, length: ch.Length})
+	}
+}
+
+// indexCloneRows commits the object row and points each chunk at its range in one
+// transaction, serialized with Put via s.mu so a concurrent physical write and a
+// re-point cannot race on the same identity. Re-pointing clears any prior blob
+// backing; the emptied blob is reclaimed later by ReclaimBlobs.
+func (s *Store) indexCloneRows(ctx context.Context, objID int64, objPath string, refs []cloneRef) error {
+	now := time.Now().UnixMilli()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO objects (object_id, path) VALUES (?, ?)`, objID, objPath); err != nil {
+			return err
+		}
+		for _, r := range refs {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO chunks (chunk_id, backing, object_id, backing_offset, length, codec, encrypted, plaintext_length, last_seen_ms)
+				 VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+				 ON CONFLICT(chunk_id) DO UPDATE SET
+				   backing = excluded.backing, blob_id = NULL, object_id = excluded.object_id,
+				   backing_offset = excluded.backing_offset, length = excluded.length,
+				   codec = 0, encrypted = 0, plaintext_length = excluded.plaintext_length,
+				   last_seen_ms = excluded.last_seen_ms`,
+				r.id.Bytes(), int(BackingClone), objID, r.offset, r.length, r.length, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("chunkstore: index clone: %w", err)
+	}
+	return nil
+}
+
+func fsyncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("chunkstore: open for fsync: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chunkstore: fsync: %w", err)
+	}
+	return f.Close()
+}
+
+// Get returns the verified plaintext for a chunk, regardless of backing. A clone
+// chunk's bytes are plaintext (codec none, unencrypted), so verify hashes them
+// directly; a physical chunk's bytes are decompressed and decrypted first.
 func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([]byte, error) {
 	var (
-		backing int
-		blobID  sql.NullInt64
-		offset  sql.NullInt64
-		length  int
-		codec   int
-		enc     bool
-		plen    int
+		backing  int
+		blobID   sql.NullInt64
+		objectID sql.NullInt64
+		offset   sql.NullInt64
+		length   int
+		codec    int
+		enc      bool
+		plen     int
 	)
 	err := s.db.QueryRow(ctx,
-		`SELECT backing, blob_id, blob_offset, length, codec, encrypted, plaintext_length FROM chunks WHERE chunk_id = ?`,
-		id.Bytes()).Scan(&backing, &blobID, &offset, &length, &codec, &enc, &plen)
+		`SELECT backing, blob_id, object_id, backing_offset, length, codec, encrypted, plaintext_length FROM chunks WHERE chunk_id = ?`,
+		id.Bytes()).Scan(&backing, &blobID, &objectID, &offset, &length, &codec, &enc, &plen)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrChunkNotFound
 	case err != nil:
 		return nil, fmt.Errorf("chunkstore: lookup: %w", err)
 	}
-
-	if !blobID.Valid || !offset.Valid {
-		return nil, fmt.Errorf("%w: physical chunk missing blob location", ErrCorruptIndex)
+	if !offset.Valid {
+		return nil, fmt.Errorf("%w: chunk missing offset", ErrCorruptIndex)
 	}
+
 	var path string
-	if err := s.db.QueryRow(ctx, `SELECT path FROM blobs WHERE blob_id = ?`, blobID.Int64).Scan(&path); err != nil {
-		return nil, fmt.Errorf("chunkstore: blob path: %w", err)
+	switch Backing(backing) {
+	case BackingClone:
+		if !objectID.Valid {
+			return nil, fmt.Errorf("%w: clone chunk missing object", ErrCorruptIndex)
+		}
+		if err := s.db.QueryRow(ctx, `SELECT path FROM objects WHERE object_id = ?`, objectID.Int64).Scan(&path); err != nil {
+			return nil, fmt.Errorf("chunkstore: object path: %w", err)
+		}
+	default:
+		if !blobID.Valid {
+			return nil, fmt.Errorf("%w: physical chunk missing blob", ErrCorruptIndex)
+		}
+		if err := s.db.QueryRow(ctx, `SELECT path FROM blobs WHERE blob_id = ?`, blobID.Int64).Scan(&path); err != nil {
+			return nil, fmt.Errorf("chunkstore: blob path: %w", err)
+		}
 	}
 	stored, err := readAt(path, offset.Int64, length)
 	if err != nil {
-		return nil, fmt.Errorf("chunkstore: read blob: %w", err)
+		return nil, fmt.Errorf("chunkstore: read backing: %w", err)
 	}
 	return verify(fc, id, compression.Codec(codec), enc, stored)
 }
@@ -646,6 +865,54 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 		}
 		if err := os.Remove(b.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return 0, fmt.Errorf("chunkstore: remove blob: %w", err)
+		}
+	}
+	return len(dead), nil
+}
+
+// ReclaimObjects deletes clone objects that no longer back any chunk, along with
+// their rows, and returns how many it removed. A clone is a separate inode, so
+// unlinking it frees only the extents it does not share with the working file;
+// the user's file is untouched. The row is dropped before the file is unlinked,
+// so an interrupted reclaim leaves at worst an orphan file (cleaned up at Open)
+// rather than a row pointing at a missing file.
+func (s *Store) ReclaimObjects(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	type deadObject struct {
+		id   int64
+		path string
+	}
+	var dead []deadObject
+	rows, err := s.db.Query(ctx,
+		`SELECT object_id, path FROM objects WHERE object_id NOT IN (SELECT object_id FROM chunks WHERE object_id IS NOT NULL)`)
+	if err != nil {
+		return 0, fmt.Errorf("chunkstore: find dead objects: %w", err)
+	}
+	for rows.Next() {
+		var o deadObject
+		if err := rows.Scan(&o.id, &o.path); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("chunkstore: scan object: %w", err)
+		}
+		dead = append(dead, o)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	_ = rows.Close()
+
+	for _, o := range dead {
+		if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM objects WHERE object_id = ?`, o.id)
+			return err
+		}); err != nil {
+			return 0, fmt.Errorf("chunkstore: delete object row: %w", err)
+		}
+		if err := os.Remove(o.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, fmt.Errorf("chunkstore: remove object: %w", err)
 		}
 	}
 	return len(dead), nil
