@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -221,7 +222,16 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			}
 		}
 
-		gossip.addPeer(ctx, sess)
+		// A non-member only reaches here to recover a folder from a holder (authorize accepts the
+		// session but offers nothing). Gossip and key delivery are member-only; a restore peer gets
+		// neither — just the verifier-gated, read-only holder reads set up below.
+		member, err := rt.peerIsMember(ctx, peerID)
+		if err != nil {
+			log.Warn("node: peer membership check", "peer", peerID, "err", err)
+		}
+		if member {
+			gossip.addPeer(ctx, sess)
+		}
 		sess.SetControlHandler(func(hctx context.Context, typ wire.MessageType, msg proto.Message) error {
 			switch typ {
 			case wire.TypeMembershipGossip:
@@ -264,9 +274,11 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		}
 		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
 		// both, so the holder server and the sync engine never contend for the connection.
-		if held := rt.sharedHolderStores(shared); len(held) > 0 {
-			rt.captureHolderVerifiers(ctx, log, sess, held)
-			srv := holder.NewServer(held, rt.holderPutAllowed, log)
+		if served := rt.holderServeSet(ctx, log, sess, shared, member); len(served) > 0 {
+			if member {
+				rt.captureHolderVerifiers(ctx, log, sess, served)
+			}
+			srv := holder.NewServer(served, rt.holderPutAllowed, log)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -283,9 +295,29 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				stopHolderPush()
 			}
 			wg.Wait()
-			gossip.removePeer(peerID, sess)
+			if member {
+				gossip.removePeer(peerID, sess)
+			}
 		}
 	}
+}
+
+// peerIsMember reports whether nodeID is a member or founder of any group this node tracks.
+// A peer that belongs to none only reaches a session to recover a folder from a holder.
+func (rt *syncRuntime) peerIsMember(ctx context.Context, nodeID string) (bool, error) {
+	groups, err := rt.members.Groups(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, g := range groups {
+		switch _, ok, err := rt.effectiveRole(ctx, g, nodeID); {
+		case err != nil:
+			return false, err
+		case ok:
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // captureHolderVerifiers persists the verifier a trusted member advertised for each folder
@@ -323,15 +355,36 @@ func (rt *syncRuntime) captureHolderVerifiers(ctx context.Context, log *slog.Log
 	}
 }
 
-// sharedHolderStores returns this node's holder stores for the folders shared on a session.
-func (rt *syncRuntime) sharedHolderStores(shared map[string]bool) map[string]*holder.Store {
-	held := map[string]*holder.Store{}
-	for id := range shared {
-		if hs := rt.holders[id]; hs != nil {
-			held[id] = hs
+// holderServeSet selects which held folders to serve a peer. A roster member is served the
+// folders shared on the session (its writes stay gated to writers). A non-member is a restore
+// client: it is served a folder read-only only if the verifier it advertised matches the one
+// this holder persisted from a writer — proof it knows the folder key, with no key on the holder.
+func (rt *syncRuntime) holderServeSet(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool, member bool) map[string]*holder.Store {
+	out := map[string]*holder.Store{}
+	peerID := sess.PeerNodeID()
+	for shareID, store := range rt.holders {
+		if member {
+			if shared[shareID] {
+				out[shareID] = store
+			}
+			continue
+		}
+		pv := sess.PeerEncryptionVerifier(shareID)
+		cf, ok := rt.byShare[shareID]
+		if len(pv) == 0 || !ok {
+			continue
+		}
+		stored, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
+		if err != nil {
+			log.Debug("node: restore verifier lookup", "folder", shareID, "err", err)
+			continue
+		}
+		if len(stored) > 0 && subtle.ConstantTimeCompare(stored, pv) == 1 {
+			log.Info("node: holder restore authorized", "folder", shareID, "peer", peerID)
+			out[shareID] = store
 		}
 	}
-	return held
+	return out
 }
 
 // holderPutAllowed authorizes a peer to store blobs on this holder: only a roster writer.
