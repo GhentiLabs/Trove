@@ -50,7 +50,7 @@ type LadderConfig struct {
 	Candidates func() []disco.Address
 	Logger     *slog.Logger
 	// ForceDial makes holepunch always take the dialer role rather than splitting by node id.
-	// A restore client uses this: the holder it punches to never dials a non-member back, so
+	// A recovery client uses this: the source it punches to never dials a non-member back, so
 	// the client must be the QUIC initiator regardless of id ordering.
 	ForceDial bool
 }

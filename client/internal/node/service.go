@@ -64,9 +64,7 @@ type Service struct {
 
 	members *membership.Store
 	gossip  *gossiper
-	// serves is fixed at startup: true if this node stores any folder (as a member or a holder).
-	// It gates accepting a non-member's session in authorize, so a verifier-proven recovery peer
-	// can be served; the responsive offer is what actually shares a folder with it.
+	// serves is true if this node stores any folder; it gates accepting a non-member's session.
 	serves bool
 
 	gatherMu sync.Mutex
@@ -568,6 +566,16 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 			case err == nil:
 				sf.EncryptionVerifier = crypto.FolderVerifier(key, f.ShareID)
 			case errors.Is(err, config.ErrNoKey):
+			default:
+				return session.Local{}, err
+			}
+		} else {
+			// Advertise the recovery verifier once the secret is known (members never mint their
+			// own, so two members never disagree), to validate a delivered recovery secret.
+			switch secret, err := s.opts.Config.FolderSecret(ctx, f.ID); {
+			case err == nil:
+				sf.EncryptionVerifier = crypto.FolderVerifier(secret, f.ShareID)
+			case errors.Is(err, config.ErrNoSecret):
 			default:
 				return session.Local{}, err
 			}

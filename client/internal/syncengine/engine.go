@@ -104,8 +104,8 @@ type Options struct {
 	Folders       []FolderConfig
 	Logger        *slog.Logger
 	MaxDeltaBytes int
-	// OnConverged, if set, is called each time a folder reaches the peer's announced root. A
-	// recovery client uses it to learn when a one-shot pull is complete; nil in normal runtime.
+	// OnConverged, if set, fires when a folder reaches the peer's announced root (a recovery
+	// client's one-shot-pull signal); nil in normal runtime.
 	OnConverged func(folderID string, root snapshot.Root, epoch uint64, highWater int64)
 }
 

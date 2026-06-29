@@ -30,23 +30,15 @@ type RecoverOptions struct {
 	NodeID   string
 	TroveURL string
 	UDPAddr  string
-	// Sources are the node ids to recover from — any member (writer or reader) or holder that
-	// stores the folder. They are tried in order; a member serves via the sync engine, a holder
-	// via the blob protocol.
-	Sources []string
-	ShareID string
-	// Secret is the folder's recovery code decoded: the master key for an encrypted folder, the
-	// recovery secret for an unencrypted one. It proves the recovery verifier and, for a holder
-	// source, decrypts the sealed blobs.
-	Secret [crypto.MasterKeyLen]byte
-	Root   string
-	Logger *slog.Logger
+	Sources  []string // node ids to recover from: any member or holder
+	ShareID  string
+	Secret   [crypto.MasterKeyLen]byte // decoded recovery code
+	Root     string
+	Logger   *slog.Logger
 }
 
-// Recover rebuilds a folder into Root by pulling it from any of the named sources, proving the
-// recovery verifier to each. A member source is pulled through the sync engine (plaintext over
-// the mTLS tunnel); a holder source is fetched via the blob protocol and decrypted locally. The
-// sources serve read-only and a holder never learns the key.
+// Recover rebuilds a folder into Root by pulling it from any of the named sources (a member via
+// the sync engine, a holder via the blob protocol), proving the recovery verifier to each.
 func Recover(ctx context.Context, opts RecoverOptions) error {
 	log := opts.Logger
 	if log == nil {
@@ -111,7 +103,7 @@ func Recover(ctx context.Context, opts RecoverOptions) error {
 		}
 	}
 	for _, sess := range holders {
-		if err := recoverFromHolder(ctx, opts, sess); err == nil {
+		if err := recoverFromHolder(ctx, log, opts, sess); err == nil {
 			return nil
 		} else {
 			log.Warn("node: recovery from holder failed", "peer", sess.PeerNodeID(), "err", err)
@@ -120,8 +112,7 @@ func Recover(ctx context.Context, opts RecoverOptions) error {
 	return fmt.Errorf("node: no source could serve folder %s", opts.ShareID)
 }
 
-// dialAndProve connects to a source and handshakes, advertising the folder verifier so the source
-// can share the folder for recovery. It does not start the session pump (the recovery driver does).
+// dialAndProve handshakes with a source, advertising the verifier so it shares the folder.
 func dialAndProve(ctx context.Context, log *slog.Logger, ladder *peermgr.Ladder, opts RecoverOptions, source string) (*session.Session, error) {
 	conn, err := ladder.Connect(ctx, source)
 	if err != nil {
@@ -141,15 +132,13 @@ func dialAndProve(ctx context.Context, log *slog.Logger, ladder *peermgr.Ladder,
 		Logger:    log,
 	})
 	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("handshake: %w", err)
+		return nil, fmt.Errorf("handshake: %w", err) // Handshake closes conn on error
 	}
 	return sess, nil
 }
 
-// recoverViaEngine pulls the folder from one or more member sources through the sync engine,
-// staging into a temp store and materializing plaintext into Root. It returns once the folder
-// reaches a source's announced root, or on a context error.
+// recoverViaEngine pulls from member sources via the sync engine, staging in a temp store and
+// materializing into Root. It returns once a source's root is reached.
 func recoverViaEngine(ctx context.Context, log *slog.Logger, opts RecoverOptions, sessions []*session.Session) error {
 	stage, err := os.MkdirTemp("", "trove-recover-*")
 	if err != nil {
@@ -176,8 +165,7 @@ func recoverViaEngine(ctx context.Context, log *slog.Logger, opts RecoverOptions
 	}
 	defer func() { _ = chunks.Close() }()
 
-	// The engine serves and materializes plaintext, so the staging store needs no key regardless
-	// of whether the source folder is encrypted at rest.
+	// The engine serves plaintext, so the staging store needs no key.
 	fc := chunkstore.FolderContext{}
 	coord := syncengine.NewCoordinator(opts.ShareID, fc, chunks, 0, log)
 
@@ -221,7 +209,7 @@ func recoverViaEngine(ctx context.Context, log *slog.Logger, opts RecoverOptions
 }
 
 // recoverFromHolder fetches the sealed folder from a holder source and decrypts it into Root.
-func recoverFromHolder(ctx context.Context, opts RecoverOptions, sess *session.Session) error {
+func recoverFromHolder(ctx context.Context, log *slog.Logger, opts RecoverOptions, sess *session.Session) error {
 	stage, err := os.MkdirTemp("", "trove-recover-*")
 	if err != nil {
 		return err
@@ -232,7 +220,7 @@ func recoverFromHolder(ctx context.Context, opts RecoverOptions, sess *session.S
 		return err
 	}
 	defer func() { _ = cdb.Close() }()
-	chunks, err := chunkstore.Open(chunkstore.Options{DB: cdb, BlobDir: filepath.Join(stage, "blobs")})
+	chunks, err := chunkstore.Open(chunkstore.Options{DB: cdb, BlobDir: filepath.Join(stage, "blobs"), Logger: log})
 	if err != nil {
 		return err
 	}
@@ -242,8 +230,7 @@ func recoverFromHolder(ctx context.Context, opts RecoverOptions, sess *session.S
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer cancel()
-	// The holder sends only keepalives; a no-op handler keeps an unexpected control message from
-	// tearing the session down mid-fetch.
+	// No-op handler: an unexpected control message must not tear the session down mid-fetch.
 	sess.SetControlHandler(func(context.Context, wire.MessageType, proto.Message) error { return nil })
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = sess.Run(pctx) }()

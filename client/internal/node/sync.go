@@ -212,6 +212,18 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		for _, id := range sess.SharedFolders() {
 			shared[id] = true
 		}
+
+		member, err := rt.peerIsMember(ctx, peerID)
+		if err != nil {
+			log.Warn("node: peer membership check", "peer", peerID, "err", err)
+		}
+		// A non-member that shares nothing failed the verifier gate; close it rather than keep an
+		// idle session a stranger could pile up. Gossip and key delivery below are member-only.
+		if !member && len(shared) == 0 {
+			_ = sess.Close()
+			return func() {}
+		}
+
 		fcs, deliveries := rt.attachFolders(ctx, log, peerID, shared)
 
 		var eng *syncengine.Engine
@@ -224,20 +236,13 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			}
 		}
 
-		// Non-members reach onSession only to restore from a holder; gossip and key delivery are
-		// member-only, leaving them just the verifier-gated read-only holder reads set up below.
-		member, err := rt.peerIsMember(ctx, peerID)
-		if err != nil {
-			log.Warn("node: peer membership check", "peer", peerID, "err", err)
-		}
 		if member {
 			gossip.addPeer(ctx, sess)
 		}
 		sess.SetControlHandler(func(hctx context.Context, typ wire.MessageType, msg proto.Message) error {
 			switch typ {
 			case wire.TypeMembershipGossip:
-				// Drop a non-member's gossip before Merge: deny a stranger the Ed25519
-				// verification work a maxed-out roster message would force.
+				// Drop a non-member's gossip before Merge: deny a stranger the Ed25519 work.
 				if !member {
 					return nil
 				}
@@ -278,11 +283,11 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 				_ = eng.Drive(sctx)
 			}()
 		}
-		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
-		// both, so the holder server and the sync engine never contend for the connection.
+		// A node is a dedicated holder or a sync member, never both, so the holder server and the
+		// engine never contend for the connection.
 		if served := rt.holderStoresForPeer(shared); len(served) > 0 {
-			// Unconditional: persistHolderVerifiers re-checks membership per folder, so it's safe
-			// for non-members and still records the verifier when peerIsMember errored above.
+			// persistHolderVerifiers re-checks membership per folder, so calling it unconditionally
+			// is safe and still records the verifier when peerIsMember errored above.
 			rt.persistHolderVerifiers(ctx, log, sess, served)
 			srv := holder.NewServer(served, rt.holderPutAllowed, log)
 			wg.Add(1)
@@ -360,8 +365,8 @@ func (rt *syncRuntime) persistHolderVerifiers(ctx context.Context, log *slog.Log
 	}
 }
 
-// holderStoresForPeer returns the holder stores for the folders shared on a session. The
-// responsive offer already gated a non-member by verifier, so a shared held folder is authorized.
+// holderStoresForPeer returns the holder stores for the folders shared on a session (the
+// responsive offer already gated a non-member by verifier).
 func (rt *syncRuntime) holderStoresForPeer(shared map[string]bool) map[string]*holder.Store {
 	out := map[string]*holder.Store{}
 	for shareID, store := range rt.holders {
@@ -372,11 +377,9 @@ func (rt *syncRuntime) holderStoresForPeer(shared map[string]bool) map[string]*h
 	return out
 }
 
-// responsiveOffer supplies the folders to share with a peer this node granted nothing — a
-// recovery peer proving key knowledge. For each folder the peer advertised that this node serves
-// and whose advertised verifier constant-time-matches this node's, it offers the folder back with
-// this node's verifier and holder flag. It fails closed: a folder it cannot verify is omitted, so
-// a stranger that cannot prove the verifier is shared nothing and learns no folder ids.
+// responsiveOffer offers a folder back to a recovery peer (one this node granted nothing) only
+// when the peer's advertised verifier constant-time-matches this node's. It fails closed, so a
+// stranger that can't prove the verifier is shared nothing and learns no folder ids.
 func (rt *syncRuntime) responsiveOffer(ctx context.Context, peerID string, peerOffered []session.Folder) ([]session.Folder, error) {
 	var out []session.Folder
 	for _, pf := range peerOffered {
@@ -402,21 +405,25 @@ func (rt *syncRuntime) responsiveOffer(ctx context.Context, peerID string, peerO
 }
 
 // folderVerifier returns this node's recovery verifier for a folder and whether it is held. A
-// held folder's verifier is the one persisted from a writer (a holder has no key to derive it);
-// a member folder's derives from the folder secret. It is empty when neither is available.
+// holder uses the verifier persisted from a writer; a member derives it from the folder secret.
 func (rt *syncRuntime) folderVerifier(ctx context.Context, cf config.Folder) (verifier []byte, held bool) {
 	if cf.Holder {
 		v, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
 		if err != nil {
+			rt.log.Warn("node: holder verifier lookup; denying recovery", "folder", cf.ShareID, "err", err)
 			return nil, true
 		}
 		return v, true
 	}
-	secret, err := rt.cfg.FolderSecret(ctx, cf.ID)
-	if err != nil {
+	switch secret, err := rt.cfg.FolderSecret(ctx, cf.ID); {
+	case errors.Is(err, config.ErrNoSecret):
 		return nil, false
+	case err != nil:
+		rt.log.Warn("node: folder secret lookup; denying recovery", "folder", cf.ShareID, "err", err)
+		return nil, false
+	default:
+		return crypto.FolderVerifier(secret, cf.ShareID), false
 	}
-	return crypto.FolderVerifier(secret, cf.ShareID), false
 }
 
 // holderPutAllowed authorizes a peer to store blobs on this holder: only a roster writer.
@@ -590,10 +597,8 @@ func (rt *syncRuntime) folderKeyForPeer(ctx context.Context, log *slog.Logger, c
 	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: key[:], KeyGeneration: uint64(gen)}
 }
 
-// recoverySecretForPeer returns a recovery-secret delivery (reusing the FolderKey message) for an
-// unencrypted folder when this node is a writer and the peer is a trusted member, so the member
-// can later prove a recovery verifier. A holder or non-member gets nil. The secret is not the
-// encryption key — an unencrypted folder has none — so the engine never needs it.
+// recoverySecretForPeer returns an unencrypted folder's recovery secret to deliver (reusing the
+// FolderKey message) when this node is a writer and the peer is a trusted member, else nil.
 func (rt *syncRuntime) recoverySecretForPeer(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string) *wirepb.FolderKey {
 	switch mine, err := rt.isWriter(ctx, cf.ShareID, rt.self); {
 	case err != nil:
@@ -609,11 +614,15 @@ func (rt *syncRuntime) recoverySecretForPeer(ctx context.Context, log *slog.Logg
 	case !trusted:
 		return nil
 	}
-	secret, err := rt.cfg.FolderSecret(ctx, cf.ID)
-	if err != nil {
+	switch secret, err := rt.cfg.FolderSecret(ctx, cf.ID); {
+	case errors.Is(err, config.ErrNoSecret):
 		return nil
+	case err != nil:
+		log.Warn("node: recovery secret lookup", "folder", cf.ShareID, "err", err)
+		return nil
+	default:
+		return &wirepb.FolderKey{FolderId: cf.ShareID, Key: secret[:]}
 	}
-	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: secret[:]}
 }
 
 // receiveFolderKey persists a key delivered by a roster writer for a folder this node
@@ -643,8 +652,8 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 		return nil
 	}
 	if !cf.Encrypted {
-		// An unencrypted folder's "key" is the recovery secret, stored so this node can serve
-		// recovery. The engine never needs it, so there is nothing to reattach.
+		// An unencrypted folder's "key" is its recovery secret; store it but don't reattach
+		// (the engine doesn't need it).
 		switch err := rt.cfg.DeliverRecoverySecret(ctx, cf.ID, key); {
 		case err == nil:
 			log.Info("node: recovery secret received", "folder", cf.ShareID, "peer", peerID)

@@ -284,9 +284,8 @@ func (s *Store) DeliverFolderKey(ctx context.Context, id string, key [MasterKeyL
 	return s.setKeyIfAbsent(ctx, id, key[:], generation, nil, nil, nil, nil)
 }
 
-// GenerateRecoverySecret mints a random recovery secret for an unencrypted folder and stores
-// it, refusing to overwrite an existing one. An encrypted folder uses its master key instead;
-// FolderSecret returns whichever applies.
+// GenerateRecoverySecret mints and stores an unencrypted folder's recovery secret, refusing to
+// overwrite an existing one. (An encrypted folder uses its master key; see FolderSecret.)
 func (s *Store) GenerateRecoverySecret(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
 	var secret [MasterKeyLen]byte
 	if _, err := rand.Read(secret[:]); err != nil {
@@ -323,9 +322,8 @@ func (s *Store) setRecoverySecretIfAbsent(ctx context.Context, id string, secret
 	})
 }
 
-// FolderSecret returns the 32-byte secret a folder's recovery verifier derives from: the master
-// key for an encrypted folder, the recovery secret for an unencrypted one. It returns ErrNoSecret
-// if the folder has neither yet.
+// FolderSecret returns the secret a folder's recovery verifier derives from — the master key if
+// encrypted, the recovery secret if not — or ErrNoSecret if it has neither yet.
 func (s *Store) FolderSecret(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
 	var (
 		encrypted bool
