@@ -67,6 +67,8 @@ type Folder struct {
 	// EncryptionVerifier is the non-secret key-mismatch token for an encrypted folder, empty
 	// when this node holds no key for it yet.
 	EncryptionVerifier []byte
+	// Holder marks this node as serving the folder only as an untrusted holder (sealed blobs).
+	Holder bool
 }
 
 // Local identifies this node for the Hello and the folders it offers.
@@ -101,6 +103,7 @@ type Session struct {
 	peerNodeID    string
 	shared        []string
 	peerVerifiers map[string][]byte
+	peerHolders   map[string]bool
 	keepalive     time.Duration
 	started       time.Time
 	log           *slog.Logger
@@ -188,6 +191,7 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		peerNodeID:    peerID,
 		shared:        shared,
 		peerVerifiers: peerVerifiers(peerCfg),
+		peerHolders:   peerHolders(peerCfg),
 		keepalive:     keepalive,
 		started:       time.Now(),
 		log:           log,
@@ -255,6 +259,7 @@ func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
 			FolderType:         wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
 			Encrypted:          f.Encrypted,
 			EncryptionVerifier: f.EncryptionVerifier,
+			Holder:             f.Holder,
 		})
 	}
 	return &wirepb.NetworkConfig{Folders: folders}
@@ -332,6 +337,21 @@ func peerVerifiers(peer *wirepb.NetworkConfig) map[string][]byte {
 // for folders that ended up not shared — e.g. a restore client proving key knowledge to a
 // holder that offered nothing. Do not restrict it to SharedFolders.
 func (s *Session) PeerEncryptionVerifier(folderID string) []byte { return s.peerVerifiers[folderID] }
+
+// peerHolders maps each folder the peer offered to whether it serves the folder as a holder.
+func peerHolders(peer *wirepb.NetworkConfig) map[string]bool {
+	out := make(map[string]bool, len(peer.GetFolders()))
+	for _, f := range peer.GetFolders() {
+		if id := f.GetFolderId(); id != "" {
+			out[id] = f.GetHolder()
+		}
+	}
+	return out
+}
+
+// PeerServesAsHolder reports whether the peer advertised the folder as one it serves only as a
+// holder (sealed blobs), so a recovery client fetches it via the blob protocol, not the engine.
+func (s *Session) PeerServesAsHolder(folderID string) bool { return s.peerHolders[folderID] }
 
 // PeerNodeID is the authenticated peer identity.
 func (s *Session) PeerNodeID() string { return s.peerNodeID }

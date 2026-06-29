@@ -83,6 +83,31 @@ func TestHandshakeReachesActiveAndIntersectsFolders(t *testing.T) {
 	_ = bs.Conn().Close()
 }
 
+func TestHandshakePropagatesHolderFlag(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ac, bc := connPair(t, idA, idB)
+
+	// B serves "shared" as a holder; A serves it normally.
+	aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("shared"),
+		Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "shared"}}}}
+	bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("shared"),
+		Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "shared", Holder: true}}}}
+
+	as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
+	if aErr != nil || bErr != nil {
+		t.Fatalf("handshake: a=%v b=%v", aErr, bErr)
+	}
+	if !as.PeerServesAsHolder("shared") {
+		t.Fatal("A should see B serving shared as a holder")
+	}
+	if bs.PeerServesAsHolder("shared") {
+		t.Fatal("B should see A serving shared normally, not as a holder")
+	}
+	_ = as.Conn().Close()
+	_ = bs.Conn().Close()
+}
+
 func TestHandshakeOffersOnlyGrantedFolders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
