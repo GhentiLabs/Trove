@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -262,5 +263,35 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	s2 := openStore(t, db2, testNode)
 	if _, err := s2.GetFolder(ctx, "f"); err != nil {
 		t.Fatalf("GetFolder after reopen: %v", err)
+	}
+}
+
+func TestHolderVerifier(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+
+	if err := s.AddFolder(ctx, Folder{ID: "g", ShareID: "g", Encrypted: true, Holder: true}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	if v, err := s.GetHolderVerifier(ctx, "g"); err != nil || v != nil {
+		t.Fatalf("initial verifier = %x, %v; want nil, nil", v, err)
+	}
+
+	want := bytes.Repeat([]byte{0xAB}, 32)
+	if err := s.SetHolderVerifier(ctx, "g", want); err != nil {
+		t.Fatalf("SetHolderVerifier: %v", err)
+	}
+	switch got, err := s.GetHolderVerifier(ctx, "g"); {
+	case err != nil:
+		t.Fatalf("GetHolderVerifier: %v", err)
+	case !bytes.Equal(got, want):
+		t.Fatalf("verifier = %x, want %x", got, want)
+	}
+
+	if _, err := s.GetHolderVerifier(ctx, "missing"); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("get missing err = %v, want ErrFolderNotFound", err)
+	}
+	if err := s.SetHolderVerifier(ctx, "missing", want); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("set missing err = %v, want ErrFolderNotFound", err)
 	}
 }

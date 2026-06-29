@@ -265,6 +265,7 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
 		// both, so the holder server and the sync engine never contend for the connection.
 		if held := rt.sharedHolderStores(shared); len(held) > 0 {
+			rt.captureHolderVerifiers(ctx, log, sess, held)
 			srv := holder.NewServer(held, rt.holderPutAllowed, log)
 			wg.Add(1)
 			go func() {
@@ -283,6 +284,41 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			}
 			wg.Wait()
 			gossip.removePeer(peerID, sess)
+		}
+	}
+}
+
+// captureHolderVerifiers persists the verifier a trusted member advertised for each folder
+// this node holds, so a later non-member restore can be proven against it. Only a roster
+// member's advertisement is trusted; a non-member could otherwise poison the stored token.
+func (rt *syncRuntime) captureHolderVerifiers(ctx context.Context, log *slog.Logger, sess *session.Session, held map[string]*holder.Store) {
+	peerID := sess.PeerNodeID()
+	for shareID := range held {
+		vb := sess.PeerEncryptionVerifier(shareID)
+		if len(vb) == 0 {
+			continue
+		}
+		cf, ok := rt.byShare[shareID]
+		if !ok {
+			continue
+		}
+		switch _, member, err := rt.effectiveRole(ctx, shareID, peerID); {
+		case err != nil:
+			log.Debug("node: holder verifier role check", "folder", shareID, "peer", peerID, "err", err)
+			continue
+		case !member:
+			continue
+		}
+		existing, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
+		if err != nil {
+			log.Debug("node: read holder verifier", "folder", shareID, "err", err)
+			continue
+		}
+		if bytes.Equal(existing, vb) {
+			continue
+		}
+		if err := rt.cfg.SetHolderVerifier(ctx, cf.ID, vb); err != nil {
+			log.Debug("node: persist holder verifier", "folder", shareID, "err", err)
 		}
 	}
 }

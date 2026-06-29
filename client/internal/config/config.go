@@ -57,9 +57,10 @@ CREATE TABLE IF NOT EXISTS folders (
 	kdf_time       INTEGER,
 	kdf_mem_kib    INTEGER,
 	kdf_threads    INTEGER,
-	created_ms     INTEGER NOT NULL,
-	share_id       TEXT    NOT NULL DEFAULT '',
-	holder         INTEGER NOT NULL DEFAULT 0,
+	created_ms      INTEGER NOT NULL,
+	share_id        TEXT    NOT NULL DEFAULT '',
+	holder          INTEGER NOT NULL DEFAULT 0,
+	holder_verifier BLOB,
 	CHECK (holder = 0 OR encrypted = 1)
 );`
 
@@ -226,6 +227,34 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 		}
 		return nil
 	})
+}
+
+// SetHolderVerifier records the non-secret folder verifier a holder learned from a trusted
+// member's advertisement, so a later restore can be proven against it without the key.
+func (s *Store) SetHolderVerifier(ctx context.Context, id string, verifier []byte) error {
+	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		res, err := tx.Exec(ctx, `UPDATE folders SET holder_verifier = ? WHERE id = ?`, verifier, id)
+		if err != nil {
+			return fmt.Errorf("config: set holder verifier: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrFolderNotFound
+		}
+		return nil
+	})
+}
+
+// GetHolderVerifier returns a folder's stored holder verifier, or nil if none is set.
+func (s *Store) GetHolderVerifier(ctx context.Context, id string) ([]byte, error) {
+	var v []byte
+	err := s.db.QueryRow(ctx, `SELECT holder_verifier FROM folders WHERE id = ?`, id).Scan(&v)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrFolderNotFound
+	case err != nil:
+		return nil, fmt.Errorf("config: get holder verifier: %w", err)
+	}
+	return v, nil
 }
 
 // FirstKeyGeneration is the epoch stamped when a folder key is first established.
