@@ -1,9 +1,7 @@
 // Package chunkstore is the content-addressed store. It maps a chunk identity to
 // its stored bytes, deduplicating on write, and reassembles the original bytes on
-// read. Chunks are backed either physically (packed into append-only blob files)
-// or virtually (a pointer into a real working file, so a node holding the data as
-// a normal file does not duplicate it). Every read is verified against the
-// requested identity before any bytes are returned.
+// read. Chunks are packed into append-only blob files. Every read is verified
+// against the requested identity before any bytes are returned.
 package chunkstore
 
 import (
@@ -36,7 +34,6 @@ type Backing uint8
 
 const (
 	BackingPhysical Backing = 0
-	BackingVirtual  Backing = 1
 )
 
 var (
@@ -44,9 +41,6 @@ var (
 	ErrChunkNotFound = errors.New("chunkstore: chunk not found")
 	// ErrHashMismatch is returned when stored bytes fail verification.
 	ErrHashMismatch = errors.New("chunkstore: stored bytes failed hash verification")
-	// ErrFileChanged is returned when a virtual chunk's backing file no longer
-	// hashes to the chunk identity.
-	ErrFileChanged = errors.New("chunkstore: backing file changed")
 	// ErrNoKey is returned when reading an encrypted chunk without a folder key.
 	ErrNoKey = errors.New("chunkstore: chunk is encrypted but no key was provided")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
@@ -54,7 +48,7 @@ var (
 	// ErrZeroKey is returned when encryption is requested with a zero master key.
 	ErrZeroKey = errors.New("chunkstore: encryption requested with a zero master key")
 	// ErrBackingMismatch is returned when an operation's backing conflicts with
-	// how the chunk is already stored (a chunk has one backing until promoted).
+	// how the chunk is already stored.
 	ErrBackingMismatch = errors.New("chunkstore: chunk already stored with a different backing")
 	// ErrCorruptIndex is returned when an index row is implausible, e.g. a stored
 	// length larger than any chunk can be.
@@ -90,14 +84,7 @@ CREATE TABLE IF NOT EXISTS blobs (
 	blob_id INTEGER PRIMARY KEY,
 	path    TEXT    NOT NULL,
 	size    INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS chunk_locations (
-	chunk_id    BLOB    NOT NULL,
-	file_path   TEXT    NOT NULL,
-	file_offset INTEGER NOT NULL,
-	length      INTEGER NOT NULL,
-	PRIMARY KEY (chunk_id, file_path, file_offset)
-) WITHOUT ROWID;`
+);`
 
 // FolderContext carries the per-operation encryption decision for a folder.
 type FolderContext struct {
@@ -408,38 +395,6 @@ func (s *Store) touchLastSeen(ctx context.Context, id hasher.ChunkID) error {
 	})
 }
 
-// PutVirtual records a chunk as a pointer into filePath without copying bytes.
-func (s *Store) PutVirtual(ctx context.Context, id hasher.ChunkID, filePath string, offset int64, length, plaintextLen int) error {
-	if !filepath.IsAbs(filePath) {
-		return fmt.Errorf("chunkstore: PutVirtual requires an absolute path, got %q", filePath)
-	}
-	if offset < 0 || length <= 0 || length > maxStoredLen || plaintextLen <= 0 {
-		return fmt.Errorf("chunkstore: invalid virtual chunk: offset=%d length=%d plaintext=%d", offset, length, plaintextLen)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch backing, exists, err := s.backingOf(ctx, id); {
-	case err != nil:
-		return err
-	case exists && backing != BackingVirtual:
-		return ErrBackingMismatch
-	}
-	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO chunks (chunk_id, backing, length, plaintext_length, last_seen_ms)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT(chunk_id) DO UPDATE SET last_seen_ms = excluded.last_seen_ms`,
-			id.Bytes(), int(BackingVirtual), length, plaintextLen, time.Now().UnixMilli())
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx,
-			`INSERT OR IGNORE INTO chunk_locations (chunk_id, file_path, file_offset, length) VALUES (?, ?, ?, ?)`,
-			id.Bytes(), filePath, offset, length)
-		return err
-	})
-}
-
 // Get returns the verified plaintext for a chunk, regardless of backing.
 func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([]byte, error) {
 	var (
@@ -461,10 +416,6 @@ func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([
 		return nil, fmt.Errorf("chunkstore: lookup: %w", err)
 	}
 
-	if Backing(backing) == BackingVirtual {
-		return s.readVirtual(ctx, id)
-	}
-
 	if !blobID.Valid || !offset.Valid {
 		return nil, fmt.Errorf("%w: physical chunk missing blob location", ErrCorruptIndex)
 	}
@@ -477,46 +428,6 @@ func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([
 		return nil, fmt.Errorf("chunkstore: read blob: %w", err)
 	}
 	return verify(fc, id, compression.Codec(codec), enc, stored)
-}
-
-func (s *Store) readVirtual(ctx context.Context, id hasher.ChunkID) ([]byte, error) {
-	rows, err := s.db.Query(ctx, `SELECT file_path, file_offset, length FROM chunk_locations WHERE chunk_id = ?`, id.Bytes())
-	if err != nil {
-		return nil, fmt.Errorf("chunkstore: locations: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var located, readable bool
-	for rows.Next() {
-		var path string
-		var offset int64
-		var length int
-		if err := rows.Scan(&path, &offset, &length); err != nil {
-			return nil, fmt.Errorf("chunkstore: scan location: %w", err)
-		}
-		located = true
-		data, err := readAt(path, offset, length)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			continue
-		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-			readable = true // file exists but is shorter than recorded: it changed
-			continue
-		case err != nil:
-			return nil, fmt.Errorf("chunkstore: read virtual: %w", err)
-		}
-		readable = true
-		if hasher.Sum(data) == id {
-			return data, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if !located || !readable {
-		return nil, ErrChunkNotFound
-	}
-	return nil, ErrFileChanged
 }
 
 func verify(fc FolderContext, id hasher.ChunkID, codec compression.Codec, encrypted bool, stored []byte) ([]byte, error) {
@@ -600,36 +511,6 @@ func (s *Store) ImportFile(ctx context.Context, fc FolderContext, path string) (
 	return s.ImportStream(ctx, fc, f)
 }
 
-// MirrorFile chunks a file and records each chunk as a virtual location into it,
-// duplicating no bytes, and returns the ordered chunk identities.
-func (s *Store) MirrorFile(ctx context.Context, path string) ([]hasher.ChunkID, error) {
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("chunkstore: MirrorFile requires an absolute path, got %q", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("chunkstore: open mirror: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	c := chunker.New(chunker.Options{Reader: f})
-	var ids []hasher.ChunkID
-	for {
-		ch, data, err := c.NextChunk()
-		if errors.Is(err, io.EOF) {
-			return ids, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("chunkstore: chunk mirror: %w", err)
-		}
-		id := hasher.Sum(data)
-		if err := s.PutVirtual(ctx, id, path, ch.Offset, ch.Length, ch.Length); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-}
-
 // Reassemble writes the chunks named by ids to w in order, reproducing the
 // original bytes exactly.
 func (s *Store) Reassemble(ctx context.Context, fc FolderContext, ids []hasher.ChunkID, w io.Writer) error {
@@ -684,12 +565,12 @@ func (s *Store) IterChunks(ctx context.Context) iter.Seq2[ChunkStat, error] {
 	}
 }
 
-// DeleteChunks removes the index entries (and virtual locations) for ids whose
-// last_seen_ms is still below beforeMs, in one transaction serialized with
-// writes, and returns how many chunks were actually deleted. The last_seen guard
-// is re-checked at delete time, so a chunk a concurrent ingest touched after it
-// was selected as a victim is spared. Blob bytes are reclaimed separately by
-// ReclaimBlobs. Deleting a missing chunk is a no-op, so a re-run is safe.
+// DeleteChunks removes the index entries for ids whose last_seen_ms is still
+// below beforeMs, in one transaction serialized with writes, and returns how many
+// chunks were actually deleted. The last_seen guard is re-checked at delete time,
+// so a chunk a concurrent ingest touched after it was selected as a victim is
+// spared. Blob bytes are reclaimed separately by ReclaimBlobs. Deleting a missing
+// chunk is a no-op, so a re-run is safe.
 func (s *Store) DeleteChunks(ctx context.Context, ids []hasher.ChunkID, beforeMs int64) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -712,9 +593,6 @@ func (s *Store) DeleteChunks(ctx context.Context, ids []hasher.ChunkID, beforeMs
 				continue
 			}
 			deleted += int(n)
-			if _, err := tx.Exec(ctx, `DELETE FROM chunk_locations WHERE chunk_id = ?`, id.Bytes()); err != nil {
-				return fmt.Errorf("chunkstore: delete locations: %w", err)
-			}
 		}
 		return nil
 	}); err != nil {

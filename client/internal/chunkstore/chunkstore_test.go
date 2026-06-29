@@ -241,67 +241,6 @@ func TestCrashRecoveryTruncatesOrphanTail(t *testing.T) {
 	}
 }
 
-func TestVirtualBackingAndFileChange(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	data := genData(3<<20, 5)
-	path := filepath.Join(dir, "work.bin")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	ids, err := s.MirrorFile(ctx, path)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if len(ids) < 2 {
-		t.Fatalf("expected multiple chunks, got %d", len(ids))
-	}
-
-	var out bytes.Buffer
-	if err := s.Reassemble(ctx, FolderContext{}, ids, &out); err != nil {
-		t.Fatalf("Reassemble: %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), data) {
-		t.Fatal("virtual reassembly mismatch")
-	}
-
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("reopen file: %v", err)
-	}
-	if _, err := f.WriteAt([]byte{^data[0]}, 0); err != nil {
-		t.Fatalf("mutate: %v", err)
-	}
-	_ = f.Close()
-
-	if _, err := s.Get(ctx, FolderContext{}, ids[0]); !errors.Is(err, ErrFileChanged) {
-		t.Fatalf("Get after file change err = %v, want ErrFileChanged", err)
-	}
-}
-
-func TestVirtualFileDeletedIsNotFound(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	data := genData(2<<20, 11)
-	path := filepath.Join(dir, "gone.bin")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	ids, err := s.MirrorFile(ctx, path)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if _, err := s.Get(ctx, FolderContext{}, ids[0]); !errors.Is(err, ErrChunkNotFound) {
-		t.Fatalf("Get after delete err = %v, want ErrChunkNotFound", err)
-	}
-}
-
 func TestImportReassembleMatrix(t *testing.T) {
 	ctx := context.Background()
 	data := genData(5<<20, 6)
@@ -331,25 +270,6 @@ func TestImportReassembleMatrix(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("virtual", func(t *testing.T) {
-		s, dir := newStore(t, 0)
-		path := filepath.Join(dir, "f.bin")
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		ids, err := s.MirrorFile(ctx, path)
-		if err != nil {
-			t.Fatalf("MirrorFile: %v", err)
-		}
-		var out bytes.Buffer
-		if err := s.Reassemble(ctx, FolderContext{}, ids, &out); err != nil {
-			t.Fatalf("Reassemble: %v", err)
-		}
-		if !bytes.Equal(out.Bytes(), data) {
-			t.Fatal("virtual restore not bit-exact")
-		}
-	})
 }
 
 func TestSchemaTooNew(t *testing.T) {
@@ -379,73 +299,6 @@ func TestZeroKeyRejected(t *testing.T) {
 	s, _ := newStore(t, 0)
 	if _, err := s.Put(context.Background(), FolderContext{Encrypted: true}, []byte("x")); !errors.Is(err, ErrZeroKey) {
 		t.Fatalf("Put with zero key err = %v, want ErrZeroKey", err)
-	}
-}
-
-func TestMirrorRequiresAbsolutePath(t *testing.T) {
-	s, _ := newStore(t, 0)
-	if _, err := s.MirrorFile(context.Background(), "relative/path.bin"); err == nil {
-		t.Fatal("expected error for relative path")
-	}
-}
-
-func TestBackingMismatch(t *testing.T) {
-	ctx := context.Background()
-	s, dir := newStore(t, 0)
-
-	// Physical first, then attempt virtual for the same identity.
-	data := genData(2000, 1)
-	id, err := s.Put(ctx, FolderContext{}, data)
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	path := filepath.Join(dir, "f.bin")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := s.PutVirtual(ctx, id, path, 0, len(data), len(data)); !errors.Is(err, ErrBackingMismatch) {
-		t.Fatalf("PutVirtual over physical err = %v, want ErrBackingMismatch", err)
-	}
-
-	// Virtual first, then attempt physical for the same identity.
-	other := genData(2000, 2)
-	otherPath := filepath.Join(dir, "g.bin")
-	if err := os.WriteFile(otherPath, other, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	vids, err := s.MirrorFile(ctx, otherPath)
-	if err != nil {
-		t.Fatalf("MirrorFile: %v", err)
-	}
-	if _, err := s.Put(ctx, FolderContext{}, other); !errors.Is(err, ErrBackingMismatch) {
-		t.Fatalf("Put over virtual err = %v, want ErrBackingMismatch", err)
-	}
-	_ = vids
-}
-
-func TestPutVirtualValidation(t *testing.T) {
-	ctx := context.Background()
-	s, _ := newStore(t, 0)
-	id := hasher.Sum([]byte("x"))
-	cases := []struct {
-		name   string
-		path   string
-		offset int64
-		length int
-		plen   int
-	}{
-		{"relative path", "rel/path.bin", 0, 10, 10},
-		{"negative offset", "/abs.bin", -1, 10, 10},
-		{"zero length", "/abs.bin", 0, 0, 10},
-		{"zero plaintext", "/abs.bin", 0, 10, 0},
-		{"oversize length", "/abs.bin", 0, maxStoredLen + 1, 10},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if err := s.PutVirtual(ctx, id, c.path, c.offset, c.length, c.plen); err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
 	}
 }
 
