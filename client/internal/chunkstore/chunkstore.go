@@ -834,6 +834,7 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 		path string
 	}
 	var dead []deadBlob
+	openEmpty := false
 	rows, err := s.db.Query(ctx,
 		`SELECT blob_id, path FROM blobs WHERE blob_id NOT IN (SELECT blob_id FROM chunks WHERE blob_id IS NOT NULL)`)
 	if err != nil {
@@ -846,6 +847,7 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("chunkstore: scan blob: %w", err)
 		}
 		if s.cur != nil && b.id == s.cur.id {
+			openEmpty = true
 			continue
 		}
 		dead = append(dead, b)
@@ -855,6 +857,26 @@ func (s *Store) ReclaimBlobs(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	_ = rows.Close()
+
+	// The open blob backs no chunk (e.g. a replica re-pointed its pulled chunks to
+	// clones): reclaim its space in place rather than unlink a file still in use,
+	// so even a small replica settles to ~1x. The size is committed to 0 before the
+	// truncate, so a crash leaves recoverBlob truncating to 0, never re-extending.
+	if openEmpty && s.cur.size > 0 {
+		if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE blobs SET size = 0 WHERE blob_id = ?`, s.cur.id)
+			return err
+		}); err != nil {
+			return 0, fmt.Errorf("chunkstore: reset open blob size: %w", err)
+		}
+		if err := s.cur.f.Truncate(0); err != nil {
+			return 0, fmt.Errorf("chunkstore: truncate open blob: %w", err)
+		}
+		if err := s.cur.f.Sync(); err != nil {
+			return 0, fmt.Errorf("chunkstore: sync open blob: %w", err)
+		}
+		s.cur.size = 0
+	}
 
 	for _, b := range dead {
 		if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {

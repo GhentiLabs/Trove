@@ -49,6 +49,7 @@ func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 	assertTreesEqual(t, owner.root, replica.root)
 	assertLeafSetsEqual(t, owner, replica)
 	assertCurrentChunkPlaintext(t, owner, []byte("hello world"))
+	assertCurrentChunkPlaintext(t, replica, []byte("hello world"))
 }
 
 // TestEncryptedSnapshotRootMatchesPlaintext checks that encrypting a folder changes

@@ -25,6 +25,15 @@ func idsOf(refs []manifest.ChunkRef) []hasher.ChunkID {
 	return ids
 }
 
+func blobBytes(t *testing.T, s *Store) int64 {
+	t.Helper()
+	var total int64
+	if err := s.db.QueryRow(context.Background(), `SELECT COALESCE(SUM(size), 0) FROM blobs`).Scan(&total); err != nil {
+		t.Fatalf("sum blob sizes: %v", err)
+	}
+	return total
+}
+
 func genData(n int, seed uint64) []byte {
 	r := rand.New(rand.NewPCG(seed, 0x1234))
 	b := make([]byte, n)
@@ -715,6 +724,49 @@ func TestReclaimObjects(t *testing.T) {
 	}
 	if _, err := s.Get(ctx, FolderContext{}, refs[0].ID); !errors.Is(err, ErrChunkNotFound) {
 		t.Fatalf("Get after reclaim err = %v, want ErrChunkNotFound", err)
+	}
+}
+
+// TestRepointReclaimsOpenPullBlob mirrors the replica path: chunks pulled
+// physically into the open blob are re-pointed to a clone on materialize, after
+// which the now-empty pull blob's space is reclaimed in place so the replica
+// settles to ~1x.
+func TestRepointReclaimsOpenPullBlob(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(5<<20, 31)
+	ids, err := s.ImportStream(ctx, FolderContext{}, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ImportStream (pull): %v", err)
+	}
+	if blobBytes(t, s) == 0 {
+		t.Fatal("expected pulled bytes in the open blob")
+	}
+
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if len(refs) != len(ids) {
+		t.Fatalf("chunk count differs: clone %d, pulled %d", len(refs), len(ids))
+	}
+
+	if _, err := s.ReclaimBlobs(ctx); err != nil {
+		t.Fatalf("ReclaimBlobs: %v", err)
+	}
+	if b := blobBytes(t, s); b != 0 {
+		t.Fatalf("open pull blob holds %d bytes after re-point and reclaim, want 0", b)
+	}
+	if _, err := s.Get(ctx, FolderContext{}, refs[0].ID); err != nil {
+		t.Fatalf("Get after reclaim: %v", err)
+	}
+	if b, _, _ := s.backingOf(ctx, refs[0].ID); b != BackingClone {
+		t.Fatalf("backing = %v, want clone", b)
 	}
 }
 

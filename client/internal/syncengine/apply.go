@@ -99,6 +99,21 @@ func (fs *folderState) materializeBatch(ctx context.Context, batch []model.Remot
 			return err
 		}
 	}
+
+	// Collapse each materialized file to a copy-on-write clone so current data
+	// settles to ~1x; the transient pulled chunks become unreferenced and are
+	// reclaimed by GC. A clone failure is not fatal: the file is correct and stays
+	// servable from the pulled chunks until a later ingest clones it.
+	if !fs.cfg.NoClone {
+		for i, rm := range batch {
+			if rm.Deleted || rm.Manifest.Kind != manifest.KindRegular {
+				continue
+			}
+			if _, err := fs.cfg.Chunks.IngestClone(ctx, dests[i]); err != nil {
+				fs.eng.log.Warn("syncengine: clone materialized file", "folder", fs.cfg.FolderID, "path", rm.Manifest.Path, "err", err)
+			}
+		}
+	}
 	_ = os.RemoveAll(stage)
 	return nil
 }

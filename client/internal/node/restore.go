@@ -184,7 +184,7 @@ func recoverViaEngine(ctx context.Context, log *slog.Logger, opts RecoverOptions
 			Session: sess, Logger: log, OnConverged: onConverged,
 			Folders: []syncengine.FolderConfig{{
 				FolderID: opts.ShareID, Role: syncengine.RoleReader, Root: opts.Root,
-				FolderCtx: fc, Model: mdl, Chunks: chunks, Coord: coord,
+				FolderCtx: fc, Model: mdl, Chunks: chunks, Coord: coord, NoClone: true,
 			}},
 		})
 		if err != nil {

@@ -106,6 +106,9 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	if res.ChunksDeleted == 0 {
 		t.Fatal("GC reclaimed nothing after forgetting the only snapshot pinning v1")
 	}
+	if res.ObjectsReclaimed == 0 {
+		t.Fatal("GC did not reclaim the superseded clone object after forgetting snap1")
+	}
 	if got := decrypt(t, cs, fc, mustGet(t, ms, "a.txt").Manifest.Chunks); got != "alpha contents, a second and longer version" {
 		t.Fatalf("current a.txt corrupted by GC: %q", got)
 	}
