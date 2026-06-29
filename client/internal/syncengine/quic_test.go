@@ -31,6 +31,7 @@ func realTransport(t *testing.T) (*transport.Transport, string) {
 // TestConvergeOverRealQUIC exercises the join the MemNet tests cannot: real buffered
 // QUIC streams, stream FIN as transfer-complete, and real backpressure on loopback.
 func TestConvergeOverRealQUIC(t *testing.T) {
+	t.Parallel()
 	ownerTr, ownerFP := realTransport(t)
 	replicaTr, replicaFP := realTransport(t)
 

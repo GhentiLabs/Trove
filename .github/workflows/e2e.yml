@@ -1,17 +1,17 @@
 # Cross-NAT hole-punch matrix. Builds a privileged netns/nftables topology and runs the
-# real binaries through each NAT-type cell, plus a 3-peer offline-gate cell that converges
-# a folder through edit/delete/rename with one replica offline and checks sync receipts.
+# real binaries through each NAT-type cell, plus multi-peer acceptance gates: offline and
+# bidirectional convergence, holder ciphertext push/restore, and member/unencrypted recovery.
 # Runs on every PR.
-name: NAT matrix
+name: E2E
 
 on:
   pull_request:
   workflow_dispatch:
 
 jobs:
-  nat-matrix:
+  e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - run: make nat-matrix
+      - run: make e2e

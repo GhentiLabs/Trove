@@ -1,5 +1,5 @@
 // The Run/gather/loop wiring is exercised end-to-end by the live two-machine gate
-// (cmd/trove-peer) and the NAT matrix (client/test/nat); the tests here cover the
+// (cmd/trove-peer) and the e2e matrix (client/test/e2e); the tests here cover the
 // pure translation seams between config and the session/peermgr layers.
 package node
 

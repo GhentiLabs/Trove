@@ -83,7 +83,7 @@ replica has applied it (90-day retention is the backstop); an owner-side hourly 
 computes the gate. `RepairFolder` re-materializes a replica's out-of-band-deleted files
 from local chunks at startup. The deletion-apply and atomic cursor commit were already
 in place from Phase A. Covered by model units, engine-level convergence/repair/offline
-catch-up tests, and the NAT matrix's live second round (edit + delete + rename + receipt
+catch-up tests, and the e2e matrix's live second round (edit + delete + rename + receipt
 query over real holepunch).
 
 **Accept (the M4 integration gate):** ≥3 machines across NAT via Trove/holepunch
@@ -91,5 +91,5 @@ converge a multi-file folder through an edit, a delete, and a rename, with one r
 offline for part of the run; both ends hold correct SyncReceipts; "last synced" is
 queryable. **Automated** in containers over real holepunch as the NAT harness's
 `SCENARIO=offline-gate` (3 peers, one offline→repair+catch-up, receipts for both) — runs
-with the matrix via `make nat-matrix`. The human-run version on real machines/NATs is the
+with the matrix via `make e2e`. The human-run version on real machines/NATs is the
 final sign-off; procedure in `docs/m4-live-runbook.md`.

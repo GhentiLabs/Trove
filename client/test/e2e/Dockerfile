@@ -17,6 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       iproute2 nftables iptables conntrack ca-certificates procps \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/discovery-server /out/trove-peer /usr/local/bin/
-COPY client/test/nat/run.sh /usr/local/bin/run.sh
+COPY client/test/e2e/run.sh /usr/local/bin/run.sh
 RUN chmod +x /usr/local/bin/run.sh
 ENTRYPOINT ["/usr/local/bin/run.sh"]

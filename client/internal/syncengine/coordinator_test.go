@@ -12,6 +12,7 @@ import (
 )
 
 func TestSetFolderContextUpdatesChunkStorage(t *testing.T) {
+	t.Parallel()
 	c := NewCoordinator("f", chunkstore.FolderContext{}, nil, 0, nil)
 	if c.folderCtx().Encrypted {
 		t.Fatal("new coordinator should start unencrypted")
@@ -35,6 +36,7 @@ func (f *fakeConn) Close() error                                       { return 
 // A torn-down session must not evict a newer session that already replaced it for the
 // same peer.
 func TestCoordinatorRemoveSourceIdentityGuard(t *testing.T) {
+	t.Parallel()
 	c := NewCoordinator(folderID, chunkstore.FolderContext{}, nil, 0, nil)
 	conn1, conn2 := &fakeConn{"a"}, &fakeConn{"a"}
 	c.addSource("a", conn1)
@@ -48,6 +50,7 @@ func TestCoordinatorRemoveSourceIdentityGuard(t *testing.T) {
 // order() puts the owner last (the guaranteed fallback) and rotates the peer sources so
 // load spreads instead of always hitting the same one first.
 func TestCoordinatorOrderOwnerLastAndRotates(t *testing.T) {
+	t.Parallel()
 	c := NewCoordinator(folderID, chunkstore.FolderContext{}, nil, 0, nil)
 	for _, id := range []string{"owner", "p1", "p2", "p3"} {
 		c.addSource(id, &fakeConn{id})
@@ -70,6 +73,7 @@ func TestCoordinatorOrderOwnerLastAndRotates(t *testing.T) {
 
 // missing() deduplicates repeated chunk ids and excludes ones already stored.
 func TestCoordinatorMissingDedups(t *testing.T) {
+	t.Parallel()
 	p := newPeer(t, ownerID)
 	ctx := context.Background()
 	have, err := p.chunks.Put(ctx, p.fc, []byte("stored chunk data"))
@@ -90,6 +94,7 @@ func TestCoordinatorMissingDedups(t *testing.T) {
 
 // pull() errors rather than hanging when a needed chunk has no source.
 func TestCoordinatorPullNoSources(t *testing.T) {
+	t.Parallel()
 	p := newPeer(t, ownerID)
 	ctx := context.Background()
 	c := NewCoordinator(folderID, p.fc, p.chunks, 0, nil)

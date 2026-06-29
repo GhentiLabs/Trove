@@ -6,37 +6,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-// waitSameRoot blocks until every peer reports the same current root.
 func waitSameRoot(t *testing.T, peers ...peer) {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, convergeTimeout, "peers to converge to one root", func() bool {
 		want := peers[0].currentRoot(t)
-		same := true
 		for _, p := range peers[1:] {
 			if p.currentRoot(t) != want {
-				same = false
-				break
+				return false
 			}
 		}
-		if same {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	roots := make([]string, len(peers))
-	for i, p := range peers {
-		roots[i] = p.currentRoot(t)
-	}
-	t.Fatalf("peers did not converge to one root: %v", roots)
+		return true
+	})
 }
 
 // TestBidirectionalNonOverlappingEdits proves two writers that each originate a distinct
 // path converge to the union, each pulling and applying the other's edit.
 func TestBidirectionalNonOverlappingEdits(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, replicaID)
 	writeFile(t, a.root, "from-a.txt", []byte("authored by a"))
@@ -71,6 +59,7 @@ func fileContents(t *testing.T, root string) map[string]bool {
 // converge to byte-identical trees holding the deterministic winner at the path and the
 // loser preserved as a conflict copy — neither edit is lost.
 func TestConcurrentSamePathKeepsBoth(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, replicaID)
 	writeFile(t, a.root, "doc.txt", []byte("version from A"))
@@ -97,6 +86,7 @@ func TestConcurrentSamePathKeepsBoth(t *testing.T) {
 // TestConcurrentSamePathReaderConverges adds a read-only peer to the concurrent-edit case:
 // the reader originates nothing yet must converge to the identical resolved tree.
 func TestConcurrentSamePathReaderConverges(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, strings.Repeat("b", 52))
 	c := newPeer(t, replicaID)
@@ -128,8 +118,9 @@ func TestConcurrentSamePathReaderConverges(t *testing.T) {
 }
 
 // TestPushOnChangePropagatesBeforeTicker proves a mid-session edit reaches the peer via
-// the change hook, not the 5s anti-entropy ticker: it must arrive well within one second.
+// the change hook, not the 5s anti-entropy ticker: it must arrive within half that interval.
 func TestPushOnChangePropagatesBeforeTicker(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, replicaID)
 	writeFile(t, a.root, "seed.txt", []byte("initial"))
@@ -142,25 +133,25 @@ func TestPushOnChangePropagatesBeforeTicker(t *testing.T) {
 	engineOn(t, ctx, sb, b, RoleWriter, nil)
 	waitSameRoot(t, a, b)
 
-	// Edit after both engines are running and settled; only push (not the ticker) can
-	// deliver this within the deadline.
+	// Both engines are settled before the edit, so only the push hook — not the
+	// initial convergence — can satisfy the check below.
 	writeFile(t, a.root, "live.txt", []byte("appeared mid-session"))
 	a.scan(t)
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(b.root, "live.txt")); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("mid-session edit did not propagate within 1s; push-on-change may have regressed")
+	// A deadline below the anti-entropy interval proves the push delivered this, not
+	// the ticker.
+	const pushDeadline = announceInterval / 2
+	waitFor(t, pushDeadline, "mid-session edit to propagate via push-on-change", func() bool {
+		_, err := os.Stat(filepath.Join(b.root, "live.txt"))
+		return err == nil
+	})
 }
 
 // TestConcurrentDeleteVsEditKeepsEdit proves that when one writer deletes a path while
 // another edits it during the same offline window, both converge to the surviving edit —
 // data is never lost to a concurrent delete.
 func TestConcurrentDeleteVsEditKeepsEdit(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, replicaID)
 	writeFile(t, a.root, "shared.txt", []byte("base"))
@@ -198,6 +189,7 @@ func TestConcurrentDeleteVsEditKeepsEdit(t *testing.T) {
 // TestTransitiveRelayConverges proves a writer's edit reaches a peer it never connects to
 // directly: A links only to B, C links only to B, and B relays A's manifest to C.
 func TestTransitiveRelayConverges(t *testing.T) {
+	t.Parallel()
 	a := newPeer(t, ownerID)
 	b := newPeer(t, strings.Repeat("b", 52))
 	c := newPeer(t, replicaID)

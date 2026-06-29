@@ -6,8 +6,8 @@
 set -u
 cd "$(dirname "$0")/../../.." || exit 2
 
-echo "building trove-nat-matrix image..."
-docker build -f client/test/nat/Dockerfile -t trove-nat-matrix . >/dev/null || {
+echo "building trove-e2e image..."
+docker build -f client/test/e2e/Dockerfile -t trove-e2e . >/dev/null || {
 	echo "image build failed"
 	exit 2
 }
@@ -16,7 +16,7 @@ docker build -f client/test/nat/Dockerfile -t trove-nat-matrix . >/dev/null || {
 cell() {
 	docker run --rm --privileged \
 		-e NAT_A="$1" -e NAT_B="$2" -e EXPECT="$3" \
-		trove-nat-matrix 2>&1 | sed "s/^/[$1x$2] /"
+		trove-e2e 2>&1 | sed "s/^/[$1x$2] /"
 	return "${PIPESTATUS[0]}"
 }
 
@@ -24,11 +24,11 @@ cell() {
 gate() {
 	docker run --rm --privileged \
 		-e SCENARIO="$1" \
-		trove-nat-matrix 2>&1 | sed "s/^/[$1] /"
+		trove-e2e 2>&1 | sed "s/^/[$1] /"
 	return "${PIPESTATUS[0]}"
 }
 
-echo "running NAT matrix + offline/bidi/holder/recovery gates (in parallel)..."
+echo "running e2e matrix + offline/bidi/holder/recovery gates (in parallel)..."
 cell prc prc success &
 p1=$!
 cell prc sym fail &
@@ -60,8 +60,8 @@ wait $p8 || rc=1
 wait $p9 || rc=1
 
 if [ $rc -eq 0 ]; then
-	echo "NAT matrix: ALL CELLS PASS"
+	echo "e2e matrix: ALL CELLS PASS"
 else
-	echo "NAT matrix: FAILURES (see cell output above)"
+	echo "e2e matrix: FAILURES (see cell output above)"
 fi
 exit $rc

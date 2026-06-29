@@ -10,6 +10,7 @@ import (
 )
 
 func TestDataStreamConstantsGolden(t *testing.T) {
+	t.Parallel()
 	if DataMagic != 0x54445254 {
 		t.Fatalf("DataMagic = %#x, want 0x54445254", DataMagic)
 	}
@@ -28,6 +29,7 @@ func TestDataStreamConstantsGolden(t *testing.T) {
 }
 
 func TestChunkRequestGoldenLayout(t *testing.T) {
+	t.Parallel()
 	id := hasher.Sum([]byte("chunk"))
 	var buf bytes.Buffer
 	if err := writeChunkRequest(&buf, "fld", id); err != nil {
@@ -58,6 +60,7 @@ func TestChunkRequestGoldenLayout(t *testing.T) {
 }
 
 func TestChunkRequestRoundTrip(t *testing.T) {
+	t.Parallel()
 	id := hasher.Sum([]byte("c"))
 	var buf bytes.Buffer
 	if err := writeChunkRequest(&buf, "docs", id); err != nil {
@@ -73,6 +76,7 @@ func TestChunkRequestRoundTrip(t *testing.T) {
 }
 
 func TestChunkResponseGoldenLayout(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	if err := writeChunkResponseHeader(&buf, StatusOK, 1234); err != nil {
 		t.Fatalf("writeChunkResponseHeader: %v", err)
@@ -99,6 +103,7 @@ func TestChunkResponseGoldenLayout(t *testing.T) {
 }
 
 func TestChunkResponseRoundTrip(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	if err := writeChunkResponseHeader(&buf, StatusNotFound, 0); err != nil {
 		t.Fatalf("writeChunkResponseHeader: %v", err)
@@ -113,6 +118,7 @@ func TestChunkResponseRoundTrip(t *testing.T) {
 }
 
 func TestReadChunkRequestRejectsBadMagic(t *testing.T) {
+	t.Parallel()
 	b := make([]byte, 8+hasher.IDLen)
 	binary.BigEndian.PutUint32(b[0:4], 0xDEADBEEF)
 	b[4] = DataVersion
@@ -122,6 +128,7 @@ func TestReadChunkRequestRejectsBadMagic(t *testing.T) {
 }
 
 func TestReadChunkRequestRejectsVersion(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	_ = writeChunkRequest(&buf, "f", hasher.Sum([]byte("x")))
 	b := buf.Bytes()
@@ -132,6 +139,7 @@ func TestReadChunkRequestRejectsVersion(t *testing.T) {
 }
 
 func TestReadChunkRequestRejectsOversizeFolderID(t *testing.T) {
+	t.Parallel()
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint32(b[0:4], DataMagic)
 	b[4] = DataVersion
@@ -143,6 +151,7 @@ func TestReadChunkRequestRejectsOversizeFolderID(t *testing.T) {
 }
 
 func TestReadChunkResponseRejectsOversizeLength(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	_ = binary.Write(&buf, binary.BigEndian, DataMagic)
 	buf.WriteByte(DataVersion)

@@ -1,7 +1,7 @@
 # M4 live convergence runbook (the integration gate)
 
-The deterministic in-process tests are the gate CI runs. The NAT matrix
-(`make nat-matrix`) reproduces the **entire gate shape in containers over real
+The deterministic in-process tests are the gate CI runs. The e2e matrix
+(`make e2e`) reproduces the **entire gate shape in containers over real
 holepunch**: a `SCENARIO=offline-gate` run stands up an owner and two punchable
 replicas, takes one replica offline while the owner edits, deletes, and renames, then
 reconnects it — asserting startup repair, anti-entropy catch-up with no resurrection,

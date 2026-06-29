@@ -169,7 +169,7 @@ recovers when no trusted peer is online — the holder's reason to exist.
 
 ---
 
-## 4. Real-network holder test (the `make nat-matrix` holder cell)
+## 4. Real-network holder test (the `make e2e` holder cell)
 
 Add one scenario to the existing real-network harness (containers behind simulated routers, real
 hole-punching): a dedicated holder behind one NAT accumulates a writer's blinded ciphertext over a
@@ -220,7 +220,7 @@ writers only. Each new op gets a golden layout test. `HolderVersion` stays 1 (ad
 3. **Live mirror** (OnAnnounce + coalescer). Tests: edit-propagates-without-reconnect.
 4. **GC** (List/Delete + grace). Tests: reclaim without reaping in-flight.
 5. **Restore command** (Model A or B per the decision). Tests: recovery-code end-to-end.
-6. **Real-network holder cell** in `make nat-matrix`.
+6. **Real-network holder cell** in `make e2e`.
 
 Each phase: WIP commit + background review subagents, then proceed — same loop as the rest of M6.
 

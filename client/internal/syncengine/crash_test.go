@@ -55,18 +55,12 @@ func (s *corruptStream) Read(p []byte) (int, error) {
 }
 
 // waitForPullAttempt blocks until the replica has opened at least one data stream
-// (beyond the control stream), so a fault's effect is asserted after a confirmed
-// attempt rather than on a timing guess.
+// beyond the control stream, confirming a chunk pull was attempted.
 func waitForPullAttempt(t *testing.T, fc *faultyConn) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if fc.opens.Load() >= 2 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("no data-stream pull attempt observed")
+	waitFor(t, convergeTimeout, "a data-stream pull attempt", func() bool {
+		return fc.opens.Load() >= 2
+	})
 }
 
 func assertReplicaEmpty(t *testing.T, replica, owner peer) {
@@ -84,6 +78,7 @@ func assertReplicaEmpty(t *testing.T, replica, owner peer) {
 }
 
 func TestCrashMidPullLeavesNoPartialThenResumes(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "a.txt", []byte("alpha"))
@@ -113,6 +108,7 @@ func TestCrashMidPullLeavesNoPartialThenResumes(t *testing.T) {
 }
 
 func TestCorruptChunkRejectedThenResumes(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "big.bin", pseudoRandom(2<<20, 4))
@@ -144,6 +140,7 @@ func TestCorruptChunkRejectedThenResumes(t *testing.T) {
 // has stored but no manifest yet references survives a sweep because its last_seen is
 // within the grace window; once grace elapses and it stays unreferenced, it is swept.
 func TestInFlightChunksSurviveGraceSweep(t *testing.T) {
+	t.Parallel()
 	replica := newPeer(t, replicaID)
 	ctx := context.Background()
 

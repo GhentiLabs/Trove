@@ -101,7 +101,7 @@ random-op mesh convergence with a fixpoint re-scan, partition/heal rounds, a con
 storm that preserves every edit, and concurrent edits over a corrupting link — all green
 under `-race`.
 
-**Remaining for M5-done: the live bidirectional NAT-matrix cell** (two writers, concurrent
+**Remaining for M5-done: the live bidirectional e2e-matrix cell** (two writers, concurrent
 offline edits to one path over real holepunch, converge to identical conflict copies) and
 the human ≥2-machine confirmation, mirroring M4's `offline-gate`.
 

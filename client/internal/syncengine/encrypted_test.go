@@ -28,6 +28,7 @@ func encrypt(p *peer, key [crypto.MasterKeyLen]byte) {
 // TestEncryptedFolderConvergesBitExact syncs an encrypted folder between two peers
 // sharing a key, bit-exact, with the chunks landing sealed at rest on both.
 func TestEncryptedFolderConvergesBitExact(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	key := testKey(0xA5)
@@ -54,6 +55,7 @@ func TestEncryptedFolderConvergesBitExact(t *testing.T) {
 // no history hash: the same tree scanned encrypted and unencrypted yields a
 // byte-identical snapshot root.
 func TestEncryptedSnapshotRootMatchesPlaintext(t *testing.T) {
+	t.Parallel()
 	plain := newPeer(t, ownerID)
 	sealed := newPeer(t, ownerID)
 	encrypt(&sealed, testKey(0x3C))
