@@ -32,7 +32,7 @@ commands:
   invite     admit a reader to a group you own (-group -node -key)
   join       join a group founded by someone else (-group -root)
   run        run the peer: sync and membership gossip (-trove)
-  restore    recover an encrypted folder from a holder (-group -code -holder -root)
+  restore    recover an encrypted folder from a holder (-group -code -holder-id -root)
   status     show each folder's role, root, and last-synced receipts
 `
 
@@ -265,7 +265,7 @@ func cmdRestore(args []string) error {
 	trove := fs.String("trove", "", "trove://host:port?id=<fingerprint> discovery server")
 	group := fs.String("group", "", "group id of the folder to restore")
 	code := fs.String("code", "", "recovery code printed when the folder was founded")
-	holderID := fs.String("holder", "", "node id of a holder that stores the folder")
+	holderID := fs.String("holder-id", "", "node id of a holder that stores the folder")
 	root := fs.String("root", "", "local directory to restore the folder into")
 	listen := fs.String("listen", "0.0.0.0:0", "local QUIC UDP bind address")
 	debug := fs.Bool("debug", false, "verbose debug logging")
@@ -273,7 +273,7 @@ func cmdRestore(args []string) error {
 		return err
 	}
 	if *trove == "" || *group == "" || *code == "" || *holderID == "" || *root == "" {
-		return errors.New("restore: -trove, -group, -code, -holder, and -root are required")
+		return errors.New("restore: -trove, -group, -code, -holder-id, and -root are required")
 	}
 	if _, ok := membership.Founder(*group); !ok {
 		return fmt.Errorf("restore: %q is not a valid group id", *group)
@@ -300,7 +300,7 @@ func cmdRestore(args []string) error {
 	fmt.Printf("restoring %s from holder %s...\n", *group, *holderID)
 	if err := node.RestoreFromHolder(ctx, node.RestoreOptions{
 		Cert: cert, NodeID: nodeID, TroveURL: *trove, UDPAddr: *listen,
-		HolderID: *holderID, FolderID: *group, MasterKey: key, Root: *root, Logger: log,
+		HolderID: *holderID, ShareID: *group, MasterKey: key, Root: *root, Logger: log,
 	}); err != nil {
 		return err
 	}

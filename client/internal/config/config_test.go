@@ -268,7 +268,9 @@ func TestPersistsAcrossReopen(t *testing.T) {
 
 func TestHolderVerifier(t *testing.T) {
 	ctx := context.Background()
-	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+	path := filepath.Join(t.TempDir(), "c.db")
+	db := openDB(t, path)
+	s := openStore(t, db, testNode)
 
 	if err := s.AddFolder(ctx, Folder{ID: "g", ShareID: "g", Encrypted: true, Holder: true}); err != nil {
 		t.Fatalf("AddFolder: %v", err)
@@ -293,5 +295,14 @@ func TestHolderVerifier(t *testing.T) {
 	}
 	if err := s.SetHolderVerifier(ctx, "missing", want); !errors.Is(err, ErrFolderNotFound) {
 		t.Fatalf("set missing err = %v, want ErrFolderNotFound", err)
+	}
+
+	// The verifier survives a reopen: a restore can happen long after the writer is gone.
+	reopened := openStore(t, openDB(t, path), testNode)
+	switch got, err := reopened.GetHolderVerifier(ctx, "g"); {
+	case err != nil:
+		t.Fatalf("GetHolderVerifier after reopen: %v", err)
+	case !bytes.Equal(got, want):
+		t.Fatalf("verifier after reopen = %x, want %x", got, want)
 	}
 }

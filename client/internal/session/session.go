@@ -327,7 +327,10 @@ func peerVerifiers(peer *wirepb.NetworkConfig) map[string][]byte {
 	return out
 }
 
-// PeerEncryptionVerifier returns the verifier the peer announced for a folder, or nil.
+// PeerEncryptionVerifier returns the verifier the peer announced for a folder, or nil. It is
+// built from the raw peer NetworkConfig before the shared-folder intersection, so it resolves
+// for folders that ended up not shared — e.g. a restore client proving key knowledge to a
+// holder that offered nothing. Do not restrict it to SharedFolders.
 func (s *Session) PeerEncryptionVerifier(folderID string) []byte { return s.peerVerifiers[folderID] }
 
 // PeerNodeID is the authenticated peer identity.

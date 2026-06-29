@@ -561,7 +561,7 @@ run_holder_gate() {
 	kill $pa 2>/dev/null; wait $pa 2>/dev/null
 
 	# A fresh, non-member machine restores from the holder using only the recovery code.
-	ip netns exec clC trove-peer restore -dir "$STATE/C" -trove "$trove" -group "$group" -code "$code" -holder "$idB" -root "$DSTC" -debug >"$LOG/C" 2>&1 &
+	ip netns exec clC trove-peer restore -dir "$STATE/C" -trove "$trove" -group "$group" -code "$code" -holder-id "$idB" -root "$DSTC" -debug >"$LOG/C" 2>&1 &
 	local prc=$!
 	local restored="fail"
 	for j in $(seq 1 90); do

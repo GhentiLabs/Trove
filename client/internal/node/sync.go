@@ -143,6 +143,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if len(rt.holders) > 0 && len(rt.folders) > 0 {
 		return nil, fmt.Errorf("node: a holder node cannot also sync folders; run a dedicated holder")
 	}
+	s.isHolder = len(rt.holders) > 0
 	ok = true
 	return rt, nil
 }
@@ -279,10 +280,11 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		}
 		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
 		// both, so the holder server and the sync engine never contend for the connection.
-		if served := rt.holderServeSet(ctx, log, sess, shared, member); len(served) > 0 {
-			if member {
-				rt.captureHolderVerifiers(ctx, log, sess, served)
-			}
+		if served := rt.holderStoresForPeer(ctx, log, sess, shared, member); len(served) > 0 {
+			// Unconditional: persistHolderVerifiers re-checks roster membership per folder, so a
+			// non-member can't poison the token, and capturing here even when peerIsMember errored
+			// keeps a fresh holder able to learn the verifier its first writer advertises.
+			rt.persistHolderVerifiers(ctx, log, sess, served)
 			srv := holder.NewServer(served, rt.holderPutAllowed, log)
 			wg.Add(1)
 			go func() {
@@ -325,12 +327,12 @@ func (rt *syncRuntime) peerIsMember(ctx context.Context, nodeID string) (bool, e
 	return false, nil
 }
 
-// captureHolderVerifiers persists the verifier a trusted member advertised for each folder
-// this node holds, so a later non-member restore can be proven against it. Only a roster
-// member's advertisement is trusted; a non-member could otherwise poison the stored token.
-func (rt *syncRuntime) captureHolderVerifiers(ctx context.Context, log *slog.Logger, sess *session.Session, held map[string]*holder.Store) {
+// persistHolderVerifiers stores the verifier a trusted member advertised for each folder this
+// node holds, so a later non-member restore can be proven against it. Only a roster member's
+// advertisement is trusted; a non-member could otherwise poison the stored token.
+func (rt *syncRuntime) persistHolderVerifiers(ctx context.Context, log *slog.Logger, sess *session.Session, served map[string]*holder.Store) {
 	peerID := sess.PeerNodeID()
-	for shareID := range held {
+	for shareID := range served {
 		vb := sess.PeerEncryptionVerifier(shareID)
 		if len(vb) == 0 {
 			continue
@@ -348,23 +350,23 @@ func (rt *syncRuntime) captureHolderVerifiers(ctx context.Context, log *slog.Log
 		}
 		existing, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
 		if err != nil {
-			log.Debug("node: read holder verifier", "folder", shareID, "err", err)
+			log.Warn("node: read holder verifier; restore may be denied", "folder", shareID, "err", err)
 			continue
 		}
 		if bytes.Equal(existing, vb) {
 			continue
 		}
 		if err := rt.cfg.SetHolderVerifier(ctx, cf.ID, vb); err != nil {
-			log.Debug("node: persist holder verifier", "folder", shareID, "err", err)
+			log.Warn("node: persist holder verifier; restore will be denied until it succeeds", "folder", shareID, "err", err)
 		}
 	}
 }
 
-// holderServeSet selects which held folders to serve a peer. A roster member is served the
+// holderStoresForPeer selects which held folders to serve a peer. A roster member is served the
 // folders shared on the session (its writes stay gated to writers). A non-member is a restore
 // client: it is served a folder read-only only if the verifier it advertised matches the one
 // this holder persisted from a writer — proof it knows the folder key, with no key on the holder.
-func (rt *syncRuntime) holderServeSet(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool, member bool) map[string]*holder.Store {
+func (rt *syncRuntime) holderStoresForPeer(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool, member bool) map[string]*holder.Store {
 	out := map[string]*holder.Store{}
 	peerID := sess.PeerNodeID()
 	for shareID, store := range rt.holders {
@@ -381,7 +383,7 @@ func (rt *syncRuntime) holderServeSet(ctx context.Context, log *slog.Logger, ses
 		}
 		stored, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
 		if err != nil {
-			log.Debug("node: restore verifier lookup", "folder", shareID, "err", err)
+			log.Warn("node: restore verifier lookup; denying restore client", "folder", shareID, "peer", peerID, "err", err)
 			continue
 		}
 		if len(stored) > 0 && subtle.ConstantTimeCompare(stored, pv) == 1 {
