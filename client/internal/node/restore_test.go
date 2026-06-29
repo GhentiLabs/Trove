@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"testing"
 
@@ -75,112 +76,107 @@ func sessionPair(t *testing.T, ctx context.Context, peerID, shareID string, adve
 	return r.s, ps
 }
 
-// restoreSessionPair is sessionPair with a non-member recovering peer.
-func restoreSessionPair(t *testing.T, ctx context.Context, shareID string, advertised []byte) (holderSess, peerSess *session.Session) {
-	t.Helper()
-	return sessionPair(t, ctx, restorePeerID, shareID, advertised)
-}
-
-// TestAuthorizeAcceptsNonMemberOnlyForHolder checks the restore relaxation: a holder accepts a
-// stranger's session but offers nothing; a non-holder still rejects the stranger.
-func TestAuthorizeAcceptsNonMemberOnlyForHolder(t *testing.T) {
+// TestAuthorizeAcceptsNonMemberWhenServing checks a node that serves any folder accepts a
+// stranger's session but grants nothing; a node that serves nothing rejects the stranger.
+func TestAuthorizeAcceptsNonMemberWhenServing(t *testing.T) {
 	ctx := t.Context()
 	members, _, _ := openMembers(t)
 	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 
-	holderSvc := &Service{opts: Options{NodeID: "holder-self"}, members: members, isHolder: true}
-	switch granted, ok, err := holderSvc.authorize(ctx, stranger); {
+	serving := &Service{opts: Options{NodeID: "serving-self"}, members: members, serves: true}
+	switch granted, ok, err := serving.authorize(ctx, stranger); {
 	case err != nil || !ok:
-		t.Fatalf("holder authorize(stranger) = ok=%v, err=%v; want true, nil", ok, err)
+		t.Fatalf("serving authorize(stranger) = ok=%v, err=%v; want true, nil", ok, err)
 	case len(granted) != 0:
-		t.Fatalf("holder offered %v to a stranger, want nothing", granted)
+		t.Fatalf("serving node offered %v to a stranger, want nothing", granted)
 	}
 
-	plainSvc := &Service{opts: Options{NodeID: "plain-self"}, members: members}
-	if _, ok, _ := plainSvc.authorize(ctx, stranger); ok {
-		t.Fatal("a non-holder authorized a stranger")
+	idle := &Service{opts: Options{NodeID: "idle-self"}, members: members}
+	if _, ok, _ := idle.authorize(ctx, stranger); ok {
+		t.Fatal("a node that serves nothing authorized a stranger")
 	}
 }
 
-// TestHolderStoresForPeerGatesRestore checks a non-member is served a held folder only when the
-// verifier it advertised matches the one the holder persisted, and a served session can fetch
-// a blob through the gate.
-func TestHolderStoresForPeerGatesRestore(t *testing.T) {
+// TestResponsiveOfferGatesByVerifier checks a recovery peer is offered a folder only when its
+// advertised verifier constant-time-matches this node's, for both a held folder (verifier from
+// the persisted token) and a member folder (verifier from the folder secret).
+func TestResponsiveOfferGatesByVerifier(t *testing.T) {
 	ctx := t.Context()
-	log := slog.New(slog.DiscardHandler)
-	const shareID = "g"
+	members, _, _ := openMembers(t)
 	key := testMasterKey(0x6e)
-	persisted := crypto.FolderVerifier(key, shareID)
 
+	cfg := openConfig(t, "self")
+	if err := cfg.AddFolder(ctx, config.Folder{ID: "held", ShareID: "held", Encrypted: true, Holder: true}); err != nil {
+		t.Fatalf("AddFolder held: %v", err)
+	}
+	if err := cfg.SetHolderVerifier(ctx, "held", crypto.FolderVerifier(key, "held")); err != nil {
+		t.Fatalf("SetHolderVerifier: %v", err)
+	}
+	if err := cfg.AddFolder(ctx, config.Folder{ID: "mem", Root: "/m", ShareID: "mem", Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder mem: %v", err)
+	}
+	if _, err := cfg.GenerateFolderKey(ctx, "mem"); err != nil {
+		t.Fatalf("GenerateFolderKey: %v", err)
+	}
+	memKey, _, _ := cfg.GetFolderKey(ctx, "mem")
+
+	rt := &syncRuntime{
+		self: "self", members: members, cfg: cfg, log: slog.New(slog.DiscardHandler),
+		byShare: map[string]config.Folder{
+			"held": {ID: "held", ShareID: "held", Encrypted: true, Holder: true},
+			"mem":  {ID: "mem", ShareID: "mem", Encrypted: true},
+		},
+	}
+
+	cases := []struct {
+		name      string
+		shareID   string
+		verifier  []byte
+		wantHeld  bool
+		wantShare bool
+	}{
+		{"held match", "held", crypto.FolderVerifier(key, "held"), true, true},
+		{"held wrong", "held", bytes.Repeat([]byte{0x01}, crypto.VerifierLen), false, false},
+		{"held absent", "held", nil, false, false},
+		{"held short", "held", []byte{0x01, 0x02}, false, false},
+		{"member match", "mem", crypto.FolderVerifier(memKey, "mem"), false, true},
+		{"member wrong", "mem", bytes.Repeat([]byte{0x02}, crypto.VerifierLen), false, false},
+		{"unknown folder", "nope", crypto.FolderVerifier(key, "nope"), false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := []session.Folder{{ShareID: tc.shareID, Encrypted: true, EncryptionVerifier: tc.verifier}}
+			out, err := rt.responsiveOffer(ctx, "peer", peer)
+			if err != nil {
+				t.Fatalf("responsiveOffer: %v", err)
+			}
+			if !tc.wantShare {
+				if len(out) != 0 {
+					t.Fatalf("offered %+v on a bad/absent verifier, want nothing", out)
+				}
+				return
+			}
+			if len(out) != 1 || out[0].ShareID != tc.shareID || out[0].Holder != tc.wantHeld {
+				t.Fatalf("offered = %+v, want %s (held=%v)", out, tc.shareID, tc.wantHeld)
+			}
+			if subtle.ConstantTimeCompare(out[0].EncryptionVerifier, tc.verifier) != 1 {
+				t.Fatalf("offered verifier does not match the peer's")
+			}
+		})
+	}
+}
+
+// TestHolderStoresForPeer checks the holder serves exactly the held folders shared on a session.
+func TestHolderStoresForPeer(t *testing.T) {
 	store, err := holder.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("holder.Open: %v", err)
 	}
-	blind := crypto.BlindID(key, []byte("blob"))
-	if err := store.Put(blind, []byte("ciphertext")); err != nil {
-		t.Fatalf("store.Put: %v", err)
+	rt := &syncRuntime{holders: map[string]*holder.Store{"a": store, "b": store}}
+	served := rt.holderStoresForPeer(map[string]bool{"a": true, "c": true})
+	if len(served) != 1 || served["a"] == nil {
+		t.Fatalf("served = %v, want only a", served)
 	}
-
-	members, _, _ := openMembers(t)
-	cfg := openConfig(t, "holder-self")
-	if err := cfg.AddFolder(ctx, config.Folder{ID: shareID, ShareID: shareID, Encrypted: true, Holder: true}); err != nil {
-		t.Fatalf("AddFolder: %v", err)
-	}
-	if err := cfg.SetHolderVerifier(ctx, shareID, persisted); err != nil {
-		t.Fatalf("SetHolderVerifier: %v", err)
-	}
-	rt := &syncRuntime{
-		self: "holder-self", members: members, cfg: cfg,
-		holders: map[string]*holder.Store{shareID: store},
-		byShare: map[string]config.Folder{shareID: {ID: shareID, ShareID: shareID, Encrypted: true, Holder: true}},
-	}
-
-	t.Run("correct verifier is served and fetchable", func(t *testing.T) {
-		hs, ps := restoreSessionPair(t, ctx, shareID, persisted)
-		served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{}, false)
-		if _, ok := served[shareID]; !ok || len(served) != 1 {
-			t.Fatalf("served = %v, want only %s", shareKeys(served), shareID)
-		}
-		go holder.NewServer(served, rt.holderPutAllowed, log).Serve(ctx, hs.Conn())
-		got, err := holder.GetBlobOverConn(ps.Conn(), shareID)(ctx, blind)
-		if err != nil {
-			t.Fatalf("GetBlobOverConn through gate: %v", err)
-		}
-		if !bytes.Equal(got, []byte("ciphertext")) {
-			t.Fatalf("fetched blob = %q, want %q", got, "ciphertext")
-		}
-	})
-
-	t.Run("wrong verifier is not served", func(t *testing.T) {
-		hs, _ := restoreSessionPair(t, ctx, shareID, bytes.Repeat([]byte{0x01}, crypto.VerifierLen))
-		if served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{}, false); len(served) != 0 {
-			t.Fatalf("wrong verifier served %v, want nothing", shareKeys(served))
-		}
-	})
-
-	t.Run("absent verifier is not served", func(t *testing.T) {
-		hs, _ := restoreSessionPair(t, ctx, shareID, nil)
-		if served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{}, false); len(served) != 0 {
-			t.Fatalf("absent verifier served %v, want nothing", shareKeys(served))
-		}
-	})
-
-	t.Run("wrong-length verifier is not served", func(t *testing.T) {
-		hs, _ := restoreSessionPair(t, ctx, shareID, []byte{0x01, 0x02, 0x03})
-		if served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{}, false); len(served) != 0 {
-			t.Fatalf("wrong-length verifier served %v, want nothing", shareKeys(served))
-		}
-	})
-
-	t.Run("member is served by shared, not the verifier", func(t *testing.T) {
-		hs, _ := restoreSessionPair(t, ctx, shareID, persisted)
-		if served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{shareID: true}, true); len(served) != 1 {
-			t.Fatalf("member with shared folder served %v, want [%s]", shareKeys(served), shareID)
-		}
-		if served := rt.holderStoresForPeer(ctx, log, hs, map[string]bool{}, true); len(served) != 0 {
-			t.Fatalf("member without shared folder served %v, want nothing", shareKeys(served))
-		}
-	})
 }
 
 // TestPersistHolderVerifiers checks a holder records a roster member's advertised verifier but
@@ -263,12 +259,4 @@ func TestPeerIsMember(t *testing.T) {
 			}
 		})
 	}
-}
-
-func shareKeys(m map[string]*holder.Store) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

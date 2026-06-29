@@ -64,9 +64,10 @@ type Service struct {
 
 	members *membership.Store
 	gossip  *gossiper
-	// isHolder is fixed at startup: true if this node stores any folder as an untrusted holder.
-	// It gates accepting non-member restore sessions in authorize.
-	isHolder bool
+	// serves is fixed at startup: true if this node stores any folder (as a member or a holder).
+	// It gates accepting a non-member's session in authorize, so a verifier-proven recovery peer
+	// can be served; the responsive offer is what actually shares a folder with it.
+	serves bool
 
 	gatherMu sync.Mutex
 
@@ -172,6 +173,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if syncRT != nil {
 		mgrOpts.OnSession = syncRT.onSession(s.log, s.gossip)
+		mgrOpts.ResponsiveOffer = syncRT.responsiveOffer
 	}
 	mgr, err := peermgr.New(mgrOpts)
 	if err != nil {
@@ -542,10 +544,10 @@ func (s *Service) authorize(ctx context.Context, nodeID string) ([]string, bool,
 		}
 	}
 	if len(granted) == 0 {
-		// A holder accepts a non-member (a recovering machine) but grants nothing, so it
-		// advertises no folder ids to a stranger; onSession serves a held folder only on
-		// verifier proof. A non-holder rejects.
-		return nil, s.isHolder, nil
+		// A non-member is accepted but granted nothing, so this node advertises no folder ids to
+		// a stranger; the responsive offer shares a folder only on a verifier match, and the
+		// member engine / holder blob path serves it read-only. A node that serves nothing rejects.
+		return nil, s.serves, nil
 	}
 	return granted, true, nil
 }

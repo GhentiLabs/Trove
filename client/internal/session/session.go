@@ -90,6 +90,11 @@ type Config struct {
 	Initiator bool
 	Local     Local
 	Authorize func(ctx context.Context, nodeID string) (granted []string, ok bool, err error)
+	// ResponsiveOffer, when set, supplies the folders to offer a peer that Authorize granted
+	// nothing — computed from the folders the peer advertised, so a verifier-proven recovery
+	// peer can be served without leaking this node's folder list to a stranger. It is consulted
+	// only on the responding side (the initiator offers from its own grant before reading peer).
+	ResponsiveOffer func(ctx context.Context, peerID string, peerOffered []Folder) ([]Folder, error)
 
 	KeepaliveInterval time.Duration
 	HandshakeTimeout  time.Duration
@@ -170,8 +175,17 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("%w: %s", ErrUnauthorized, peerID)
 	}
 
-	offered := offeredFolders(cfg.Local.Folders, granted)
-	peerCfg, err := exchangeConfig(cfg.Initiator, ctrl, offered)
+	offer := func(peer *wirepb.NetworkConfig) ([]Folder, error) {
+		// A member (non-empty grant), or the initiator (which offers before reading the peer),
+		// offers from its own grant. Only a responding node that granted nothing defers to the
+		// responsive offer, so it can serve a verifier-proven recovery peer without advertising
+		// its folder list to a stranger.
+		if len(granted) > 0 || cfg.ResponsiveOffer == nil || peer == nil {
+			return offeredFolders(cfg.Local.Folders, granted), nil
+		}
+		return cfg.ResponsiveOffer(ctx, peerID, peerOfferedFolders(peer))
+	}
+	offered, peerCfg, err := exchangeConfig(cfg.Initiator, ctrl, offer)
 	if err != nil {
 		_ = cfg.Conn.Close()
 		return nil, fmt.Errorf("session: config: %w", err)
@@ -243,12 +257,44 @@ func exchangeHello(cfg Config, ctrl netio.Stream) (*wirepb.Hello, error) {
 	)
 }
 
-func exchangeConfig(initiator bool, ctrl netio.Stream, offered []Folder) (*wirepb.NetworkConfig, error) {
-	mine := buildNetworkConfig(offered)
-	return exchange(initiator,
-		func() error { return wire.WriteMessage(ctrl, mine) },
-		func() (*wirepb.NetworkConfig, error) { return readNetworkConfig(ctrl) },
-	)
+// exchangeConfig swaps NetworkConfig. The initiator writes first, so its offer cannot depend on
+// the peer (offer is called with nil); the responder reads first, so its offer may be computed
+// from the peer's advertisement. Returns the folders this node offered and the peer's config.
+func exchangeConfig(initiator bool, ctrl netio.Stream, offer func(*wirepb.NetworkConfig) ([]Folder, error)) ([]Folder, *wirepb.NetworkConfig, error) {
+	if initiator {
+		offered, err := offer(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := wire.WriteMessage(ctrl, buildNetworkConfig(offered)); err != nil {
+			return nil, nil, err
+		}
+		peer, err := readNetworkConfig(ctrl)
+		return offered, peer, err
+	}
+	peer, err := readNetworkConfig(ctrl)
+	if err != nil {
+		return nil, nil, err
+	}
+	offered, err := offer(peer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := wire.WriteMessage(ctrl, buildNetworkConfig(offered)); err != nil {
+		return nil, nil, err
+	}
+	return offered, peer, nil
+}
+
+// peerOfferedFolders converts a peer's NetworkConfig into the folders it advertised.
+func peerOfferedFolders(peer *wirepb.NetworkConfig) []Folder {
+	out := make([]Folder, 0, len(peer.GetFolders()))
+	for _, f := range peer.GetFolders() {
+		if id := f.GetFolderId(); id != "" {
+			out = append(out, Folder{ShareID: id, Encrypted: f.GetEncrypted(), EncryptionVerifier: f.GetEncryptionVerifier(), Holder: f.GetHolder()})
+		}
+	}
+	return out
 }
 
 func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {

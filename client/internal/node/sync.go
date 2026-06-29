@@ -35,6 +35,7 @@ type syncRuntime struct {
 	self    string
 	members *membership.Store
 	cfg     *config.Store
+	log     *slog.Logger
 	folders []syncengine.FolderConfig
 	holders map[string]*holder.Store
 	byShare map[string]config.Folder
@@ -78,7 +79,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, byShare: map[string]config.Folder{}, holders: map[string]*holder.Store{}}
+	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, log: s.log, byShare: map[string]config.Folder{}, holders: map[string]*holder.Store{}}
 	ok := false
 	defer func() {
 		if !ok {
@@ -143,7 +144,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if len(rt.holders) > 0 && len(rt.folders) > 0 {
 		return nil, fmt.Errorf("node: a holder node cannot also sync folders; run a dedicated holder")
 	}
-	s.isHolder = len(rt.holders) > 0
+	s.serves = len(rt.holders) > 0 || len(rt.folders) > 0
 	ok = true
 	return rt, nil
 }
@@ -279,7 +280,7 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		}
 		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
 		// both, so the holder server and the sync engine never contend for the connection.
-		if served := rt.holderStoresForPeer(ctx, log, sess, shared, member); len(served) > 0 {
+		if served := rt.holderStoresForPeer(shared); len(served) > 0 {
 			// Unconditional: persistHolderVerifiers re-checks membership per folder, so it's safe
 			// for non-members and still records the verifier when peerIsMember errored above.
 			rt.persistHolderVerifiers(ctx, log, sess, served)
@@ -359,35 +360,63 @@ func (rt *syncRuntime) persistHolderVerifiers(ctx context.Context, log *slog.Log
 	}
 }
 
-// holderStoresForPeer selects which held folders to serve a peer. A roster member gets the
-// folders shared on the session; a non-member (restore client) gets a folder read-only only if
-// its advertised verifier matches the one persisted from a writer — proof it holds the key.
-func (rt *syncRuntime) holderStoresForPeer(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool, member bool) map[string]*holder.Store {
+// holderStoresForPeer returns the holder stores for the folders shared on a session. The
+// responsive offer already gated a non-member by verifier, so a shared held folder is authorized.
+func (rt *syncRuntime) holderStoresForPeer(shared map[string]bool) map[string]*holder.Store {
 	out := map[string]*holder.Store{}
-	peerID := sess.PeerNodeID()
 	for shareID, store := range rt.holders {
-		if member {
-			if shared[shareID] {
-				out[shareID] = store
-			}
-			continue
-		}
-		pv := sess.PeerEncryptionVerifier(shareID)
-		cf, ok := rt.byShare[shareID]
-		if len(pv) == 0 || !ok {
-			continue
-		}
-		stored, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
-		if err != nil {
-			log.Warn("node: restore verifier lookup; denying restore client", "folder", shareID, "peer", peerID, "err", err)
-			continue
-		}
-		if len(stored) > 0 && subtle.ConstantTimeCompare(stored, pv) == 1 {
-			log.Info("node: holder restore authorized", "folder", shareID, "peer", peerID)
+		if shared[shareID] {
 			out[shareID] = store
 		}
 	}
 	return out
+}
+
+// responsiveOffer supplies the folders to share with a peer this node granted nothing — a
+// recovery peer proving key knowledge. For each folder the peer advertised that this node serves
+// and whose advertised verifier constant-time-matches this node's, it offers the folder back with
+// this node's verifier and holder flag. It fails closed: a folder it cannot verify is omitted, so
+// a stranger that cannot prove the verifier is shared nothing and learns no folder ids.
+func (rt *syncRuntime) responsiveOffer(ctx context.Context, peerID string, peerOffered []session.Folder) ([]session.Folder, error) {
+	var out []session.Folder
+	for _, pf := range peerOffered {
+		if len(pf.EncryptionVerifier) == 0 {
+			continue
+		}
+		cf, ok := rt.byShare[pf.ShareID]
+		if !ok {
+			continue
+		}
+		mine, held := rt.folderVerifier(ctx, cf)
+		if len(mine) == 0 || subtle.ConstantTimeCompare(mine, pf.EncryptionVerifier) != 1 {
+			continue
+		}
+		if held {
+			rt.log.Info("node: holder restore authorized", "folder", pf.ShareID, "peer", peerID)
+		} else {
+			rt.log.Info("node: recovery access authorized", "folder", pf.ShareID, "peer", peerID)
+		}
+		out = append(out, session.Folder{ShareID: pf.ShareID, Encrypted: cf.Encrypted, EncryptionVerifier: mine, Holder: held})
+	}
+	return out, nil
+}
+
+// folderVerifier returns this node's recovery verifier for a folder and whether it is held. A
+// held folder's verifier is the one persisted from a writer (a holder has no key to derive it);
+// a member folder's derives from the folder secret. It is empty when neither is available.
+func (rt *syncRuntime) folderVerifier(ctx context.Context, cf config.Folder) (verifier []byte, held bool) {
+	if cf.Holder {
+		v, err := rt.cfg.GetHolderVerifier(ctx, cf.ID)
+		if err != nil {
+			return nil, true
+		}
+		return v, true
+	}
+	secret, err := rt.cfg.FolderSecret(ctx, cf.ID)
+	if err != nil {
+		return nil, false
+	}
+	return crypto.FolderVerifier(secret, cf.ShareID), false
 }
 
 // holderPutAllowed authorizes a peer to store blobs on this holder: only a roster writer.
