@@ -28,7 +28,7 @@ gate() {
 	return "${PIPESTATUS[0]}"
 }
 
-echo "running NAT matrix + offline gate + bidi gate + holder gate (in parallel)..."
+echo "running NAT matrix + offline/bidi/holder/recovery gates (in parallel)..."
 cell prc prc success &
 p1=$!
 cell prc sym fail &
@@ -43,6 +43,10 @@ gate bidi-gate &
 p6=$!
 gate holder-gate &
 p7=$!
+gate member-recovery-gate &
+p8=$!
+gate unencrypted-recovery-gate &
+p9=$!
 
 rc=0
 wait $p1 || rc=1
@@ -52,6 +56,8 @@ wait $p4 || rc=1
 wait $p5 || rc=1
 wait $p6 || rc=1
 wait $p7 || rc=1
+wait $p8 || rc=1
+wait $p9 || rc=1
 
 if [ $rc -eq 0 ]; then
 	echo "NAT matrix: ALL CELLS PASS"
