@@ -544,6 +544,9 @@ func (rt *syncRuntime) attachFolders(ctx context.Context, log *slog.Logger, peer
 		cf := rt.byShare[fc.FolderID]
 		if !cf.Encrypted {
 			fcs = append(fcs, fc)
+			if d := rt.recoverySecretForPeer(ctx, log, cf, peerID); d != nil {
+				deliveries = append(deliveries, d)
+			}
 			continue
 		}
 		key, gen, err := rt.cfg.GetFolderKey(ctx, cf.ID)
@@ -587,12 +590,38 @@ func (rt *syncRuntime) folderKeyForPeer(ctx context.Context, log *slog.Logger, c
 	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: key[:], KeyGeneration: uint64(gen)}
 }
 
+// recoverySecretForPeer returns a recovery-secret delivery (reusing the FolderKey message) for an
+// unencrypted folder when this node is a writer and the peer is a trusted member, so the member
+// can later prove a recovery verifier. A holder or non-member gets nil. The secret is not the
+// encryption key — an unencrypted folder has none — so the engine never needs it.
+func (rt *syncRuntime) recoverySecretForPeer(ctx context.Context, log *slog.Logger, cf config.Folder, peerID string) *wirepb.FolderKey {
+	switch mine, err := rt.isWriter(ctx, cf.ShareID, rt.self); {
+	case err != nil:
+		log.Warn("node: recovery secret delivery skipped", "folder", cf.ShareID, "err", err)
+		return nil
+	case !mine:
+		return nil
+	}
+	switch trusted, err := rt.peerTrusted(ctx, cf.ShareID, peerID); {
+	case err != nil:
+		log.Warn("node: recovery secret delivery skipped", "folder", cf.ShareID, "peer", peerID, "err", err)
+		return nil
+	case !trusted:
+		return nil
+	}
+	secret, err := rt.cfg.FolderSecret(ctx, cf.ID)
+	if err != nil {
+		return nil
+	}
+	return &wirepb.FolderKey{FolderId: cf.ShareID, Key: secret[:]}
+}
+
 // receiveFolderKey persists a key delivered by a roster writer for a folder this node
 // still lacks, then ends the session to reattach. A delivery from a non-writer or for an
 // unknown or already-keyed folder is ignored.
 func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, peerID string, fk *wirepb.FolderKey, peerVerifier []byte) error {
 	cf, ok := rt.byShare[fk.GetFolderId()]
-	if !ok || !cf.Encrypted || cf.Holder {
+	if !ok || cf.Holder {
 		return nil
 	}
 	switch okWriter, err := rt.isWriter(ctx, cf.ShareID, peerID); {
@@ -611,6 +640,18 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 	copy(key[:], fk.GetKey())
 	if len(peerVerifier) > 0 && !bytes.Equal(crypto.FolderVerifier(key, cf.ShareID), peerVerifier) {
 		log.Warn("node: rejecting folder key inconsistent with the sender's verifier", "folder", cf.ShareID, "peer", peerID)
+		return nil
+	}
+	if !cf.Encrypted {
+		// An unencrypted folder's "key" is the recovery secret, stored so this node can serve
+		// recovery. The engine never needs it, so there is nothing to reattach.
+		switch err := rt.cfg.DeliverRecoverySecret(ctx, cf.ID, key); {
+		case err == nil:
+			log.Info("node: recovery secret received", "folder", cf.ShareID, "peer", peerID)
+		case errors.Is(err, config.ErrSecretExists):
+		default:
+			log.Warn("node: store recovery secret", "folder", cf.ShareID, "peer", peerID, "err", err)
+		}
 		return nil
 	}
 	switch err := rt.cfg.DeliverFolderKey(ctx, cf.ID, key, int(fk.GetKeyGeneration())); {
