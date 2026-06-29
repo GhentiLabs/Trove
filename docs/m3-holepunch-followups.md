@@ -58,7 +58,7 @@ that is the correct final behavior, not a gap to close. The deferred items below
 
 ## Testing note
 
-These are validated by the on-demand Docker netns NAT matrix (`make nat-matrix`): the symmetric and
+These are validated by the on-demand Docker netns e2e matrix (`make e2e`): the symmetric and
 CGNAT cells must **fail gracefully** (surfaced, not hung, no relay) — and, because Trove never relays,
 that is their permanent expected outcome. Real-world success rates are only knowable from a live
 multi-network run (cf. libp2p's `punchr`).

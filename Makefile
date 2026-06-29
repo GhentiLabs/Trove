@@ -1,4 +1,4 @@
-.PHONY: build test race vet lint fmt run tidy deploy proto nat-matrix all
+.PHONY: build test race vet lint fmt run tidy deploy proto e2e all
 
 DISCOVERY_BIN := bin/discovery-server
 DISCOVERY_PKG := ./discovery/cmd/discovery-server
@@ -50,10 +50,10 @@ proto:
 deploy:
 	bash discovery/deploy/deploy.sh
 
-# nat-matrix runs the NAT hole-punch matrix: privileged containers with a Linux netns +
+# e2e runs the NAT hole-punch matrix: privileged containers with a Linux netns +
 # nftables topology emulate the NAT types, with the discovery server as coordinator, plus
-# a 3-peer offline-gate cell that runs the full one-way-sync acceptance shape. Cells run
-# in parallel. Runs on every PR via .github/workflows/nat-matrix.yml; also runnable
-# locally. Requires Docker.
-nat-matrix:
-	bash client/test/nat/matrix.sh
+# multi-peer acceptance gates (offline catch-up, bidirectional, holder, and
+# member/unencrypted recovery). Cells and gates run in parallel. Runs on every PR via
+# .github/workflows/e2e.yml; also runnable locally. Requires Docker.
+e2e:
+	bash client/test/e2e/matrix.sh
