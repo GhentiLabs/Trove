@@ -24,12 +24,17 @@ const (
 	MaxFolderIDLen = 512
 	// MaxHasBatch bounds the number of blinded ids in one has-batch or delete request.
 	MaxHasBatch = 4096
+)
 
-	opGet      byte = 0x01
-	opPut      byte = 0x02
-	opHasBatch byte = 0x04
-	opList     byte = 0x05
-	opDelete   byte = 0x06
+// opCode identifies a holder request operation, carried as the second framing byte.
+type opCode byte
+
+const (
+	opGet      opCode = 0x01
+	opPut      opCode = 0x02
+	opHasBatch opCode = 0x04
+	opList     opCode = 0x05
+	opDelete   opCode = 0x06
 )
 
 // BlobStatus is the result byte in a holder response.
@@ -52,7 +57,7 @@ var (
 	errBlobTooLarge    = errors.New("holder: blob exceeds maximum length")
 )
 
-func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindIDLen]byte, payload []byte) error {
+func writeRequest(w io.Writer, op opCode, folderID string, blinded [crypto.BlindIDLen]byte, payload []byte) error {
 	if len(folderID) > MaxFolderIDLen {
 		return errHolderIDTooLong
 	}
@@ -61,7 +66,7 @@ func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindID
 	}
 	buf := make([]byte, 0, 8+len(folderID)+crypto.BlindIDLen+4+len(payload))
 	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
-	buf = append(buf, HolderVersion, op)
+	buf = append(buf, HolderVersion, byte(op))
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
 	buf = append(buf, folderID...)
 	buf = append(buf, blinded[:]...)
@@ -77,7 +82,7 @@ func writeRequest(w io.Writer, op byte, folderID string, blinded [crypto.BlindID
 
 // readRequestHeader reads a request's op and folder id, leaving the op-specific body (a
 // blinded id, an id list, or a payload) for the handler to read once it has authorized.
-func readRequestHeader(r io.Reader) (op byte, folderID string, err error) {
+func readRequestHeader(r io.Reader) (op opCode, folderID string, err error) {
 	var head [8]byte
 	if _, err = io.ReadFull(r, head[:]); err != nil {
 		return 0, "", fmt.Errorf("holder: read request header: %w", err)
@@ -88,7 +93,7 @@ func readRequestHeader(r io.Reader) (op byte, folderID string, err error) {
 	if head[4] != HolderVersion {
 		return 0, "", errHolderVersion
 	}
-	op = head[5]
+	op = opCode(head[5])
 	if op != opGet && op != opPut && op != opHasBatch && op != opList && op != opDelete {
 		return 0, "", errBadOp
 	}
@@ -111,7 +116,7 @@ func readBlinded(r io.Reader) ([crypto.BlindIDLen]byte, error) {
 	return b, nil
 }
 
-func writeBlindedList(w io.Writer, op byte, folderID string, ids [][crypto.BlindIDLen]byte) error {
+func writeBlindedList(w io.Writer, op opCode, folderID string, ids [][crypto.BlindIDLen]byte) error {
 	if len(folderID) > MaxFolderIDLen {
 		return errHolderIDTooLong
 	}
@@ -120,7 +125,7 @@ func writeBlindedList(w io.Writer, op byte, folderID string, ids [][crypto.Blind
 	}
 	buf := make([]byte, 0, 8+len(folderID)+2+len(ids)*crypto.BlindIDLen)
 	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
-	buf = append(buf, HolderVersion, op)
+	buf = append(buf, HolderVersion, byte(op))
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
 	buf = append(buf, folderID...)
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(ids)))
@@ -160,7 +165,7 @@ func writeListRequest(w io.Writer, folderID string, after [crypto.BlindIDLen]byt
 	}
 	buf := make([]byte, 0, 8+len(folderID)+crypto.BlindIDLen+2)
 	buf = binary.BigEndian.AppendUint32(buf, HolderMagic)
-	buf = append(buf, HolderVersion, opList)
+	buf = append(buf, HolderVersion, byte(opList))
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(folderID)))
 	buf = append(buf, folderID...)
 	buf = append(buf, after[:]...)

@@ -66,12 +66,9 @@ var (
 // index length beyond it rather than allocating blindly.
 const maxStoredLen = chunker.MaxSize + 1024
 
-// SchemaVersion is the current chunkindex database layout. Open rejects a
-// database written by a newer binary and migrates older ones forward.
-//
-// v1: chunks carried an increment-only refcount.
-// v2: refcount dropped for last_seen_ms; reclamation is reachability mark-and-sweep guarded by a grace age.
-const SchemaVersion = 2
+// SchemaVersion is the chunkindex database layout version. Open rejects a
+// database written by a newer binary.
+const SchemaVersion = 1
 
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -186,41 +183,14 @@ func (s *Store) init(ctx context.Context) error {
 		if _, err := fmt.Sscanf(v, "%d", &stored); err != nil {
 			return fmt.Errorf("chunkstore: unreadable schema_version %q: %w", v, err)
 		}
-		switch {
-		case stored > SchemaVersion:
+		if stored > SchemaVersion {
 			return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, stored, SchemaVersion)
-		case stored < SchemaVersion:
-			return migrate(ctx, tx, stored)
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	return s.recoverBlob(ctx)
-}
-
-// migrate upgrades an older chunkindex to SchemaVersion in place.
-func migrate(ctx context.Context, tx *storage.Tx, from int) error {
-	if from == 1 {
-		// v1→v2: replace the increment-only refcount with last_seen_ms. Existing
-		// chunks are backfilled to now so the next sweep's grace age protects them.
-		stmts := []string{
-			`ALTER TABLE chunks ADD COLUMN last_seen_ms INTEGER NOT NULL DEFAULT 0`,
-			`ALTER TABLE chunks DROP COLUMN refcount`,
-		}
-		for _, q := range stmts {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return fmt.Errorf("chunkstore: migrate v2: %w", err)
-			}
-		}
-		if _, err := tx.Exec(ctx, `UPDATE chunks SET last_seen_ms = ?`, time.Now().UnixMilli()); err != nil {
-			return fmt.Errorf("chunkstore: migrate v2 backfill: %w", err)
-		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE meta SET value = ? WHERE key = 'schema_version'`, SchemaVersion); err != nil {
-		return fmt.Errorf("chunkstore: set version: %w", err)
-	}
-	return nil
 }
 
 // recoverBlob reopens the most recent blob and truncates any bytes written past
