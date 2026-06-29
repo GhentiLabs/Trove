@@ -58,7 +58,7 @@ func newFolder(t *testing.T, key [crypto.MasterKeyLen]byte) folder {
 
 func (f folder) scan(t *testing.T) {
 	t.Helper()
-	sc, err := scanner.New(scanner.Options{Root: f.root, FolderCtx: f.fc, Chunks: f.chunks, Model: f.model, Watcher: watcher.NewFake()})
+	sc, err := scanner.New(scanner.Options{Root: f.root, Chunks: f.chunks, Model: f.model, Watcher: watcher.NewFake()})
 	if err != nil {
 		t.Fatalf("scanner.New: %v", err)
 	}

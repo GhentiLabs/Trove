@@ -770,7 +770,7 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		sc, err := scanner.New(scanner.Options{
-			Root: fc.Root, FolderCtx: fctx, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
+			Root: fc.Root, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
 		})
 		if err != nil {
 			_ = w.Close()

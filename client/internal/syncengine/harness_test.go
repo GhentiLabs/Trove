@@ -64,7 +64,7 @@ func newPeer(t *testing.T, id string) peer {
 func (p peer) scan(t *testing.T) {
 	t.Helper()
 	sc, err := scanner.New(scanner.Options{
-		Root: p.root, FolderCtx: p.fc, Chunks: p.chunks, Model: p.model, Watcher: watcher.NewFake(),
+		Root: p.root, Chunks: p.chunks, Model: p.model, Watcher: watcher.NewFake(),
 	})
 	if err != nil {
 		t.Fatalf("scanner.New: %v", err)

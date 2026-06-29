@@ -32,7 +32,7 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	}
 	fc := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
 
-	s, err := New(Options{Root: root, FolderCtx: fc, Chunks: cs, Model: ms, Watcher: watcher.NewFake()})
+	s, err := New(Options{Root: root, Chunks: cs, Model: ms, Watcher: watcher.NewFake()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
