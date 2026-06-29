@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/discovery"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/netio"
@@ -550,11 +551,22 @@ func (s *Service) localConfig(ctx context.Context) (session.Local, error) {
 	}
 	var offered []session.Folder
 	for _, f := range folders {
-		if f.ShareID != "" {
-			offered = append(offered, session.Folder{ShareID: f.ShareID, Encrypted: f.Encrypted})
+		if f.ShareID == "" {
+			continue
 		}
+		sf := session.Folder{ShareID: f.ShareID, Encrypted: f.Encrypted}
+		if f.Encrypted {
+			switch key, _, err := s.opts.Config.GetFolderKey(ctx, f.ID); {
+			case err == nil:
+				sf.EncryptionVerifier = crypto.FolderVerifier(key, f.ShareID)
+			case errors.Is(err, config.ErrNoKey):
+			default:
+				return session.Local{}, err
+			}
+		}
+		offered = append(offered, sf)
 	}
-	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m4"}, nil
+	return session.Local{NodeID: s.opts.NodeID, Folders: offered, ClientName: "trove", ClientVersion: "m6"}, nil
 }
 
 // peerIDs is the set of nodes to proactively connect to: every co-member across all

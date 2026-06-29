@@ -7,8 +7,10 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base32"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
@@ -17,7 +19,7 @@ import (
 
 // SchemaVersion is the current config database layout. Open refuses a database
 // written by a newer binary and migrates older ones forward.
-const SchemaVersion = 2
+const SchemaVersion = 4
 
 // MasterKeyLen is the length of a folder master key.
 const MasterKeyLen = crypto.MasterKeyLen
@@ -46,16 +48,19 @@ CREATE TABLE IF NOT EXISTS meta (
 	value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS folders (
-	id          TEXT PRIMARY KEY,
-	root        TEXT    NOT NULL,
-	encrypted   INTEGER NOT NULL DEFAULT 0,
-	master_key  BLOB,
-	kdf_salt    BLOB,
-	kdf_time    INTEGER,
-	kdf_mem_kib INTEGER,
-	kdf_threads INTEGER,
-	created_ms  INTEGER NOT NULL,
-	share_id    TEXT    NOT NULL DEFAULT ''
+	id             TEXT PRIMARY KEY,
+	root           TEXT    NOT NULL,
+	encrypted      INTEGER NOT NULL DEFAULT 0,
+	master_key     BLOB,
+	key_generation INTEGER NOT NULL DEFAULT 0,
+	kdf_salt       BLOB,
+	kdf_time       INTEGER,
+	kdf_mem_kib    INTEGER,
+	kdf_threads    INTEGER,
+	created_ms     INTEGER NOT NULL,
+	share_id       TEXT    NOT NULL DEFAULT '',
+	holder         INTEGER NOT NULL DEFAULT 0,
+	CHECK (holder = 0 OR encrypted = 1)
 );`
 
 // Folder is a registered sync folder.
@@ -66,6 +71,9 @@ type Folder struct {
 	// ShareID is the cross-node match key agreed at pairing, distinct from ID and the
 	// encryption key. Empty until the folder is paired.
 	ShareID string
+	// Holder marks a folder this node stores only as untrusted ciphertext, never the
+	// key or plaintext.
+	Holder bool
 }
 
 // Store is the config database handle.
@@ -146,6 +154,19 @@ func migrate(ctx context.Context, tx *storage.Tx, from int) error {
 			return fmt.Errorf("config: migrate v2: %w", err)
 		}
 	}
+	if from < 3 {
+		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("config: migrate v3: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE folders SET key_generation = ? WHERE master_key IS NOT NULL`, FirstKeyGeneration); err != nil {
+			return fmt.Errorf("config: migrate v3 backfill: %w", err)
+		}
+	}
+	if from < 4 {
+		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN holder INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("config: migrate v4: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE meta SET value = ? WHERE key = 'schema_version'`, SchemaVersion); err != nil {
 		return fmt.Errorf("config: set version: %w", err)
 	}
@@ -167,8 +188,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 			return fmt.Errorf("config: check folder: %w", err)
 		}
 		_, err = tx.Exec(ctx,
-			`INSERT INTO folders (id, root, encrypted, created_ms, share_id) VALUES (?, ?, ?, ?, ?)`,
-			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID)
+			`INSERT INTO folders (id, root, encrypted, created_ms, share_id, holder) VALUES (?, ?, ?, ?, ?, ?)`,
+			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID, f.Holder)
 		if err != nil {
 			return fmt.Errorf("config: add folder: %w", err)
 		}
@@ -179,8 +200,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 // GetFolder returns the folder with the given id.
 func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 	var f Folder
-	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id FROM folders WHERE id = ?`, id).
-		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID)
+	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id, holder FROM folders WHERE id = ?`, id).
+		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Folder{}, ErrFolderNotFound
@@ -192,7 +213,7 @@ func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 
 // ListFolders returns all registered folders ordered by id.
 func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id FROM folders ORDER BY id`)
+	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id, holder FROM folders ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("config: list folders: %w", err)
 	}
@@ -201,7 +222,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
 	for rows.Next() {
 		var f Folder
-		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID); err != nil {
+		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder); err != nil {
 			return nil, fmt.Errorf("config: scan folder: %w", err)
 		}
 		out = append(out, f)
@@ -237,23 +258,26 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 	})
 }
 
-// SetFolderKey stores an explicit master key for a folder, clearing any recorded
-// passphrase-derivation parameters.
-func (s *Store) SetFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte) error {
-	return s.updateKey(ctx, id, key[:], nil, nil, nil, nil)
-}
+// FirstKeyGeneration is the epoch stamped when a folder key is first established.
+const FirstKeyGeneration = 1
 
 // GenerateFolderKey mints a random master key for a folder and stores it. It
-// refuses to overwrite an existing key (use SetFolderKey to replace one).
+// refuses to overwrite an existing key.
 func (s *Store) GenerateFolderKey(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
 	var key [MasterKeyLen]byte
 	if _, err := rand.Read(key[:]); err != nil {
 		return [MasterKeyLen]byte{}, fmt.Errorf("config: generate key: %w", err)
 	}
-	if err := s.setKeyIfAbsent(ctx, id, key[:], nil, nil, nil, nil); err != nil {
+	if err := s.setKeyIfAbsent(ctx, id, key[:], FirstKeyGeneration, nil, nil, nil, nil); err != nil {
 		return [MasterKeyLen]byte{}, err
 	}
 	return key, nil
+}
+
+// DeliverFolderKey stores a key received from a trusted member, only if the folder
+// has none yet. A replay or duplicate returns ErrKeyExists.
+func (s *Store) DeliverFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte, generation int) error {
+	return s.setKeyIfAbsent(ctx, id, key[:], generation, nil, nil, nil, nil)
 }
 
 // DeriveFolderKey derives a folder master key from a passphrase via Argon2id,
@@ -266,7 +290,7 @@ func (s *Store) DeriveFolderKey(ctx context.Context, id, passphrase string) ([Ma
 	}
 	key := crypto.DeriveMasterKey(passphrase, salt)
 	t, m, p := int64(crypto.ArgonTime), int64(crypto.ArgonMemoryKiB), int64(crypto.ArgonThreads)
-	if err := s.setKeyIfAbsent(ctx, id, key[:], salt, &t, &m, &p); err != nil {
+	if err := s.setKeyIfAbsent(ctx, id, key[:], FirstKeyGeneration, salt, &t, &m, &p); err != nil {
 		return [MasterKeyLen]byte{}, err
 	}
 	return key, nil
@@ -274,7 +298,7 @@ func (s *Store) DeriveFolderKey(ctx context.Context, id, passphrase string) ([Ma
 
 // setKeyIfAbsent writes a key only if the folder exists and has none, in one
 // transaction so concurrent callers cannot both succeed.
-func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte, t, m, p *int64) error {
+func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key []byte, generation int, salt []byte, t, m, p *int64) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
 		var existing []byte
 		err := tx.QueryRow(ctx, `SELECT master_key FROM folders WHERE id = ?`, id).Scan(&existing)
@@ -287,8 +311,8 @@ func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte,
 			return ErrKeyExists
 		}
 		_, err = tx.Exec(ctx,
-			`UPDATE folders SET master_key = ?, kdf_salt = ?, kdf_time = ?, kdf_mem_kib = ?, kdf_threads = ? WHERE id = ?`,
-			key, salt, t, m, p, id)
+			`UPDATE folders SET master_key = ?, key_generation = ?, kdf_salt = ?, kdf_time = ?, kdf_mem_kib = ?, kdf_threads = ? WHERE id = ?`,
+			key, generation, salt, t, m, p, id)
 		if err != nil {
 			return fmt.Errorf("config: set key: %w", err)
 		}
@@ -296,35 +320,44 @@ func (s *Store) setKeyIfAbsent(ctx context.Context, id string, key, salt []byte,
 	})
 }
 
-func (s *Store) updateKey(ctx context.Context, id string, key, salt []byte, t, m, p *int64) error {
-	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
-		res, err := tx.Exec(ctx,
-			`UPDATE folders SET master_key = ?, kdf_salt = ?, kdf_time = ?, kdf_mem_kib = ?, kdf_threads = ? WHERE id = ?`,
-			key, salt, t, m, p, id)
-		if err != nil {
-			return fmt.Errorf("config: set key: %w", err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return ErrFolderNotFound
-		}
-		return nil
-	})
-}
-
-// GetFolderKey returns a folder's master key. It returns ErrNoKey if the folder
-// exists but has no key.
-func (s *Store) GetFolderKey(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
-	var raw []byte
-	err := s.db.QueryRow(ctx, `SELECT master_key FROM folders WHERE id = ?`, id).Scan(&raw)
+// GetFolderKey returns a folder's master key and its generation. It returns
+// ErrNoKey if the folder exists but has no key.
+func (s *Store) GetFolderKey(ctx context.Context, id string) ([MasterKeyLen]byte, int, error) {
+	var (
+		raw []byte
+		gen int
+	)
+	err := s.db.QueryRow(ctx, `SELECT master_key, key_generation FROM folders WHERE id = ?`, id).Scan(&raw, &gen)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return [MasterKeyLen]byte{}, ErrFolderNotFound
+		return [MasterKeyLen]byte{}, 0, ErrFolderNotFound
 	case err != nil:
-		return [MasterKeyLen]byte{}, fmt.Errorf("config: get key: %w", err)
+		return [MasterKeyLen]byte{}, 0, fmt.Errorf("config: get key: %w", err)
 	case raw == nil:
-		return [MasterKeyLen]byte{}, ErrNoKey
+		return [MasterKeyLen]byte{}, 0, ErrNoKey
 	case len(raw) != MasterKeyLen:
-		return [MasterKeyLen]byte{}, fmt.Errorf("config: stored key length %d, want %d", len(raw), MasterKeyLen)
+		return [MasterKeyLen]byte{}, 0, fmt.Errorf("config: stored key length %d, want %d", len(raw), MasterKeyLen)
+	}
+	var key [MasterKeyLen]byte
+	copy(key[:], raw)
+	return key, gen, nil
+}
+
+var recoveryEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// EncodeRecoveryCode renders a folder master key as a base32 recovery code.
+func EncodeRecoveryCode(key [MasterKeyLen]byte) string {
+	return recoveryEncoding.EncodeToString(key[:])
+}
+
+// DecodeRecoveryCode parses a base32 recovery code back into a master key.
+func DecodeRecoveryCode(code string) ([MasterKeyLen]byte, error) {
+	raw, err := recoveryEncoding.DecodeString(strings.ToUpper(strings.TrimSpace(code)))
+	if err != nil {
+		return [MasterKeyLen]byte{}, fmt.Errorf("config: decode recovery code: %w", err)
+	}
+	if len(raw) != MasterKeyLen {
+		return [MasterKeyLen]byte{}, fmt.Errorf("config: recovery code decodes to %d bytes, want %d", len(raw), MasterKeyLen)
 	}
 	var key [MasterKeyLen]byte
 	copy(key[:], raw)

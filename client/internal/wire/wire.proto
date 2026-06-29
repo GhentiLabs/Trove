@@ -34,15 +34,16 @@ enum FolderType {
 
 // Folder is one folder a peer offers in its NetworkConfig. Folders match across
 // nodes solely by folder_id (the shared string agreed at pairing), independent of
-// the encryption key. Tag 6 is reserved for the M6 key-agreement token
-// (encryption_password_token).
+// the encryption key. encryption_verifier is a non-secret token derived from the
+// folder key (empty when the peer holds no key); two key-holders refuse to sync a
+// folder whose verifiers differ.
 message Folder {
   string folder_id = 1;
   FolderType folder_type = 2;
   bool encrypted = 3;
   uint64 index_epoch_id = 4;
   int64 high_water_sequence = 5;
-  reserved 6;
+  bytes encryption_verifier = 6;
 }
 
 // NetworkConfig is the first post-Hello message, sent exactly once each way. The
@@ -151,6 +152,14 @@ message SyncReceipt {
   bytes snapshot_root = 2;
   uint64 index_epoch_id = 3;
   int64 high_water_sequence = 4;
+}
+
+// FolderKey delivers an encrypted folder's master key to a trusted member over the
+// mutually-authenticated session; the key never touches the discovery server.
+message FolderKey {
+  string folder_id = 1;
+  bytes key = 2;
+  uint64 key_generation = 3;
 }
 
 // Ping is the idle-timer keepalive.

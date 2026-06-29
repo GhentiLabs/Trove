@@ -108,6 +108,44 @@ func TestHandshakeOffersOnlyGrantedFolders(t *testing.T) {
 	_ = bs.Conn().Close()
 }
 
+func TestHandshakeRefusesKeyMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	match := []byte("same-verifier")
+	cases := []struct {
+		name       string
+		aVer, bVer []byte
+		wantShared bool
+	}{
+		{"matching verifiers sync", match, match, true},
+		{"mismatched verifiers refused", []byte("verifier-a"), []byte("verifier-b"), false},
+		{"missing peer verifier tolerated", match, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ac, bc := connPair(t, idA, idB)
+			aCfg := Config{Conn: ac, Initiator: true, Authorize: grant("enc"),
+				Local: Local{NodeID: idA, Folders: []Folder{{ShareID: "enc", Encrypted: true, EncryptionVerifier: tc.aVer}}}}
+			bCfg := Config{Conn: bc, Initiator: false, Authorize: grant("enc"),
+				Local: Local{NodeID: idB, Folders: []Folder{{ShareID: "enc", Encrypted: true, EncryptionVerifier: tc.bVer}}}}
+
+			as, aErr, bs, bErr := handshakePair(t, ctx, aCfg, bCfg)
+			if aErr != nil || bErr != nil {
+				t.Fatalf("handshake: a=%v b=%v", aErr, bErr)
+			}
+			for _, s := range []*Session{as, bs} {
+				shared := len(s.SharedFolders()) == 1
+				if shared != tc.wantShared {
+					t.Fatalf("shared = %v, want %v (folders %v)", shared, tc.wantShared, s.SharedFolders())
+				}
+			}
+			_ = as.Conn().Close()
+			_ = bs.Conn().Close()
+		})
+	}
+}
+
 func TestHandshakeUnauthorizedNeverActive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

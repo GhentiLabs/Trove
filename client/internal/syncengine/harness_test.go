@@ -23,11 +23,12 @@ const folderID = "demo"
 func grant(context.Context, string) ([]string, bool, error) { return []string{folderID}, true, nil }
 
 type peer struct {
-	id     string
-	root   string
-	model  *model.Store
-	chunks *chunkstore.Store
-	fc     chunkstore.FolderContext
+	id           string
+	root         string
+	model        *model.Store
+	chunks       *chunkstore.Store
+	fc           chunkstore.FolderContext
+	authorWriter func(context.Context, string) (bool, error)
 }
 
 func newPeer(t *testing.T, id string) peer {
@@ -152,7 +153,7 @@ func wireEngines(t *testing.T, ctx context.Context, ownerSess, replicaSess *sess
 	}
 	coord := NewCoordinator(folderID, replica.fc, replica.chunks, 0, nil)
 	replicaEng, err = New(Options{Session: replicaSess, Folders: []FolderConfig{{
-		FolderID: folderID, Role: RoleReader, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks, Coord: coord,
+		FolderID: folderID, Role: RoleReader, Root: replica.root, FolderCtx: replica.fc, Model: replica.model, Chunks: replica.chunks, Coord: coord, AuthorWriter: replica.authorWriter,
 	}}})
 	if err != nil {
 		t.Fatalf("replica engine: %v", err)

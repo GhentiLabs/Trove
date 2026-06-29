@@ -30,6 +30,8 @@ const (
 	TypeMembershipGossip MessageType = 7
 	// TypeSyncReceipt acknowledges that a replica has converged a folder to an owner's root.
 	TypeSyncReceipt MessageType = 8
+	// TypeFolderKey delivers an encrypted folder's master key to a trusted member.
+	TypeFolderKey MessageType = 9
 )
 
 // WriteMessage frames m as uint16 header_len ‖ Header ‖ uint32 msg_len ‖ body.
@@ -147,6 +149,8 @@ func typeOf(m proto.Message) (MessageType, bool) {
 		return TypeMembershipGossip, true
 	case *wirepb.SyncReceipt:
 		return TypeSyncReceipt, true
+	case *wirepb.FolderKey:
+		return TypeFolderKey, true
 	default:
 		return 0, false
 	}
@@ -170,6 +174,8 @@ func newMessage(t MessageType) (proto.Message, bool) {
 		return &wirepb.MembershipGossip{}, true
 	case TypeSyncReceipt:
 		return &wirepb.SyncReceipt{}, true
+	case TypeFolderKey:
+		return &wirepb.FolderKey{}, true
 	default:
 		return nil, false
 	}
