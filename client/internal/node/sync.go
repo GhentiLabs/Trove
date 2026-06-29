@@ -223,9 +223,8 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 			}
 		}
 
-		// A non-member only reaches here to recover a folder from a holder (authorize accepts the
-		// session but offers nothing). Gossip and key delivery are member-only; a restore peer gets
-		// neither — just the verifier-gated, read-only holder reads set up below.
+		// Non-members reach onSession only to restore from a holder; gossip and key delivery are
+		// member-only, leaving them just the verifier-gated read-only holder reads set up below.
 		member, err := rt.peerIsMember(ctx, peerID)
 		if err != nil {
 			log.Warn("node: peer membership check", "peer", peerID, "err", err)
@@ -236,8 +235,8 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		sess.SetControlHandler(func(hctx context.Context, typ wire.MessageType, msg proto.Message) error {
 			switch typ {
 			case wire.TypeMembershipGossip:
-				// A non-member restore session must not drive roster gossip: dropping it
-				// before Merge denies a stranger the Ed25519-verification work it forces.
+				// Drop a non-member's gossip before Merge: deny a stranger the Ed25519
+				// verification work a maxed-out roster message would force.
 				if !member {
 					return nil
 				}
@@ -281,9 +280,8 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		// buildSyncRuntime guarantees a node is a dedicated holder or a sync member, never
 		// both, so the holder server and the sync engine never contend for the connection.
 		if served := rt.holderStoresForPeer(ctx, log, sess, shared, member); len(served) > 0 {
-			// Unconditional: persistHolderVerifiers re-checks roster membership per folder, so a
-			// non-member can't poison the token, and capturing here even when peerIsMember errored
-			// keeps a fresh holder able to learn the verifier its first writer advertises.
+			// Unconditional: persistHolderVerifiers re-checks membership per folder, so it's safe
+			// for non-members and still records the verifier when peerIsMember errored above.
 			rt.persistHolderVerifiers(ctx, log, sess, served)
 			srv := holder.NewServer(served, rt.holderPutAllowed, log)
 			wg.Add(1)
@@ -310,7 +308,6 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 }
 
 // peerIsMember reports whether nodeID is a member or founder of any group this node tracks.
-// A peer that belongs to none only reaches a session to recover a folder from a holder.
 func (rt *syncRuntime) peerIsMember(ctx context.Context, nodeID string) (bool, error) {
 	groups, err := rt.members.Groups(ctx)
 	if err != nil {
@@ -327,9 +324,9 @@ func (rt *syncRuntime) peerIsMember(ctx context.Context, nodeID string) (bool, e
 	return false, nil
 }
 
-// persistHolderVerifiers stores the verifier a trusted member advertised for each folder this
-// node holds, so a later non-member restore can be proven against it. Only a roster member's
-// advertisement is trusted; a non-member could otherwise poison the stored token.
+// persistHolderVerifiers records, per held folder, the verifier a roster member advertised, so a
+// later non-member restore can be proven against it. Only a member's advert is trusted — a
+// non-member could otherwise poison the token.
 func (rt *syncRuntime) persistHolderVerifiers(ctx context.Context, log *slog.Logger, sess *session.Session, served map[string]*holder.Store) {
 	peerID := sess.PeerNodeID()
 	for shareID := range served {
@@ -362,10 +359,9 @@ func (rt *syncRuntime) persistHolderVerifiers(ctx context.Context, log *slog.Log
 	}
 }
 
-// holderStoresForPeer selects which held folders to serve a peer. A roster member is served the
-// folders shared on the session (its writes stay gated to writers). A non-member is a restore
-// client: it is served a folder read-only only if the verifier it advertised matches the one
-// this holder persisted from a writer — proof it knows the folder key, with no key on the holder.
+// holderStoresForPeer selects which held folders to serve a peer. A roster member gets the
+// folders shared on the session; a non-member (restore client) gets a folder read-only only if
+// its advertised verifier matches the one persisted from a writer — proof it holds the key.
 func (rt *syncRuntime) holderStoresForPeer(ctx context.Context, log *slog.Logger, sess *session.Session, shared map[string]bool, member bool) map[string]*holder.Store {
 	out := map[string]*holder.Store{}
 	peerID := sess.PeerNodeID()

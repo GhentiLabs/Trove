@@ -64,8 +64,8 @@ type Service struct {
 
 	members *membership.Store
 	gossip  *gossiper
-	// isHolder is set once at startup from the folder registry: whether this node stores any
-	// folder as an untrusted holder. It gates accepting non-member restore sessions in authorize.
+	// isHolder is fixed at startup: true if this node stores any folder as an untrusted holder.
+	// It gates accepting non-member restore sessions in authorize.
 	isHolder bool
 
 	gatherMu sync.Mutex
@@ -542,10 +542,9 @@ func (s *Service) authorize(ctx context.Context, nodeID string) ([]string, bool,
 		}
 	}
 	if len(granted) == 0 {
-		// A non-member may still reach a holder to recover a folder: accept the session but
-		// offer nothing, so the holder advertises no folder ids to a stranger. onSession then
-		// serves a held folder read-only only if the peer proves key knowledge (its advertised
-		// verifier matches the one the holder persisted from a writer). A non-holder rejects.
+		// A holder accepts a non-member (a recovering machine) but grants nothing, so it
+		// advertises no folder ids to a stranger; onSession serves a held folder only on
+		// verifier proof. A non-holder rejects.
 		return nil, s.isHolder, nil
 	}
 	return granted, true, nil
