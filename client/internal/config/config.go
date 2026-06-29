@@ -17,9 +17,9 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
 
-// SchemaVersion is the current config database layout. Open refuses a database
-// written by a newer binary and migrates older ones forward.
-const SchemaVersion = 4
+// SchemaVersion is the config database layout version. Open refuses a database
+// written by a newer binary.
+const SchemaVersion = 1
 
 // MasterKeyLen is the length of a folder master key.
 const MasterKeyLen = crypto.MasterKeyLen
@@ -137,38 +137,8 @@ func checkVersion(ctx context.Context, tx *storage.Tx) error {
 	if _, err := fmt.Sscanf(v, "%d", &stored); err != nil {
 		return fmt.Errorf("config: unreadable schema_version %q: %w", v, err)
 	}
-	switch {
-	case stored > SchemaVersion:
+	if stored > SchemaVersion {
 		return fmt.Errorf("%w: found %d, support %d", ErrSchemaTooNew, stored, SchemaVersion)
-	case stored < SchemaVersion:
-		return migrate(ctx, tx, stored)
-	}
-	return nil
-}
-
-// migrate upgrades an older config database to SchemaVersion in place. The schema
-// statement already creates wholly new tables; migrate only alters existing ones.
-func migrate(ctx context.Context, tx *storage.Tx, from int) error {
-	if from < 2 {
-		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN share_id TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("config: migrate v2: %w", err)
-		}
-	}
-	if from < 3 {
-		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN key_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return fmt.Errorf("config: migrate v3: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE folders SET key_generation = ? WHERE master_key IS NOT NULL`, FirstKeyGeneration); err != nil {
-			return fmt.Errorf("config: migrate v3 backfill: %w", err)
-		}
-	}
-	if from < 4 {
-		if _, err := tx.Exec(ctx, `ALTER TABLE folders ADD COLUMN holder INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return fmt.Errorf("config: migrate v4: %w", err)
-		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE meta SET value = ? WHERE key = 'schema_version'`, SchemaVersion); err != nil {
-		return fmt.Errorf("config: set version: %w", err)
 	}
 	return nil
 }

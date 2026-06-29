@@ -661,60 +661,6 @@ func TestReclaimBlobs(t *testing.T) {
 	}
 }
 
-func TestMigrateV1ToV2(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "idx.db")
-
-	db, err := storage.Open(storage.Options{Path: path, MaxOpenConns: 1})
-	if err != nil {
-		t.Fatalf("storage.Open: %v", err)
-	}
-	const v1 = `
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE chunks (chunk_id BLOB PRIMARY KEY, backing INTEGER NOT NULL, blob_id INTEGER, blob_offset INTEGER, length INTEGER NOT NULL, codec INTEGER NOT NULL DEFAULT 0, encrypted INTEGER NOT NULL DEFAULT 0, plaintext_length INTEGER NOT NULL, refcount INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
-CREATE TABLE blobs (blob_id INTEGER PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL);
-CREATE TABLE chunk_locations (chunk_id BLOB NOT NULL, file_path TEXT NOT NULL, file_offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (chunk_id, file_path, file_offset)) WITHOUT ROWID;`
-	if _, err := db.Exec(ctx, v1); err != nil {
-		t.Fatalf("create v1: %v", err)
-	}
-	id := hasher.Sum([]byte("legacy chunk"))
-	if _, err := db.Exec(ctx,
-		`INSERT INTO chunks (chunk_id, backing, length, plaintext_length, refcount) VALUES (?, 1, 12, 12, 3)`, id.Bytes()); err != nil {
-		t.Fatalf("insert v1 chunk: %v", err)
-	}
-	if _, err := db.Exec(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', '1')`); err != nil {
-		t.Fatalf("set v1 version: %v", err)
-	}
-	_ = db.Close()
-
-	db2, err := storage.Open(storage.Options{Path: path, MaxOpenConns: 4})
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	t.Cleanup(func() { _ = db2.Close() })
-	s, err := Open(Options{DB: db2, BlobDir: filepath.Join(dir, "blobs")})
-	if err != nil {
-		t.Fatalf("Open(migrate): %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-
-	var v string
-	if err := db2.QueryRow(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&v); err != nil {
-		t.Fatalf("read version: %v", err)
-	}
-	if v != "2" {
-		t.Fatalf("schema_version = %s, want 2", v)
-	}
-	if ls := lastSeen(t, s, id); ls <= 0 {
-		t.Fatalf("last_seen not backfilled: %d", ls)
-	}
-	var dummy int
-	if err := db2.QueryRow(ctx, `SELECT refcount FROM chunks LIMIT 1`).Scan(&dummy); err == nil {
-		t.Fatal("refcount column still present after migration")
-	}
-}
-
 func TestOpenRejectsFutureSchema(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, 0)
