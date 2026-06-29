@@ -487,6 +487,113 @@ run_bidi_gate() {
 	return 1
 }
 
+# run_holder_gate is the M6 acceptance shape over real holepunch: a writer (A) pushes an
+# encrypted folder to an untrusted holder (B) that never receives the key; the writer then goes
+# offline and a fresh, non-member machine (C) restores the folder bit-exact from the holder
+# alone, using only the recovery code and proving key knowledge via the folder verifier. The
+# holder stores only sealed ciphertext under blinded ids — no plaintext name or content leaks.
+run_holder_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	setup_side C 192.168.30 100.64.0.30
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+	apply_nat C 192.168.30 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTC="$STATE/C/restored" group code
+	mkdir -p "$SRC/sub" "$DSTC"
+	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	printf 'TOP-SECRET-PLAINTEXT-MARKER\n' >"$SRC/secret.txt"
+	printf 'hello holder\n' >"$SRC/sub/note.txt"
+
+	ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" -encrypted >"$LOG/found" 2>&1
+	group=$(awk '/group id:/{print $3}' "$LOG/found")
+	code=$(awk '/recovery code:/{print $3}' "$LOG/found")
+	if [ -z "$group" ] || [ -z "$code" ]; then
+		log "holder-gate: found -encrypted failed"; cat "$LOG/found"
+		kill $COORD_PID 2>/dev/null; return 2
+	fi
+
+	# B is admitted as an untrusted holder (ciphertext only, no key); C is never invited.
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" -holder >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -holder -encrypted >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+
+	# The writer pushes the sealed folder to the holder: chunks first, then the catalog, then
+	# the pointer last. Wait until a large blob (big.bin's chunk) has landed AND the blob count
+	# has stopped growing, so the whole set — including the pointer the restore reads first — is
+	# present before the writer goes offline.
+	local pushed="fail" count prev=-1 stable=0 big
+	for j in $(seq 1 120); do
+		count=$(find "$STATE/B/folders" -path '*/holder/*' -type f 2>/dev/null | wc -l)
+		big=$(find "$STATE/B/folders" -path '*/holder/*' -type f -size +4k 2>/dev/null | wc -l)
+		if [ "$big" -ge 1 ] && [ "$count" = "$prev" ]; then
+			stable=$((stable + 1))
+			if [ "$stable" -ge 5 ]; then pushed="ok"; break; fi
+		else
+			stable=0
+		fi
+		prev=$count
+		sleep 1
+	done
+	if [ "$pushed" != ok ]; then
+		log "holder-gate: writer never pushed blobs to the holder"; report_gate_logs
+		kill $pa $pb $COORD_PID 2>/dev/null; return 1
+	fi
+
+	# The writer goes offline: the holder must serve recovery with no member online.
+	kill $pa 2>/dev/null; wait $pa 2>/dev/null
+
+	# A fresh, non-member machine restores from the holder using only the recovery code.
+	ip netns exec clC trove-peer restore -dir "$STATE/C" -trove "$trove" -group "$group" -code "$code" -holder "$idB" -root "$DSTC" -debug >"$LOG/C" 2>&1 &
+	local prc=$!
+	local restored="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/big.bin" "$DSTC/big.bin" 2>/dev/null && cmp -s "$SRC/secret.txt" "$DSTC/secret.txt" 2>/dev/null \
+		   && cmp -s "$SRC/sub/note.txt" "$DSTC/sub/note.txt" 2>/dev/null; then
+			restored="ok"; break
+		fi
+		kill -0 $prc 2>/dev/null || break
+		sleep 1
+	done
+
+	# The holder authorized the restore through the verifier gate.
+	local gated="fail"
+	grep -q "holder restore authorized" "$LOG/B" && gated="ok"
+
+	# The holder stored only ciphertext + blinded ids: no plaintext name or content is observable.
+	local leak="none"
+	grep -rqsF 'TOP-SECRET-PLAINTEXT-MARKER' "$STATE/B/folders" 2>/dev/null && leak="content"
+	find "$STATE/B/folders" -name 'secret.txt' 2>/dev/null | grep -q . && leak="name"
+
+	kill $pb $prc $COORD_PID 2>/dev/null
+	wait $pb 2>/dev/null
+
+	if [ "$restored" = ok ] && [ "$gated" = ok ] && [ "$leak" = none ]; then
+		log "holder-gate: PASS (writer→holder ciphertext push; non-member restores bit-exact from the holder alone via verifier proof; holder never keyed, no plaintext observable)"
+		return 0
+	fi
+	log "holder-gate: FAIL (restored=$restored gated=$gated leak=$leak)"
+	report_gate_logs
+	return 1
+}
+
 main() {
 	if ! ip netns add _probe 2>/dev/null; then
 		log "this harness needs --privileged (CAP_NET_ADMIN + netns)"; exit 2
@@ -505,6 +612,8 @@ main() {
 		run_offline_gate ;;
 	bidi-gate)
 		run_bidi_gate ;;
+	holder-gate)
+		run_holder_gate ;;
 	*)
 		log "unknown SCENARIO ${SCENARIO}"; exit 2 ;;
 	esac

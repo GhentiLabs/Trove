@@ -58,6 +58,7 @@ func RestoreFromHolder(ctx context.Context, opts RestoreOptions) error {
 	ladder := peermgr.NewLadder(peermgr.LadderConfig{
 		Self: opts.NodeID, Cache: svc.cache, Dial: svc.tr.Dial, Probe: svc.tr.Probe,
 		Lookup: svc.lookup, Signal: svc.signal, Candidates: svc.candidates, Logger: log,
+		ForceDial: true,
 	})
 	conn, err := ladder.Connect(ctx, opts.HolderID)
 	if err != nil {

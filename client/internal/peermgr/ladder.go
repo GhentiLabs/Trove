@@ -49,6 +49,10 @@ type LadderConfig struct {
 	Signal     func(ctx context.Context, nodeID string, cands []disco.Address) (disco.PeerCandidates, error)
 	Candidates func() []disco.Address
 	Logger     *slog.Logger
+	// ForceDial makes holepunch always take the dialer role rather than splitting by node id.
+	// A restore client uses this: the holder it punches to never dials a non-member back, so
+	// the client must be the QUIC initiator regardless of id ordering.
+	ForceDial bool
 }
 
 // Ladder resolves a node id to a live connection, cheapest path first.
@@ -110,7 +114,7 @@ func (l *Ladder) holepunch(ctx context.Context, nodeID string) (netio.Conn, erro
 	if l.cfg.Signal == nil {
 		return nil, ErrUnreachable
 	}
-	if l.cfg.Self >= nodeID {
+	if !l.cfg.ForceDial && l.cfg.Self >= nodeID {
 		l.log.Info("peermgr: holepunch", "peer", nodeID, "role", "accept")
 		_, _ = l.punchRound(ctx, nodeID, false)
 		return nil, errAwaitInbound
