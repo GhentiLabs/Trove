@@ -64,7 +64,6 @@ func RestoreFromHolder(ctx context.Context, opts RestoreOptions) error {
 	if err != nil {
 		return fmt.Errorf("node: connect holder %s: %w", opts.HolderID, err)
 	}
-	defer func() { _ = conn.Close() }()
 
 	verifier := crypto.FolderVerifier(opts.MasterKey, opts.FolderID)
 	sess, err := session.Handshake(ctx, session.Config{
@@ -83,6 +82,7 @@ func RestoreFromHolder(ctx context.Context, opts RestoreOptions) error {
 		return fmt.Errorf("node: holder handshake: %w", err)
 	}
 	defer func() { _ = sess.Close() }()
+	go func() { _ = sess.Run(ctx) }()
 
 	stage, err := os.MkdirTemp("", "trove-restore-*")
 	if err != nil {

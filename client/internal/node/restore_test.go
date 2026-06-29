@@ -163,6 +163,13 @@ func TestHolderServeSetGatesRestore(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong-length verifier is not served", func(t *testing.T) {
+		hs, _ := restoreSessionPair(t, ctx, shareID, []byte{0x01, 0x02, 0x03})
+		if served := rt.holderServeSet(ctx, log, hs, map[string]bool{}, false); len(served) != 0 {
+			t.Fatalf("wrong-length verifier served %v, want nothing", keys(served))
+		}
+	})
+
 	t.Run("member is served by shared, not the verifier", func(t *testing.T) {
 		hs, _ := restoreSessionPair(t, ctx, shareID, persisted)
 		if served := rt.holderServeSet(ctx, log, hs, map[string]bool{shareID: true}, true); len(served) != 1 {

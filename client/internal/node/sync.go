@@ -235,6 +235,11 @@ func (rt *syncRuntime) onSession(log *slog.Logger, gossip *gossiper) func(contex
 		sess.SetControlHandler(func(hctx context.Context, typ wire.MessageType, msg proto.Message) error {
 			switch typ {
 			case wire.TypeMembershipGossip:
+				// A non-member restore session must not drive roster gossip: dropping it
+				// before Merge denies a stranger the Ed25519-verification work it forces.
+				if !member {
+					return nil
+				}
 				gm, ok := msg.(*wirepb.MembershipGossip)
 				if !ok {
 					log.Warn("node: membership gossip with unexpected payload", "peer", peerID)
