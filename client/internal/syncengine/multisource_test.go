@@ -2,9 +2,9 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/netio"
 	"github.com/GhentiLabs/Trove/client/internal/session"
@@ -30,31 +30,23 @@ func engineOn(t *testing.T, ctx context.Context, sess *session.Session, p peer, 
 
 func waitSources(t *testing.T, c *Coordinator, n int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.sourceCount() >= n {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("coordinator has %d sources, want %d", c.sourceCount(), n)
+	waitFor(t, convergeTimeout, fmt.Sprintf("coordinator to register %d sources", n), func() bool {
+		return c.sourceCount() >= n
+	})
 }
 
 func waitServed(t *testing.T, e *Engine) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for e.ServedChunks() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("engine served no chunks within the deadline")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, convergeTimeout, "engine to serve a chunk", func() bool {
+		return e.ServedChunks() > 0
+	})
 }
 
 // TestMultiSourcePullsFromOwnerAndReplica proves a replica fetches distinct chunks from
 // two peers at once: chunks a peer-replica already holds come from that peer, chunks
 // only the owner has come from the owner.
 func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	a := newPeer(t, strings.Repeat("a", 52))
 	b := newPeer(t, replicaID)
@@ -111,6 +103,7 @@ func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
 // TestMultiSourceCorruptSourceRefetched proves a corrupt chunk from one source is
 // rejected and transparently refetched from another, with no operator intervention.
 func TestMultiSourceCorruptSourceRefetched(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	a := newPeer(t, strings.Repeat("a", 52))
 	b := newPeer(t, replicaID)

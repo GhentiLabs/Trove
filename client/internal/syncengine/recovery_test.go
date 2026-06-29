@@ -14,12 +14,14 @@ import (
 // bit-exact from a source and signals completion through OnConverged — for an encrypted source
 // folder (served plaintext over the tunnel) and an unencrypted one alike.
 func TestRecoveryReaderConvergesViaEngine(t *testing.T) {
+	t.Parallel()
 	for _, enc := range []bool{false, true} {
 		name := "plaintext"
 		if enc {
 			name = "encrypted"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -68,7 +70,7 @@ func TestRecoveryReaderConvergesViaEngine(t *testing.T) {
 
 			select {
 			case <-converged:
-			case <-time.After(10 * time.Second):
+			case <-time.After(convergeTimeout):
 				t.Fatal("recovery did not converge via OnConverged")
 			}
 			assertTreesEqual(t, owner.root, rec.root)

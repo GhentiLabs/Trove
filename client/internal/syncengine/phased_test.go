@@ -2,36 +2,37 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
 )
 
-// waitReceipt polls until p holds a receipt of kind for peerID whose root matches wantRoot.
+// waitReceipt blocks until p holds a receipt of kind for peerID whose root matches wantRoot.
 func waitReceipt(t *testing.T, p peer, kind model.ReceiptKind, peerID, wantRoot string) model.Receipt {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	var got model.Receipt
+	waitFor(t, convergeTimeout, fmt.Sprintf("receipt for %s at root %s", peerID, wantRoot), func() bool {
 		r, ok, err := p.model.Receipt(context.Background(), kind, peerID)
 		if err != nil {
 			t.Fatalf("Receipt(%s): %v", peerID, err)
 		}
 		if ok && r.Root.String() == wantRoot {
-			return r
+			got = r
+			return true
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("no receipt for %s at root %s within deadline", peerID, wantRoot)
-	return model.Receipt{}
+		return false
+	})
+	return got
 }
 
 // TestConvergenceReceiptExchanged proves both ends record a receipt once a folder
 // converges: the replica acknowledges the owner's root, and the owner learns it.
 func TestConvergenceReceiptExchanged(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "a.txt", []byte("hello"))
@@ -62,6 +63,7 @@ func TestConvergenceReceiptExchanged(t *testing.T) {
 // inflated high-water is capped to what the owner has produced, so a hostile replica
 // cannot move the tombstone-reaping gate past a sequence it never reached.
 func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "a.txt", []byte("hello"))
@@ -118,6 +120,7 @@ func TestReceiptValidationRejectsBadEpochAndCapsHighWater(t *testing.T) {
 // TestStartupRepairRestoresDirAndSymlink covers the directory and symlink repair
 // branches: both are recreated when removed out-of-band under the replica.
 func TestStartupRepairRestoresDirAndSymlink(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	if err := os.MkdirAll(filepath.Join(owner.root, "d/sub"), 0o755); err != nil {
@@ -154,6 +157,7 @@ func TestStartupRepairRestoresDirAndSymlink(t *testing.T) {
 // TestStartupRepairRematerializesDeletedFile proves a replica restores a file deleted
 // out-of-band under it, sourcing bytes from its local chunk store with no owner.
 func TestStartupRepairRematerializesDeletedFile(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "keep.txt", []byte("keep me"))
@@ -187,6 +191,7 @@ func TestStartupRepairRematerializesDeletedFile(t *testing.T) {
 // in-process: a replica goes offline, the owner edits, deletes, and renames files, and
 // the replica converges bit-exact on reconnect without resurrecting the deletion.
 func TestOfflineCatchUpThroughEditDeleteRename(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "edit.txt", []byte("v1"))

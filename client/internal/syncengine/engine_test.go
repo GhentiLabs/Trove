@@ -25,6 +25,7 @@ func pseudoRandom(n int, seed uint64) []byte {
 }
 
 func TestConvergeBasicTree(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 
@@ -49,6 +50,7 @@ func TestConvergeBasicTree(t *testing.T) {
 }
 
 func TestConvergeMultiChunkFile(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 
@@ -65,6 +67,7 @@ func TestConvergeMultiChunkFile(t *testing.T) {
 }
 
 func TestConvergeEmptyFolder(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	owner.scan(t)
@@ -78,6 +81,7 @@ func TestConvergeEmptyFolder(t *testing.T) {
 }
 
 func TestConvergeDeletePropagates(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "keep.txt", []byte("stays"))
@@ -107,6 +111,7 @@ func TestConvergeDeletePropagates(t *testing.T) {
 // sync moves only the new chunk (the since-cursor delta), and that the replica, being
 // receive-only, never serves a chunk.
 func TestAntiEntropyTransfersOnlyDelta(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "a.txt", []byte("first"))

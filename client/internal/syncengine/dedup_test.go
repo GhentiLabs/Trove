@@ -11,6 +11,7 @@ import (
 // file converges, renaming it on the owner moves no chunk data — the replica already
 // holds every chunk, so the owner serves none during the rename's convergence.
 func TestRenameTransfersNoChunkData(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "big.bin", pseudoRandom(3<<20, 2))

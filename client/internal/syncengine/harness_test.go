@@ -167,17 +167,32 @@ func wireEngines(t *testing.T, ctx context.Context, ownerSess, replicaSess *sess
 	return ownerEng, replicaEng
 }
 
+// convergeTimeout bounds the async waits below. Tests exit the instant their condition
+// holds, so it is only reached on a genuine hang; it is kept well above worst-case
+// scheduling latency under -race with t.Parallel() so contention never fails a test.
+const convergeTimeout = 30 * time.Second
+
+// waitFor polls until cond holds rather than sleeping a fixed amount, failing with desc on
+// timeout. These tests poll instead of using testing/synctest (the blueprint default for
+// timing) because each peer drives SQLite via database/sql, whose pool goroutines live
+// outside the bubble and deadlock it.
+func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", timeout, desc)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func waitConverged(t *testing.T, owner, replica peer) {
 	t.Helper()
 	want := owner.currentRoot(t)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if replica.currentRoot(t) == want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("did not converge: replica root %s, want %s", replica.currentRoot(t), want)
+	waitFor(t, convergeTimeout, "replica to converge on owner root", func() bool {
+		return replica.currentRoot(t) == want
+	})
 }
 
 // assertTreesEqual checks that the replica tree is bit-exact to the owner tree:

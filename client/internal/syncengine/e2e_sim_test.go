@@ -87,6 +87,7 @@ func assertAllEqual(t *testing.T, peers []simPeer) {
 // TestSimManyWritersConverge has three writers each originate a burst of random edits and
 // deletes offline, then connect as a full mesh and converge to one byte-identical tree.
 func TestSimManyWritersConverge(t *testing.T) {
+	t.Parallel()
 	peers := simPeers(t, 3)
 	paths := []string{"a.txt", "b.txt", "c.txt", "dir/d.txt", "dir/e.txt"}
 	rng := rand.New(rand.NewPCG(0x5eed, 0xface))
@@ -117,6 +118,7 @@ func TestSimManyWritersConverge(t *testing.T) {
 // TestSimPartitionHealConverges runs rounds where the mesh is torn down, each writer edits
 // offline, then the mesh heals; after the final heal all writers converge identically.
 func TestSimPartitionHealConverges(t *testing.T) {
+	t.Parallel()
 	peers := simPeers(t, 3)
 	paths := []string{"shared.txt", "notes.txt", "data/x.bin"}
 	rng := rand.New(rand.NewPCG(7, 11))
@@ -144,6 +146,7 @@ func TestSimPartitionHealConverges(t *testing.T) {
 // while the link between them corrupts every chunk in flight: verify-by-hash rejects the
 // bad bytes and the data is refetched, so keep-both still converges bit-exact.
 func TestSimConcurrentEditsOverCorruptLink(t *testing.T) {
+	t.Parallel()
 	a := newSimPeer(t, 'a')
 	b := newSimPeer(t, 'b')
 	writeFile(t, a.root, "doc.txt", []byte(strings.Repeat("A", 4096)))
@@ -173,6 +176,7 @@ func TestSimConcurrentEditsOverCorruptLink(t *testing.T) {
 // TestSimConflictStormPreservesEveryEdit hammers a single path from three writers offline,
 // then converges; every distinct edit must survive somewhere (winner or conflict copy).
 func TestSimConflictStormPreservesEveryEdit(t *testing.T) {
+	t.Parallel()
 	peers := simPeers(t, 3)
 	contents := []string{"alpha version", "bravo version", "charlie version"}
 	for i := range peers {

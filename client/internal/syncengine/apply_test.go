@@ -11,6 +11,7 @@ import (
 )
 
 func TestDestPathRejectsEscape(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	fs := &folderState{cfg: FolderConfig{Root: root}}
 
@@ -32,6 +33,7 @@ func TestDestPathRejectsEscape(t *testing.T) {
 
 // A hostile owner that tombstones "." must not delete the folder root.
 func TestApplyRejectsRootDeletion(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	keep := filepath.Join(root, "keep.txt")
 	if err := os.WriteFile(keep, []byte("data"), 0o600); err != nil {
@@ -51,6 +53,7 @@ func TestApplyRejectsRootDeletion(t *testing.T) {
 // A hostile owner must not plant a symlink whose target escapes the folder root; the
 // rejection has to happen before the symlink is written to disk.
 func TestApplyRejectsEscapingSymlink(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	fs := &folderState{cfg: FolderConfig{Root: root}}
 

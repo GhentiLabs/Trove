@@ -12,6 +12,7 @@ import (
 // A manifest whose chunk list overflows one page is split across pages instead of
 // emitted as an undeliverable frame: the first page carries a prefix with more_chunks set.
 func TestBuildDeltaPagesLargeManifest(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	buf := make([]byte, 6<<20)
 	rand.New(rand.NewSource(1)).Read(buf)
@@ -37,6 +38,7 @@ func TestBuildDeltaPagesLargeManifest(t *testing.T) {
 // End-to-end: a multi-chunk file converges bit-exact when a tiny delta budget forces its
 // chunk list across many continuation pages — the real large-file path.
 func TestLargeFileConvergesViaIntraManifestPaging(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	buf := make([]byte, 6<<20)
@@ -76,6 +78,7 @@ func TestLargeFileConvergesViaIntraManifestPaging(t *testing.T) {
 // TestManifestDeltaPagination converges a folder whose full manifest delta exceeds a
 // single control frame, so the owner must send it in multiple pages.
 func TestManifestDeltaPagination(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	for i := range 60 {

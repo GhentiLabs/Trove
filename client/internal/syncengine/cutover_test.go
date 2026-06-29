@@ -44,6 +44,7 @@ func materializeSnapshot(t *testing.T, p peer, root snapshot.Root) map[string][]
 // byte-identical conflict copies, while (b) the pre-existing snapshot still materializes
 // bit-exact — the model change does not corrupt history.
 func TestCutoverPreservesHistoryAndConverges(t *testing.T) {
+	t.Parallel()
 	owner := newPeer(t, ownerID)
 	replica := newPeer(t, replicaID)
 	writeFile(t, owner.root, "shared.txt", []byte("historical v1"))
