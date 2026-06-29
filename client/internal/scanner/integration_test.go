@@ -355,10 +355,8 @@ func TestRunIngestsThenSnapshots(t *testing.T) {
 	run.Wait()
 }
 
-// TestScanAllBoundedMemory proves the pipeline's working set is independent of
-// tree size: scanning 4x the files must not cost ~4x the memory. Comparing peaks
-// (rather than an absolute bound) is robust to Go's GC accounting, since both runs
-// churn identically and only differ in count.
+// TestRunWithRealWatcher proves Run ingests a file change delivered through a real
+// fsnotify watcher, not just the fake.
 func TestRunWithRealWatcher(t *testing.T) {
 	root := t.TempDir()
 	cs, ms, closeAll := openStores(t, t.TempDir())
