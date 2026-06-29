@@ -59,14 +59,17 @@ var (
 	ErrCorruptIndex = errors.New("chunkstore: corrupt index entry")
 )
 
-// maxStoredLen bounds a physical chunk's stored bytes: at most a max-size
-// plaintext chunk plus compression framing and the AEAD tag. Reads reject any
-// index length beyond it rather than allocating blindly.
+// maxStoredLen bounds a stored chunk's bytes: at most a max-size plaintext chunk
+// plus compression framing and the AEAD tag (a clone chunk is plaintext, so it is
+// well under this). Reads reject any index length beyond it rather than allocating
+// blindly.
 const maxStoredLen = chunker.MaxSize + 1024
 
 // SchemaVersion is the chunkindex database layout version. Open rejects a
-// database written by a newer binary.
-const SchemaVersion = 1
+// database written by a newer binary. Bumped to 2 for the clone-object layout
+// (objects table, object_id, backing_offset); pre-release there is no migration,
+// so an older database is recreated rather than upgraded.
+const SchemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -120,15 +123,17 @@ type Store struct {
 	nextID       int64
 	nextObjectID int64
 	target       int64
+
+	physicalOnce sync.Once // guards the one-time "reflink unsupported" warning
 }
 
 // Options configures Open. BlobTargetSize defaults to the package constant.
-// ObjectDir holds whole-file clone objects; it defaults to an "objects" sibling
-// of BlobDir. For ~1x disk it must be on the same filesystem as the working files
-// (else clonefile falls back to a physical copy).
 type Options struct {
-	DB             *storage.DB
-	BlobDir        string
+	DB      *storage.DB
+	BlobDir string
+	// ObjectDir holds whole-file clone objects; it defaults to an "objects" sibling
+	// of BlobDir. For ~1x disk it must be on the same filesystem as the working
+	// files, else clonefile falls back to a physical copy.
 	ObjectDir      string
 	Logger         *slog.Logger
 	BlobTargetSize int64
@@ -255,7 +260,7 @@ func (s *Store) recoverObjects(ctx context.Context) error {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return err
+		return fmt.Errorf("chunkstore: iter objects: %w", err)
 	}
 	_ = rows.Close()
 
@@ -264,8 +269,8 @@ func (s *Store) recoverObjects(ctx context.Context) error {
 		return fmt.Errorf("chunkstore: read object dir: %w", err)
 	}
 	for _, e := range entries {
-		if e.IsDir() {
-			continue
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".clone") {
+			continue // only ever reclaim files this store wrote
 		}
 		p := filepath.Join(s.objectDir, e.Name())
 		if _, ok := known[p]; ok {
@@ -446,18 +451,6 @@ func (s *Store) has(ctx context.Context, id hasher.ChunkID) (bool, error) {
 	return true, nil
 }
 
-func (s *Store) backingOf(ctx context.Context, id hasher.ChunkID) (Backing, bool, error) {
-	var b int
-	err := s.db.QueryRow(ctx, `SELECT backing FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&b)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return 0, false, nil
-	case err != nil:
-		return 0, false, fmt.Errorf("chunkstore: backing: %w", err)
-	}
-	return Backing(b), true, nil
-}
-
 // touchLastSeen marks a chunk as referenced now, so a concurrent or just-finished
 // reference keeps it above the sweep's grace cutoff even before the referencing
 // manifest is committed.
@@ -494,8 +487,14 @@ func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.Chu
 		}
 	}()
 
-	if _, err := cloneOrCopy(srcPath, objPath); err != nil {
+	cloned, err := cloneOrCopy(srcPath, objPath)
+	if err != nil {
 		return nil, fmt.Errorf("chunkstore: clone %q: %w", srcPath, err)
+	}
+	if !cloned {
+		s.physicalOnce.Do(func() {
+			s.log.Warn("chunkstore: filesystem does not support reflink; using a physical copy, so current data costs about 2x disk")
+		})
 	}
 	// Durable before any chunk row points at it, so a crash never commits a row
 	// referencing bytes that are not on disk.
@@ -510,6 +509,10 @@ func (s *Store) IngestClone(ctx context.Context, srcPath string) ([]manifest.Chu
 	if err != nil {
 		return nil, err
 	}
+	if len(crefs) == 0 {
+		// An empty file has no chunks; keep no object (the defer removes the clone).
+		return refs, nil
+	}
 	if err := s.indexCloneRows(ctx, objID, objPath, crefs); err != nil {
 		return nil, err
 	}
@@ -522,7 +525,7 @@ func (s *Store) reserveObject() (int64, string) {
 	defer s.mu.Unlock()
 	id := s.nextObjectID
 	s.nextObjectID++
-	return id, filepath.Join(s.objectDir, fmt.Sprintf("%020d.obj", id))
+	return id, filepath.Join(s.objectDir, fmt.Sprintf("%020d.clone", id))
 }
 
 // chunkObject runs the chunker over an immutable clone, returning both the
@@ -591,7 +594,7 @@ func fsyncFile(path string) error {
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("chunkstore: fsync: %w", err)
+		return fmt.Errorf("chunkstore: fsync %q: %w", path, err)
 	}
 	return f.Close()
 }
@@ -920,7 +923,7 @@ func (s *Store) ReclaimObjects(ctx context.Context) (int, error) {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return 0, err
+		return 0, fmt.Errorf("chunkstore: iter dead objects: %w", err)
 	}
 	_ = rows.Close()
 

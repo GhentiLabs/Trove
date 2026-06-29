@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"math/rand/v2"
 	"os"
@@ -16,6 +17,19 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
+
+// backingOf reports how a chunk is stored; used by tests to assert re-pointing.
+func (s *Store) backingOf(ctx context.Context, id hasher.ChunkID) (Backing, bool, error) {
+	var b int
+	err := s.db.QueryRow(ctx, `SELECT backing FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&b)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, err
+	}
+	return Backing(b), true, nil
+}
 
 func idsOf(refs []manifest.ChunkRef) []hasher.ChunkID {
 	ids := make([]hasher.ChunkID, len(refs))
@@ -723,6 +737,67 @@ func TestPutDedupsAgainstClone(t *testing.T) {
 	}
 }
 
+// TestIngestCloneEmptyFile checks an empty file produces no chunks and leaves no
+// clone object behind (it would otherwise be an immediately-orphaned object row
+// and 0-byte file on every rescan).
+func TestIngestCloneEmptyFile(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	path := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone empty: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("refs = %d, want 0 for an empty file", len(refs))
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("ReclaimObjects after empty ingest = %d, %v; want 0 (no orphan)", n, err)
+	}
+}
+
+// TestIngestCloneSharedChunkReclaimsOldObject covers cross-file dedup: ingesting a
+// second file with identical content re-points the shared chunks onto its clone,
+// orphaning the first file's clone, which GC then reclaims while the chunk stays
+// servable.
+func TestIngestCloneSharedChunkReclaimsOldObject(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(1<<20, 42)
+	a := filepath.Join(dir, "a.bin")
+	b := filepath.Join(dir, "b.bin")
+	if err := os.WriteFile(a, data, 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(b, data, 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+
+	refsA, err := s.IngestClone(ctx, a)
+	if err != nil {
+		t.Fatalf("IngestClone a: %v", err)
+	}
+	refsB, err := s.IngestClone(ctx, b)
+	if err != nil {
+		t.Fatalf("IngestClone b: %v", err)
+	}
+	if refsA[0].ID != refsB[0].ID {
+		t.Fatal("identical content produced different chunk ids")
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 1 {
+		t.Fatalf("ReclaimObjects = %d, %v; want 1 (a's superseded clone)", n, err)
+	}
+	got, err := s.Get(ctx, FolderContext{}, refsB[0].ID)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("Get after orphan reclaim: err=%v equal=%v", err, bytes.Equal(got, data))
+	}
+}
+
 // TestReclaimObjects covers the clone reclaimer: an object still backing a chunk
 // is kept; once its chunks are deleted it is reclaimed; and reclaiming it leaves
 // the user's working file intact (the separate-inode refcount property).
@@ -820,7 +895,7 @@ func TestOpenSweepsOrphanObjects(t *testing.T) {
 		t.Fatalf("IngestClone: %v", err)
 	}
 
-	orphan := filepath.Join(dir, "objects", "99999999999999999999.obj")
+	orphan := filepath.Join(dir, "objects", "99999999999999999999.clone")
 	if err := os.WriteFile(orphan, []byte("orphan"), 0o600); err != nil {
 		t.Fatalf("plant orphan: %v", err)
 	}

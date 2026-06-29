@@ -26,7 +26,9 @@ func clone(src, dst string) error {
 	switch err := unix.IoctlFileClone(int(d.Fd()), int(s.Fd())); {
 	case err == nil:
 		return d.Close()
-	case errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.EXDEV), errors.Is(err, unix.ENOTTY):
+	case errors.Is(err, unix.ENOTSUP), errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.EXDEV), errors.Is(err, unix.ENOTTY), errors.Is(err, unix.EINVAL):
+		// EINVAL also covers an immutable or otherwise unclonable source; a
+		// physical copy still works, so treat all of these as unsupported.
 		_ = d.Close()
 		_ = os.Remove(dst)
 		return errReflinkUnsupported

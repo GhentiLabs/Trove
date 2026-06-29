@@ -44,6 +44,10 @@ func cloneOrCopy(src, dst string) (cloned bool, err error) {
 func cloneOrCopyWith(cloneFn func(src, dst string) error, src, dst string) (cloned bool, err error) {
 	switch err := cloneFn(src, dst); {
 	case err == nil:
+		// clonefile inherits the source's mode; tighten to private like physicalCopy.
+		if err := os.Chmod(dst, 0o600); err != nil {
+			return false, fmt.Errorf("chunkstore: clone perms: %w", err)
+		}
 		return true, nil
 	case errors.Is(err, errReflinkUnsupported):
 		return false, physicalCopy(src, dst)

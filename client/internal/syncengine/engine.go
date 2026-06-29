@@ -96,10 +96,10 @@ type FolderConfig struct {
 	// When set, an incoming manifest from a non-writer is rejected on apply; nil disables
 	// the check.
 	AuthorWriter func(ctx context.Context, nodeID string) (bool, error)
-	// NoClone skips collapsing materialized files into CoW clones. A transient
+	// SkipClone skips collapsing materialized files into CoW clones. A transient
 	// recovery store sets it, since its chunks are discarded and cloning into a
 	// throwaway directory would only waste work (and a full copy across filesystems).
-	NoClone bool
+	SkipClone bool
 }
 
 // Options configures an Engine bound to one Active session.
