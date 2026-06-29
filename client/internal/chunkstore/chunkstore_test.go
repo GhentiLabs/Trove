@@ -642,9 +642,8 @@ func TestCloneSurvivesWorkingFileOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IngestClone: %v", err)
 	}
-	want, err := s.Get(ctx, FolderContext{}, refs[0].ID)
-	if err != nil {
-		t.Fatalf("Get before overwrite: %v", err)
+	if len(refs) < 2 {
+		t.Fatalf("expected a multi-chunk file, got %d chunks", len(refs))
 	}
 
 	newData := genData(4<<20, 24)
@@ -660,12 +659,13 @@ func TestCloneSurvivesWorkingFileOverwrite(t *testing.T) {
 	}
 	_ = f.Close()
 
-	got, err := s.Get(ctx, FolderContext{}, refs[0].ID)
-	if err != nil {
-		t.Fatalf("Get after overwrite: %v", err)
+	// The whole old version still reassembles bit-exact from the preserved clone.
+	var out bytes.Buffer
+	if err := s.Reassemble(ctx, FolderContext{}, idsOf(refs), &out); err != nil {
+		t.Fatalf("reassemble old version: %v", err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatal("clone chunk changed after the working file was overwritten in place")
+	if !bytes.Equal(out.Bytes(), orig) {
+		t.Fatal("old version not byte-exact after the working file was overwritten in place")
 	}
 }
 

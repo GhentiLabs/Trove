@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +16,34 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
+
+func genData(n int, seed uint64) []byte {
+	r := rand.New(rand.NewPCG(seed, 0x9e3779b9))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(r.Uint64())
+	}
+	return b
+}
+
+// ingestClone writes content to diskPath, stores it as a clone, and records the
+// manifest under name, as the owner scanner does.
+func ingestClone(t *testing.T, ms *model.Store, cs *chunkstore.Store, name, diskPath string, content []byte) manifest.ID {
+	t.Helper()
+	ctx := context.Background()
+	if err := os.WriteFile(diskPath, content, 0o644); err != nil {
+		t.Fatalf("write %q: %v", diskPath, err)
+	}
+	refs, err := cs.IngestClone(ctx, diskPath)
+	if err != nil {
+		t.Fatalf("IngestClone %q: %v", diskPath, err)
+	}
+	mid, err := ms.PutManifest(ctx, manifest.Manifest{Kind: manifest.KindRegular, Path: name, Mode: 0o644, Chunks: refs}, model.Metadata{Size: int64(len(content))})
+	if err != nil {
+		t.Fatalf("PutManifest: %v", err)
+	}
+	return mid
+}
 
 const testNode = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -212,6 +242,65 @@ func TestHistoryIntegrityRestoreThenReclaim(t *testing.T) {
 	}
 	if err := cs.Reassemble(ctx, fc, ids(refs), &bytes.Buffer{}); !errors.Is(err, chunkstore.ErrChunkNotFound) {
 		t.Fatalf("expected forgotten version's chunks reclaimed, got %v", err)
+	}
+}
+
+// TestRestoreOldVersionFromClone restores an older, multi-chunk version of a file
+// through the clone path: its clone survives an in-place overwrite, restores
+// bit-exact while the snapshot is retained, and is reclaimed once the snapshot is
+// forgotten, leaving the current version intact.
+func TestRestoreOldVersionFromClone(t *testing.T) {
+	ctx := context.Background()
+	ms, cs := newStores(t)
+	diskPath := filepath.Join(t.TempDir(), "a.bin")
+
+	v1 := genData(5<<20, 1)
+	ingestClone(t, ms, cs, "a.bin", diskPath, v1)
+	s1, _ := ms.Cut(ctx)
+
+	v2 := genData(5<<20, 2)
+	mid2 := ingestClone(t, ms, cs, "a.bin", diskPath, v2)
+	if _, err := ms.Cut(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := ms.GetSnapshot(ctx, s1)
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	oldMid := leafID(t, snap, "a.bin")
+	if refs, _ := ms.ManifestChunks(ctx, oldMid); len(refs) < 2 {
+		t.Fatalf("want a multi-chunk old version, got %d chunks", len(refs))
+	}
+
+	// While S1 is retained the old version restores bit-exact, even after a sweep.
+	if got := restore(t, ms, cs, oldMid); got != string(v1) {
+		t.Fatal("old version not restored bit-exact from its clone")
+	}
+	if _, err := Sweep(ctx, ms, cs, time.Hour, time.Now().Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := restore(t, ms, cs, oldMid); got != string(v1) {
+		t.Fatal("retained old version lost to sweep")
+	}
+
+	// Forget S1 and sweep: the old clone is reclaimed, v1 is gone, v2 still restores.
+	if err := ms.Forget(ctx, s1); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Sweep(ctx, ms, cs, time.Hour, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ObjectsReclaimed == 0 {
+		t.Fatal("old clone object not reclaimed after the snapshot was forgotten")
+	}
+	oldRefs, _ := ms.ManifestChunks(ctx, oldMid)
+	if err := cs.Reassemble(ctx, fc, ids(oldRefs), &bytes.Buffer{}); !errors.Is(err, chunkstore.ErrChunkNotFound) {
+		t.Fatalf("expected the forgotten version's chunks reclaimed, got %v", err)
+	}
+	if got := restore(t, ms, cs, mid2); got != string(v2) {
+		t.Fatal("current version harmed by reclaim")
 	}
 }
 
