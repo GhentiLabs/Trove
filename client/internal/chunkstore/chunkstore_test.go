@@ -689,6 +689,40 @@ func TestRepointPhysicalToClone(t *testing.T) {
 	}
 }
 
+// TestPutDedupsAgainstClone covers the pull path racing an ingest: a chunk a peer
+// sends physically, already re-pointed to a clone locally, must dedup rather than
+// fail with a backing conflict.
+func TestPutDedupsAgainstClone(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(3000, 41)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	id := refs[0].ID
+
+	got, err := s.Put(ctx, FolderContext{}, data)
+	if err != nil {
+		t.Fatalf("Put over existing clone: %v", err)
+	}
+	if got != id {
+		t.Fatalf("Put returned %s, want %s", got, id)
+	}
+	if b, _, _ := s.backingOf(ctx, id); b != BackingClone {
+		t.Fatalf("backing = %v after dedup Put, want clone", b)
+	}
+	out, err := s.Get(ctx, FolderContext{}, id)
+	if err != nil || !bytes.Equal(out, data) {
+		t.Fatalf("Get after dedup Put: err=%v equal=%v", err, bytes.Equal(out, data))
+	}
+}
+
 // TestReclaimObjects covers the clone reclaimer: an object still backing a chunk
 // is kept; once its chunks are deleted it is reclaimed; and reclaiming it leaves
 // the user's working file intact (the separate-inode refcount property).

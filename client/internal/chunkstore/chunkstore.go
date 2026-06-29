@@ -37,9 +37,9 @@ const BlobTargetSize = 64 << 20
 type Backing uint8
 
 const (
-	// BackingPhysical: compressed (optionally sealed) bytes packed in a blob.
+	// BackingPhysical is compressed (optionally sealed) bytes packed in a blob.
 	BackingPhysical Backing = 0
-	// BackingClone: a plaintext byte range in a whole-file copy-on-write clone.
+	// BackingClone is a plaintext byte range in a whole-file copy-on-write clone.
 	BackingClone Backing = 1
 )
 
@@ -54,9 +54,6 @@ var (
 	ErrSchemaTooNew = errors.New("chunkstore: database schema newer than this binary")
 	// ErrZeroKey is returned when encryption is requested with a zero master key.
 	ErrZeroKey = errors.New("chunkstore: encryption requested with a zero master key")
-	// ErrBackingMismatch is returned when an operation's backing conflicts with
-	// how the chunk is already stored.
-	ErrBackingMismatch = errors.New("chunkstore: chunk already stored with a different backing")
 	// ErrCorruptIndex is returned when an index row is implausible, e.g. a stored
 	// length larger than any chunk can be.
 	ErrCorruptIndex = errors.New("chunkstore: corrupt index entry")
@@ -347,11 +344,12 @@ func (s *Store) Put(ctx context.Context, fc FolderContext, plaintext []byte) (ha
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	switch backing, exists, err := s.backingOf(ctx, id); {
+	// Any existing chunk is already servable (physical or clone), so a Put for it
+	// is a dedup hit: refresh last-seen and write nothing. This includes a chunk a
+	// concurrent ingest just re-pointed to a clone while this pull was in flight.
+	switch exists, err := s.has(ctx, id); {
 	case err != nil:
 		return id, err
-	case exists && backing != BackingPhysical:
-		return id, ErrBackingMismatch
 	case exists:
 		return id, s.touchLastSeen(ctx, id)
 	}
