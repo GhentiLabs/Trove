@@ -35,7 +35,7 @@ func (s *Store) Cut(ctx context.Context) (snapshot.Root, error) {
 		if err != nil {
 			return err
 		}
-		root = snapshot.Set(leaves).Root()
+		root = leaves.Root()
 
 		parentSeq, parentRoot, hasParent, err := latestSnapshot(ctx, tx)
 		if err != nil {
