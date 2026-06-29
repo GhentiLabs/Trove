@@ -266,6 +266,69 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestFolderSecret(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+
+	// Unencrypted folder: secret comes from the recovery secret.
+	if err := s.AddFolder(ctx, Folder{ID: "plain", Root: "/p", ShareID: "plain"}); err != nil {
+		t.Fatalf("AddFolder plain: %v", err)
+	}
+	if _, err := s.FolderSecret(ctx, "plain"); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("FolderSecret before mint = %v, want ErrNoSecret", err)
+	}
+	secret, err := s.GenerateRecoverySecret(ctx, "plain")
+	if err != nil {
+		t.Fatalf("GenerateRecoverySecret: %v", err)
+	}
+	switch got, err := s.FolderSecret(ctx, "plain"); {
+	case err != nil:
+		t.Fatalf("FolderSecret: %v", err)
+	case got != secret:
+		t.Fatalf("FolderSecret = %x, want %x", got, secret)
+	}
+	if _, err := s.GenerateRecoverySecret(ctx, "plain"); !errors.Is(err, ErrSecretExists) {
+		t.Fatalf("second GenerateRecoverySecret = %v, want ErrSecretExists", err)
+	}
+
+	// Encrypted folder: secret comes from the master key, not the recovery secret.
+	if err := s.AddFolder(ctx, Folder{ID: "enc", Root: "/e", ShareID: "enc", Encrypted: true}); err != nil {
+		t.Fatalf("AddFolder enc: %v", err)
+	}
+	key, err := s.GenerateFolderKey(ctx, "enc")
+	if err != nil {
+		t.Fatalf("GenerateFolderKey: %v", err)
+	}
+	switch got, err := s.FolderSecret(ctx, "enc"); {
+	case err != nil:
+		t.Fatalf("FolderSecret enc: %v", err)
+	case got != key:
+		t.Fatalf("FolderSecret enc = %x, want master key %x", got, key)
+	}
+
+	if _, err := s.FolderSecret(ctx, "missing"); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("FolderSecret(missing) = %v, want ErrFolderNotFound", err)
+	}
+
+	// A delivered secret is stored once and refuses a clobber.
+	if err := s.AddFolder(ctx, Folder{ID: "rx", Root: "/r", ShareID: "rx"}); err != nil {
+		t.Fatalf("AddFolder rx: %v", err)
+	}
+	var delivered [MasterKeyLen]byte
+	delivered[0] = 0x7
+	if err := s.DeliverRecoverySecret(ctx, "rx", delivered); err != nil {
+		t.Fatalf("DeliverRecoverySecret: %v", err)
+	}
+	if got, _ := s.FolderSecret(ctx, "rx"); got != delivered {
+		t.Fatalf("delivered secret = %x, want %x", got, delivered)
+	}
+	var other [MasterKeyLen]byte
+	other[0] = 0x9
+	if err := s.DeliverRecoverySecret(ctx, "rx", other); !errors.Is(err, ErrSecretExists) {
+		t.Fatalf("redelivery = %v, want ErrSecretExists", err)
+	}
+}
+
 func TestHolderVerifier(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "c.db")

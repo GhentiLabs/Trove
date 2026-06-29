@@ -166,14 +166,17 @@ func cmdFound(args []string) error {
 		return err
 	}
 	fmt.Println("group id:", group)
+	var secret [config.MasterKeyLen]byte
 	if *encrypted {
-		key, err := p.cfg.GenerateFolderKey(ctx, group)
-		if err != nil {
-			return err
-		}
-		fmt.Println("recovery code:", config.EncodeRecoveryCode(key))
-		fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
+		secret, err = p.cfg.GenerateFolderKey(ctx, group)
+	} else {
+		secret, err = p.cfg.GenerateRecoverySecret(ctx, group)
 	}
+	if err != nil {
+		return err
+	}
+	fmt.Println("recovery code:", config.EncodeRecoveryCode(secret))
+	fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
 	fmt.Println("share this id with members; collect their `identity` output to invite them")
 	return nil
 }

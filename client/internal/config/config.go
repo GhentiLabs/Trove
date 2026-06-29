@@ -38,6 +38,10 @@ var (
 	ErrKeyExists = errors.New("config: folder already has a key")
 	// ErrSchemaTooNew is returned when the database was written by a newer binary.
 	ErrSchemaTooNew = errors.New("config: database schema newer than this binary")
+	// ErrNoSecret is returned when a folder has neither a master key nor a recovery secret.
+	ErrNoSecret = errors.New("config: folder has no recovery secret")
+	// ErrSecretExists is returned when minting a recovery secret for a folder that has one.
+	ErrSecretExists = errors.New("config: folder already has a recovery secret")
 	// ErrNodeMismatch is returned when the database belongs to a different node.
 	ErrNodeMismatch = errors.New("config: database belongs to a different node")
 )
@@ -61,6 +65,7 @@ CREATE TABLE IF NOT EXISTS folders (
 	share_id        TEXT    NOT NULL DEFAULT '',
 	holder          INTEGER NOT NULL DEFAULT 0,
 	holder_verifier BLOB,
+	recovery_secret BLOB,
 	CHECK (holder = 0 OR encrypted = 1)
 );`
 
@@ -277,6 +282,77 @@ func (s *Store) GenerateFolderKey(ctx context.Context, id string) ([MasterKeyLen
 // has none yet. A replay or duplicate returns ErrKeyExists.
 func (s *Store) DeliverFolderKey(ctx context.Context, id string, key [MasterKeyLen]byte, generation int) error {
 	return s.setKeyIfAbsent(ctx, id, key[:], generation, nil, nil, nil, nil)
+}
+
+// GenerateRecoverySecret mints a random recovery secret for an unencrypted folder and stores
+// it, refusing to overwrite an existing one. An encrypted folder uses its master key instead;
+// FolderSecret returns whichever applies.
+func (s *Store) GenerateRecoverySecret(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
+	var secret [MasterKeyLen]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return [MasterKeyLen]byte{}, fmt.Errorf("config: generate recovery secret: %w", err)
+	}
+	if err := s.setRecoverySecretIfAbsent(ctx, id, secret[:]); err != nil {
+		return [MasterKeyLen]byte{}, err
+	}
+	return secret, nil
+}
+
+// DeliverRecoverySecret stores a recovery secret received from a trusted member of an
+// unencrypted folder, only if the folder has none yet. A replay returns ErrSecretExists.
+func (s *Store) DeliverRecoverySecret(ctx context.Context, id string, secret [MasterKeyLen]byte) error {
+	return s.setRecoverySecretIfAbsent(ctx, id, secret[:])
+}
+
+func (s *Store) setRecoverySecretIfAbsent(ctx context.Context, id string, secret []byte) error {
+	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		var existing []byte
+		err := tx.QueryRow(ctx, `SELECT recovery_secret FROM folders WHERE id = ?`, id).Scan(&existing)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrFolderNotFound
+		case err != nil:
+			return fmt.Errorf("config: check recovery secret: %w", err)
+		case existing != nil:
+			return ErrSecretExists
+		}
+		if _, err := tx.Exec(ctx, `UPDATE folders SET recovery_secret = ? WHERE id = ?`, secret, id); err != nil {
+			return fmt.Errorf("config: set recovery secret: %w", err)
+		}
+		return nil
+	})
+}
+
+// FolderSecret returns the 32-byte secret a folder's recovery verifier derives from: the master
+// key for an encrypted folder, the recovery secret for an unencrypted one. It returns ErrNoSecret
+// if the folder has neither yet.
+func (s *Store) FolderSecret(ctx context.Context, id string) ([MasterKeyLen]byte, error) {
+	var (
+		encrypted bool
+		master    []byte
+		recovery  []byte
+	)
+	err := s.db.QueryRow(ctx, `SELECT encrypted, master_key, recovery_secret FROM folders WHERE id = ?`, id).
+		Scan(&encrypted, &master, &recovery)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return [MasterKeyLen]byte{}, ErrFolderNotFound
+	case err != nil:
+		return [MasterKeyLen]byte{}, fmt.Errorf("config: get folder secret: %w", err)
+	}
+	raw := recovery
+	if encrypted {
+		raw = master
+	}
+	switch {
+	case raw == nil:
+		return [MasterKeyLen]byte{}, ErrNoSecret
+	case len(raw) != MasterKeyLen:
+		return [MasterKeyLen]byte{}, fmt.Errorf("config: stored secret length %d, want %d", len(raw), MasterKeyLen)
+	}
+	var secret [MasterKeyLen]byte
+	copy(secret[:], raw)
+	return secret, nil
 }
 
 // DeriveFolderKey derives a folder master key from a passphrase via Argon2id,
