@@ -116,7 +116,8 @@ func TestMessageRoundTrip(t *testing.T) {
 	cfg := &wirepb.NetworkConfig{
 		Folders: []*wirepb.Folder{
 			{FolderId: "docs-share", FolderType: wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE},
-			{FolderId: "photos-share", Encrypted: true},
+			{FolderId: "photos-share", Encrypted: true, EncryptionVerifier: bytes.Repeat([]byte{0x5A}, 32)},
+			{FolderId: "backup-share", Encrypted: true, Holder: true},
 		},
 	}
 	var buf bytes.Buffer

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -344,5 +345,92 @@ func TestAttachFoldersReconnectAfterKeyDelivery(t *testing.T) {
 	}
 	if !fcs[0].FolderCtx.Encrypted || fcs[0].FolderCtx.MasterKey != key {
 		t.Fatal("attached folder context is not keyed")
+	}
+}
+
+// TestRecoverySecretForPeer checks a writer delivers an unencrypted folder's recovery secret to
+// a trusted member (so it can later prove the recovery verifier) but never to a non-member.
+func TestRecoverySecretForPeer(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	_, readerID, readerPub := openMembers(t)
+	if _, err := members.Add(ctx, group, readerID, readerPub, membership.RoleReader); err != nil {
+		t.Fatalf("Add reader: %v", err)
+	}
+	cfg := openConfig(t, founderID)
+	if err := cfg.AddFolder(ctx, config.Folder{ID: group, Root: "/r", ShareID: group}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	secret, err := cfg.GenerateRecoverySecret(ctx, group)
+	if err != nil {
+		t.Fatalf("GenerateRecoverySecret: %v", err)
+	}
+	rt := &syncRuntime{self: founderID, members: members, cfg: cfg, byShare: map[string]config.Folder{
+		group: {ID: group, ShareID: group},
+	}}
+	log := slog.New(slog.DiscardHandler)
+	cf := config.Folder{ID: group, ShareID: group}
+
+	if d := rt.recoverySecretForPeer(ctx, log, cf, readerID); d == nil || !bytes.Equal(d.GetKey(), secret[:]) {
+		t.Fatalf("no recovery secret delivered to a trusted reader")
+	}
+	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	if d := rt.recoverySecretForPeer(ctx, log, cf, stranger); d != nil {
+		t.Fatal("recovery secret delivered to a non-member")
+	}
+}
+
+// TestReceiveRecoverySecret checks a writer's delivery of an unencrypted folder's recovery secret
+// is stored (no reattach), a replay is benign, and a non-writer's delivery is ignored.
+func TestReceiveRecoverySecret(t *testing.T) {
+	ctx := context.Background()
+	members, founderID, _ := openMembers(t)
+	group, err := members.Found(ctx)
+	if err != nil {
+		t.Fatalf("Found: %v", err)
+	}
+	cfg := openConfig(t, "self-node")
+	if err := cfg.AddFolder(ctx, config.Folder{ID: group, Root: "/r", ShareID: group}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	rt := &syncRuntime{self: "self-node", members: members, cfg: cfg, byShare: map[string]config.Folder{
+		group: {ID: group, Root: "/r", ShareID: group},
+	}}
+	log := slog.New(slog.DiscardHandler)
+
+	var secret [config.MasterKeyLen]byte
+	secret[0] = 0x11
+	fk := &wirepb.FolderKey{FolderId: group, Key: secret[:]}
+
+	if err := rt.receiveFolderKey(ctx, log, founderID, fk, nil); err != nil {
+		t.Fatalf("recovery secret delivery err = %v, want nil (no reattach)", err)
+	}
+	if got, err := cfg.FolderSecret(ctx, group); err != nil || got != secret {
+		t.Fatalf("stored secret = %x err=%v, want %x", got, err, secret)
+	}
+	if err := rt.receiveFolderKey(ctx, log, founderID, fk, nil); err != nil {
+		t.Fatalf("replay err = %v, want nil", err)
+	}
+
+	// A non-writer's delivery for a fresh folder is ignored.
+	members2, _, _ := openMembers(t)
+	group2, _ := members2.Found(ctx)
+	cfg2 := openConfig(t, "self-2")
+	if err := cfg2.AddFolder(ctx, config.Folder{ID: group2, Root: "/r", ShareID: group2}); err != nil {
+		t.Fatalf("AddFolder g2: %v", err)
+	}
+	rt2 := &syncRuntime{self: "self-2", members: members2, cfg: cfg2, byShare: map[string]config.Folder{
+		group2: {ID: group2, ShareID: group2},
+	}}
+	stranger := "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	if err := rt2.receiveFolderKey(ctx, log, stranger, &wirepb.FolderKey{FolderId: group2, Key: secret[:]}, nil); err != nil {
+		t.Fatalf("non-writer delivery err = %v, want nil", err)
+	}
+	if _, err := cfg2.FolderSecret(ctx, group2); !errors.Is(err, config.ErrNoSecret) {
+		t.Fatalf("secret stored from a non-writer; want ErrNoSecret")
 	}
 }

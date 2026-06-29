@@ -32,6 +32,7 @@ commands:
   invite     admit a reader to a group you own (-group -node -key)
   join       join a group founded by someone else (-group -root)
   run        run the peer: sync and membership gossip (-trove)
+  restore    recover a folder from any source (-group -code -from -root)
   status     show each folder's role, root, and last-synced receipts
 `
 
@@ -59,6 +60,8 @@ func run(args []string) error {
 		return cmdJoin(rest)
 	case "run":
 		return cmdRun(rest)
+	case "restore":
+		return cmdRestore(rest)
 	case "status":
 		return cmdStatus(rest)
 	default:
@@ -163,14 +166,17 @@ func cmdFound(args []string) error {
 		return err
 	}
 	fmt.Println("group id:", group)
+	var secret [config.MasterKeyLen]byte
 	if *encrypted {
-		key, err := p.cfg.GenerateFolderKey(ctx, group)
-		if err != nil {
-			return err
-		}
-		fmt.Println("recovery code:", config.EncodeRecoveryCode(key))
-		fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
+		secret, err = p.cfg.GenerateFolderKey(ctx, group)
+	} else {
+		secret, err = p.cfg.GenerateRecoverySecret(ctx, group)
 	}
+	if err != nil {
+		return err
+	}
+	fmt.Println("recovery code:", config.EncodeRecoveryCode(secret))
+	fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
 	fmt.Println("share this id with members; collect their `identity` output to invite them")
 	return nil
 }
@@ -253,6 +259,59 @@ func cmdJoin(args []string) error {
 		fmt.Println("joined as a holder: this node stores ciphertext only and never receives the key")
 	}
 	fmt.Printf("joined %s; run `trove-peer run -trove ...` to sync\n", *group)
+	return nil
+}
+
+func cmdRestore(args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	dir := fs.String("dir", ".trove", "state directory (a fresh one mints a new identity)")
+	trove := fs.String("trove", "", "trove://host:port?id=<fingerprint> discovery server")
+	group := fs.String("group", "", "group id of the folder to restore")
+	code := fs.String("code", "", "recovery code printed when the folder was founded")
+	var sources []string
+	fs.Func("from", "node id to recover from (any member or holder; repeatable)", func(s string) error {
+		sources = append(sources, s)
+		return nil
+	})
+	root := fs.String("root", "", "local directory to restore the folder into")
+	listen := fs.String("listen", "0.0.0.0:0", "local QUIC UDP bind address")
+	debug := fs.Bool("debug", false, "verbose debug logging")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *trove == "" || *group == "" || *code == "" || len(sources) == 0 || *root == "" {
+		return errors.New("restore: -trove, -group, -code, -from, and -root are required")
+	}
+	if _, ok := membership.Founder(*group); !ok {
+		return fmt.Errorf("restore: %q is not a valid group id", *group)
+	}
+	secret, err := config.DecodeRecoveryCode(*code)
+	if err != nil {
+		return err
+	}
+	_, cert, nodeID, err := loadIdentity(*dir)
+	if err != nil {
+		return err
+	}
+	level := slog.LevelInfo
+	if *debug {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	if err := os.MkdirAll(*root, 0o700); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("recovering %s from %v...\n", *group, sources)
+	if err := node.Recover(ctx, node.RecoverOptions{
+		Cert: cert, NodeID: nodeID, TroveURL: *trove, UDPAddr: *listen,
+		Sources: sources, ShareID: *group, Secret: secret, Root: *root, Logger: log,
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("recovered %s into %s\n", *group, *root)
 	return nil
 }
 

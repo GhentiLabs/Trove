@@ -59,8 +59,7 @@ func TestBidirectionalNonOverlappingEdits(t *testing.T) {
 func fileContents(t *testing.T, root string) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
-	for rel, e := range walk(t, root) {
-		_ = rel
+	for _, e := range walk(t, root) {
 		if !e.dir && e.link == "" {
 			out[string(e.data)] = true
 		}

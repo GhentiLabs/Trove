@@ -44,6 +44,9 @@ message Folder {
   uint64 index_epoch_id = 4;
   int64 high_water_sequence = 5;
   bytes encryption_verifier = 6;
+  // holder marks the advertiser as serving this folder only as an untrusted holder
+  // (sealed blobs), so a recovery client fetches it via the blob protocol, not the engine.
+  bool holder = 7;
 }
 
 // NetworkConfig is the first post-Hello message, sent exactly once each way. The

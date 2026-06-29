@@ -104,11 +104,15 @@ type Options struct {
 	Folders       []FolderConfig
 	Logger        *slog.Logger
 	MaxDeltaBytes int
+	// OnConverged, if set, fires when a folder reaches the peer's announced root (a recovery
+	// client's one-shot-pull signal); nil in normal runtime.
+	OnConverged func(folderID string, root snapshot.Root, epoch uint64, highWater int64)
 }
 
 // Engine runs two-way sync for one session's shared folders.
 type Engine struct {
 	sess          *session.Session
+	onConverged   func(folderID string, root snapshot.Root, epoch uint64, highWater int64)
 	log           *slog.Logger
 	maxDeltaBytes int
 	folders       map[string]*folderState
@@ -165,6 +169,7 @@ func New(opts Options) (*Engine, error) {
 	}
 	e := &Engine{
 		sess:          opts.Session,
+		onConverged:   opts.OnConverged,
 		log:           log,
 		maxDeltaBytes: maxDelta,
 		folders:       make(map[string]*folderState, len(opts.Folders)),

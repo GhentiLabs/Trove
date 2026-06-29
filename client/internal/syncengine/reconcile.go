@@ -127,6 +127,9 @@ func (fs *folderState) markConverged(ctx context.Context, root snapshot.Root, ep
 	}); err != nil {
 		fs.eng.log.Debug("syncengine: send receipt", "folder", fs.cfg.FolderID, "peer", peer, "err", err)
 	}
+	if fs.eng.onConverged != nil {
+		fs.eng.onConverged(fs.cfg.FolderID, root, epoch, highWater)
+	}
 }
 
 // carryState accumulates the chunk refs of a manifest whose list spans several pages,

@@ -67,6 +67,8 @@ type Folder struct {
 	// EncryptionVerifier is the non-secret key-mismatch token for an encrypted folder, empty
 	// when this node holds no key for it yet.
 	EncryptionVerifier []byte
+	// Holder marks this node as serving the folder only as an untrusted holder (sealed blobs).
+	Holder bool
 }
 
 // Local identifies this node for the Hello and the folders it offers.
@@ -88,6 +90,10 @@ type Config struct {
 	Initiator bool
 	Local     Local
 	Authorize func(ctx context.Context, nodeID string) (granted []string, ok bool, err error)
+	// ResponsiveOffer, when set, supplies the folders to offer a peer Authorize granted nothing,
+	// computed from what the peer advertised (so a recovery peer can prove itself without this
+	// node leaking its folder list). Consulted only on the responding side.
+	ResponsiveOffer func(ctx context.Context, peerID string, peerOffered []Folder) ([]Folder, error)
 
 	KeepaliveInterval time.Duration
 	HandshakeTimeout  time.Duration
@@ -101,6 +107,7 @@ type Session struct {
 	peerNodeID    string
 	shared        []string
 	peerVerifiers map[string][]byte
+	peerHolders   map[string]bool
 	keepalive     time.Duration
 	started       time.Time
 	log           *slog.Logger
@@ -167,8 +174,15 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("%w: %s", ErrUnauthorized, peerID)
 	}
 
-	offered := offeredFolders(cfg.Local.Folders, granted)
-	peerCfg, err := exchangeConfig(cfg.Initiator, ctrl, offered)
+	offer := func(peer *wirepb.NetworkConfig) ([]Folder, error) {
+		// A member (non-empty grant) or the initiator (peer == nil) offers from its own grant;
+		// only a responder that granted nothing defers to the responsive offer.
+		if len(granted) > 0 || cfg.ResponsiveOffer == nil || peer == nil {
+			return offeredFolders(cfg.Local.Folders, granted), nil
+		}
+		return cfg.ResponsiveOffer(ctx, peerID, peerOfferedFolders(peer))
+	}
+	offered, peerCfg, err := exchangeConfig(cfg.Initiator, ctrl, offer)
 	if err != nil {
 		_ = cfg.Conn.Close()
 		return nil, fmt.Errorf("session: config: %w", err)
@@ -188,6 +202,7 @@ func Handshake(ctx context.Context, cfg Config) (*Session, error) {
 		peerNodeID:    peerID,
 		shared:        shared,
 		peerVerifiers: peerVerifiers(peerCfg),
+		peerHolders:   peerHolders(peerCfg),
 		keepalive:     keepalive,
 		started:       time.Now(),
 		log:           log,
@@ -239,12 +254,43 @@ func exchangeHello(cfg Config, ctrl netio.Stream) (*wirepb.Hello, error) {
 	)
 }
 
-func exchangeConfig(initiator bool, ctrl netio.Stream, offered []Folder) (*wirepb.NetworkConfig, error) {
-	mine := buildNetworkConfig(offered)
-	return exchange(initiator,
-		func() error { return wire.WriteMessage(ctrl, mine) },
-		func() (*wirepb.NetworkConfig, error) { return readNetworkConfig(ctrl) },
-	)
+// exchangeConfig swaps NetworkConfig. The initiator writes first (offer called with nil); the
+// responder reads first, so its offer may depend on the peer. Returns our offer and the peer's.
+func exchangeConfig(initiator bool, ctrl netio.Stream, offer func(*wirepb.NetworkConfig) ([]Folder, error)) ([]Folder, *wirepb.NetworkConfig, error) {
+	if initiator {
+		offered, err := offer(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := wire.WriteMessage(ctrl, buildNetworkConfig(offered)); err != nil {
+			return nil, nil, err
+		}
+		peer, err := readNetworkConfig(ctrl)
+		return offered, peer, err
+	}
+	peer, err := readNetworkConfig(ctrl)
+	if err != nil {
+		return nil, nil, err
+	}
+	offered, err := offer(peer)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := wire.WriteMessage(ctrl, buildNetworkConfig(offered)); err != nil {
+		return nil, nil, err
+	}
+	return offered, peer, nil
+}
+
+// peerOfferedFolders converts a peer's NetworkConfig into the folders it advertised.
+func peerOfferedFolders(peer *wirepb.NetworkConfig) []Folder {
+	out := make([]Folder, 0, len(peer.GetFolders()))
+	for _, f := range peer.GetFolders() {
+		if id := f.GetFolderId(); id != "" {
+			out = append(out, Folder{ShareID: id, Encrypted: f.GetEncrypted(), EncryptionVerifier: f.GetEncryptionVerifier(), Holder: f.GetHolder()})
+		}
+	}
+	return out
 }
 
 func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
@@ -255,6 +301,7 @@ func buildNetworkConfig(offered []Folder) *wirepb.NetworkConfig {
 			FolderType:         wirepb.FolderType_FOLDER_TYPE_SEND_RECEIVE,
 			Encrypted:          f.Encrypted,
 			EncryptionVerifier: f.EncryptionVerifier,
+			Holder:             f.Holder,
 		})
 	}
 	return &wirepb.NetworkConfig{Folders: folders}
@@ -327,8 +374,24 @@ func peerVerifiers(peer *wirepb.NetworkConfig) map[string][]byte {
 	return out
 }
 
-// PeerEncryptionVerifier returns the verifier the peer announced for a folder, or nil.
+// PeerEncryptionVerifier returns the verifier the peer announced for a folder, or nil. It comes
+// from the raw NetworkConfig before intersection, so it resolves even for a folder that ended up
+// not shared (a recovery peer proving itself). Do not restrict it to SharedFolders.
 func (s *Session) PeerEncryptionVerifier(folderID string) []byte { return s.peerVerifiers[folderID] }
+
+// peerHolders maps each folder the peer offered to whether it serves the folder as a holder.
+func peerHolders(peer *wirepb.NetworkConfig) map[string]bool {
+	out := make(map[string]bool, len(peer.GetFolders()))
+	for _, f := range peer.GetFolders() {
+		if id := f.GetFolderId(); id != "" {
+			out[id] = f.GetHolder()
+		}
+	}
+	return out
+}
+
+// PeerServesAsHolder reports whether the peer advertised the folder as one it serves as a holder.
+func (s *Session) PeerServesAsHolder(folderID string) bool { return s.peerHolders[folderID] }
 
 // PeerNodeID is the authenticated peer identity.
 func (s *Session) PeerNodeID() string { return s.peerNodeID }

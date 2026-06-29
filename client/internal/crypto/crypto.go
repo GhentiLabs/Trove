@@ -99,7 +99,8 @@ func Open(master [MasterKeyLen]byte, id hasher.ChunkID, ciphertext []byte) ([]by
 	return out, nil
 }
 
-// FolderVerifier derives a non-secret key-mismatch token from the folder master key.
+// FolderVerifier derives a non-secret key-mismatch token from a folder's secret — its master
+// key when encrypted, or its recovery secret when not.
 func FolderVerifier(master [MasterKeyLen]byte, folderID string) []byte {
 	info := make([]byte, 0, len(verifyLabel)+len(folderID))
 	info = append(info, verifyLabel...)

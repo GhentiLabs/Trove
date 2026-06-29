@@ -41,6 +41,9 @@ type Options struct {
 	// OnSession, if set, is called for each Active session before its Run loop and
 	// must return a stop func invoked when the session ends.
 	OnSession func(ctx context.Context, s *session.Session) (stop func())
+	// ResponsiveOffer, if set, supplies the folders to offer a peer this node granted nothing
+	// (a verifier-proven recovery peer); see session.Config.ResponsiveOffer.
+	ResponsiveOffer func(ctx context.Context, peerID string, peerOffered []session.Folder) ([]session.Folder, error)
 }
 
 // Manager holds and maintains the set of active peer sessions.
@@ -55,6 +58,7 @@ type Manager struct {
 	maxBackoff time.Duration
 	log        *slog.Logger
 	onSession  func(context.Context, *session.Session) func()
+	respOffer  func(context.Context, string, []session.Folder) ([]session.Folder, error)
 
 	mu       sync.Mutex
 	sessions map[string]*session.Session
@@ -85,6 +89,7 @@ func New(opts Options) (*Manager, error) {
 		maxBackoff: maxB,
 		log:        log,
 		onSession:  opts.OnSession,
+		respOffer:  opts.ResponsiveOffer,
 		sessions:   make(map[string]*session.Session),
 	}, nil
 }
@@ -165,11 +170,12 @@ func (m *Manager) dialLoop(ctx context.Context, peerID string) {
 
 func (m *Manager) serve(ctx context.Context, conn netio.Conn, initiator bool) serveResult {
 	sess, err := session.Handshake(ctx, session.Config{
-		Conn:      conn,
-		Initiator: initiator,
-		Local:     m.local,
-		Authorize: m.authorize,
-		Logger:    m.log,
+		Conn:            conn,
+		Initiator:       initiator,
+		Local:           m.local,
+		Authorize:       m.authorize,
+		ResponsiveOffer: m.respOffer,
+		Logger:          m.log,
 	})
 	if err != nil {
 		m.log.Debug("peermgr: handshake failed", "initiator", initiator, "err", err)
