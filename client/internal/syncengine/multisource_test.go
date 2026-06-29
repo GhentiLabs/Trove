@@ -40,6 +40,17 @@ func waitSources(t *testing.T, c *Coordinator, n int) {
 	t.Fatalf("coordinator has %d sources, want %d", c.sourceCount(), n)
 }
 
+func waitServed(t *testing.T, e *Engine) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.ServedChunks() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("engine served no chunks within the deadline")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestMultiSourcePullsFromOwnerAndReplica proves a replica fetches distinct chunks from
 // two peers at once: chunks a peer-replica already holds come from that peer, chunks
 // only the owner has come from the owner.
@@ -74,6 +85,9 @@ func TestMultiSourcePullsFromOwnerAndReplica(t *testing.T) {
 	aServe := engineOn(t, ctx, abA, a, RoleReader, ca)
 	engineOn(t, ctx, abB, b, RoleReader, cb)
 	waitSources(t, cb, 1)
+	// Let A serve a.bin (the only source for it now) before the owner can, so the
+	// multi-source assertion does not race the owner satisfying every chunk first.
+	waitServed(t, aServe)
 
 	// 4) B connects to the owner: register the owner as a source, then start the owner
 	//    engine so its announce drives B's reconcile with both sources present.
