@@ -146,6 +146,7 @@ func cmdFound(args []string) error {
 	dir := fs.String("dir", ".trove", "state directory")
 	root := fs.String("root", "", "local folder root to share")
 	encrypted := fs.Bool("encrypted", false, "encrypt the folder at rest and on untrusted holders")
+	syncOnly := fs.Bool("sync", false, "sync-only: keep no version history, stay at ~1x disk (default keeps history)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -162,7 +163,7 @@ func cmdFound(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted}); err != nil {
+	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted, KeepHistory: !*syncOnly}); err != nil {
 		return err
 	}
 	fmt.Println("group id:", group)
@@ -228,6 +229,7 @@ func cmdJoin(args []string) error {
 	root := fs.String("root", "", "local folder root to receive into")
 	encrypted := fs.Bool("encrypted", false, "the folder is encrypted; await the key over the session")
 	holderFlag := fs.Bool("holder", false, "join as a holder: store ciphertext only, no root or key")
+	syncOnly := fs.Bool("sync", false, "sync-only: this node keeps no version history for the folder, staying at ~1x disk")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -249,7 +251,7 @@ func cmdJoin(args []string) error {
 	if err := p.members.Join(ctx, *group); err != nil {
 		return err
 	}
-	folder := config.Folder{ID: *group, Root: *root, ShareID: *group, Encrypted: *encrypted || *holderFlag, Holder: *holderFlag}
+	folder := config.Folder{ID: *group, Root: *root, ShareID: *group, Encrypted: *encrypted || *holderFlag, Holder: *holderFlag, KeepHistory: !*syncOnly}
 	switch err := p.cfg.AddFolder(ctx, folder); {
 	case err == nil, errors.Is(err, config.ErrFolderExists):
 	default:

@@ -27,12 +27,14 @@ original "owner virtual backing + Promote" does not hold for a passive scanner.
 ## Decision
 
 **Reflink/CoW with physical-copy fallback for *current* data; keep *history* packed.**
-Uniform across owner and replica. **`Promote` is never needed.**
+Uniform across owner and replica. **Promote-*before*-overwrite is never needed** — the clone
+preserves the old bytes, so the only Promote that runs is *after* the overwrite, at re-ingest
+(see "Promote-on-supersede").
 
 Virtual-pointers were rejected as the primary mechanism: their only advantage is ~0 extra
 bytes and cross-file dedup of current data, but they are fragile (a current-chunk read
 re-hashes the live file and races every user edit) and they require the impossible
-Promote on the owner.
+Promote-before-overwrite on the owner.
 
 | | Virtual pointers | Reflink/CoW (chosen) |
 |---|---|---|
@@ -40,7 +42,7 @@ Promote on the owner.
 | Serve a current chunk | re-hash live file; races edits | read the clone; stable |
 | Disk, current data | ~0 extra | ~1× (shares extents until divergence) |
 | Current-data dedup | sub-file + cross-file | intra-file only |
-| Promote needed | yes (impossible on owner) | never |
+| Promote-before-overwrite | yes (impossible on owner) | never (clone preserves old bytes) |
 | FS requirement | none | CoW FS, else fall back to physical copy |
 
 The cross-file-dedup loss for *current* data is the only real cost and is small: identical
@@ -55,14 +57,11 @@ Reflink changes only where the *bytes* live:
 
 - **Current data:** one whole-file **clone object** per file. The index maps each
   `chunk_id → (clone_object, offset, len)` using the CDC boundaries.
-- **History** (chunks in a retained snapshot, no longer in any current file): in M7 a
-  superseded chunk stays where it was last written. On the owner that is its old whole-file
-  clone, which becomes a private inode once the working file is overwritten and is reclaimed
-  when the retaining snapshot is forgotten; it is **not** repacked into a deduped blob.
-  (Chunks pulled over the wire but superseded before they are cloned remain in packed blobs.)
-  So owner history under M7 is whole-file clones bounded by the retention policy, not packed,
-  deduped history. Actively repacking superseded clone chunks into deduped blobs (async
-  clone→pack compaction) is deferred past M7; see "What changes when".
+- **History** (chunks in a retained snapshot, no longer in any current file): at the moment a
+  change supersedes a chunk a retained snapshot still pins, that chunk is **promoted** out of
+  its old whole-file clone into a deduplicated pack blob (sealed when the folder is encrypted),
+  and the emptied clone is reclaimed. So history is packed, deduped deltas — an old version
+  costs only the chunks it does not share with the current file. See "Promote-on-supersede".
 
 macOS `clonefile()` is whole-file (one syscall, ~0 bytes). Linux `FICLONE` is whole-file;
 `FICLONE_RANGE` (extent-level, Linux-only) is a possible later refinement for per-chunk
@@ -122,8 +121,57 @@ live file.
   crash-safe materialize and reclaim the pulled chunks. The virtual-pointer machinery
   (`PutVirtual`, `MirrorFile`, `BackingVirtual`, `chunk_locations`) was pruned, confirmed
   unused.
-- **Deferred past M7:** async clone→pack compaction — a background pass that reads
-  still-snapshot-pinned chunks out of a superseded clone, repacks them into deduped blobs,
-  and frees the clone. It is what delivers the "packed, deduped history" the Granularity
-  section originally implied; without it, owner history is whole-file clones bounded by
-  retention. Out of M7's acceptance scope (the 1× target covers current data, not history).
+- **Promote-on-supersede (built, follow-up to the 1× landing):** when a change drops a chunk
+  that a retained snapshot still pins, the chunk is moved out of its old clone into a
+  deduplicated pack blob at the moment of change — first-party in the ingest/apply path, not a
+  deferred compaction pass. The clone is what makes this possible: the once-impossible
+  "Promote-before-overwrite" becomes a Promote-after-the-fact, because the old bytes survive
+  the overwrite in the clone and can be read back and repacked at re-ingest. This delivers the
+  packed, deduped history the Granularity section describes; current data stays a clone (~1×).
+  See "Promote-on-supersede" and "History mode".
+
+## Promote-on-supersede
+
+The clone preserves a file's old bytes through an in-place overwrite, so at re-ingest the
+superseded chunks are still readable and can be lifted into deduped, packed history. This runs
+first-party at the moment of change, not as a deferred GC/compaction pass.
+
+**Mechanism (owner ingest and replica materialize alike):**
+```
+read prior manifest chunk ids for the path        # before committing the new version
+clone the new file; point its chunks at the clone # current data stays ~1× (M7)
+superseded = prior chunk ids − new chunk ids       # what this change dropped
+history    = superseded chunks a retained snapshot still pins   # model anti-join
+for id in history:                                 # chunkstore.Promote
+    read the clone chunk's plaintext via Get
+    store it through the Put path (compress, seal if encrypted, append + fsync)
+    re-point its row BackingClone → BackingPhysical
+reclaim any clone left referenced by no chunk row
+```
+
+The `history` set is the anti-join's job: a chunk a snapshot keeps **and** some current file
+still references is *not* promoted (promoting it would strand the live file). A chunk kept by
+no snapshot is left to GC. A deletion drops *all* of the prior version's chunks (the tombstone
+still carries them), so deletions promote too. The owner reaches this path from both the
+event-driven ingest and the rescan's deletion detection; the replica reaches it from a
+superseding pull. It is best-effort: a crash between the commit and the promote leaves the
+chunks as clones until their snapshot is forgotten and GC reclaims them — correct, just not yet
+compact. Encrypted folders gain sealed history at rest as a side effect: a retained old version
+stops being a plaintext clone once promoted.
+
+## History mode
+
+The founder picks a folder's purpose at `found`: **backup** (keep version history, the
+default) or **sync** (keep none, true 1×). It is the data owner's call — they choose how to
+spend the space their friends host — not the hosting machines'. `KeepHistory` both gates
+whether the scanner cuts snapshots and selects promote-on-supersede's keep-vs-drop:
+
+- **Backup:** snapshots are cut; superseded chunks a snapshot pins are promoted into deduped
+  history. An old version costs only its changed chunks.
+- **Sync:** no snapshots are cut, so nothing pins old versions; superseded chunks are dropped
+  and reclaimed, and the folder stays at ~1×. Convergence is unaffected — it uses
+  `CurrentRoot` (live leaves), not cut snapshots.
+
+`config.Folder.KeepHistory` persists the choice; `cmd/trove-peer` exposes `-sync` at `found`
+and `join`. Auto-propagation of the folder's mode to members, and a per-node "keep less than
+the folder mode" override, are later refinements — today each node is told its mode at join.
