@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS manifest_chunks (
 	length      INTEGER NOT NULL,
 	PRIMARY KEY (manifest_id, ord)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS manifest_chunks_by_chunk ON manifest_chunks(chunk_id);
 CREATE TABLE IF NOT EXISTS snapshots (
 	snap_seq    INTEGER PRIMARY KEY,
 	root_hash   BLOB    NOT NULL,

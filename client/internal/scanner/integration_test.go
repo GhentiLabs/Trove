@@ -59,7 +59,7 @@ func newScanner(t *testing.T, root string, tune ...func(*Options)) (*Scanner, *m
 	cs, ms, closeAll := openStores(t, t.TempDir())
 	t.Cleanup(closeAll)
 	f := watcher.NewFake()
-	opts := Options{Root: root, Chunks: cs, Model: ms, Watcher: f}
+	opts := Options{Root: root, Chunks: cs, Model: ms, Watcher: f, KeepHistory: true}
 	for _, fn := range tune {
 		fn(&opts)
 	}
@@ -353,6 +353,32 @@ func TestRunIngestsThenSnapshots(t *testing.T) {
 	})
 	cancel()
 	run.Wait()
+}
+
+// TestSyncOnlyCutsNoSnapshots checks a sync-only folder ingests changes but cuts no
+// snapshots, so nothing pins old versions and the folder stays at ~1x. reconcile is the
+// startup/rescan path that cuts for a backup folder, so driving it synchronously tests
+// the gate without racing the watch loop's timers.
+func TestSyncOnlyCutsNoSnapshots(t *testing.T) {
+	root := t.TempDir()
+	s, ms, _, _ := newScanner(t, root, func(o *Options) { o.KeepHistory = false })
+	ctx := context.Background()
+
+	writeFile(t, filepath.Join(root, "a.txt"), "hello")
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, err := ms.GetManifest(ctx, "a.txt"); err != nil {
+		t.Fatalf("a.txt not ingested: %v", err)
+	}
+
+	snaps, err := ms.ListSnapshots(ctx)
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(snaps) != 0 {
+		t.Fatalf("sync-only folder cut %d snapshots, want 0", len(snaps))
+	}
 }
 
 // TestRunWithRealWatcher proves Run ingests a file change delivered through a real
