@@ -21,10 +21,62 @@ import (
 // directly, and a crash before the commit re-applies idempotently on restart.
 func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, delta *wirepb.ManifestDelta) error {
 	batch = fs.writerAuthored(ctx, batch)
-	return fs.cfg.Model.ApplyRemote(ctx, fs.cfg.FolderID, fs.eng.sess.PeerNodeID(),
+	var superseded []hasher.ChunkID
+	err := fs.cfg.Model.ApplyRemote(ctx, fs.cfg.FolderID, fs.eng.sess.PeerNodeID(),
 		delta.GetIndexEpochId(), delta.GetHighWaterSequence(), batch, func(apply []model.RemoteManifest) error {
+			superseded = fs.supersededChunks(ctx, apply)
 			return fs.materializeBatch(ctx, apply)
 		})
+	if err != nil {
+		return err
+	}
+	// Best-effort: a crash here leaves the superseded chunks as clones until their
+	// snapshot is forgotten and GC reclaims them; the apply does not re-run.
+	fs.promoteSuperseded(ctx, superseded)
+	return nil
+}
+
+// supersededChunks collects the chunk ids the applied versions drop from the prior
+// local versions of their paths. Read inside the apply callback, before the model
+// commits, so GetManifest still returns the versions being replaced. A deletion
+// drops all of the prior version's chunks (its tombstone still carries them).
+func (fs *folderState) supersededChunks(ctx context.Context, apply []model.RemoteManifest) []hasher.ChunkID {
+	var out []hasher.ChunkID
+	for _, rm := range apply {
+		rec, err := fs.cfg.Model.GetManifest(ctx, rm.Manifest.Path)
+		switch {
+		case errors.Is(err, model.ErrManifestNotFound):
+			continue
+		case err != nil:
+			fs.eng.log.Warn("syncengine: prior manifest", "path", rm.Manifest.Path, "err", err)
+			continue
+		}
+		var newChunks []hasher.ChunkID
+		if !rm.Deleted {
+			newChunks = chunkIDs(rm.Manifest.Chunks)
+		}
+		out = append(out, hasher.SetMinus(chunkIDs(rec.Manifest.Chunks), newChunks)...)
+	}
+	return out
+}
+
+// promoteSuperseded moves the superseded chunks a retained snapshot still keeps out
+// of their clones into deduplicated history (sealed when the folder is encrypted).
+func (fs *folderState) promoteSuperseded(ctx context.Context, superseded []hasher.ChunkID) {
+	if len(superseded) == 0 {
+		return
+	}
+	history, err := fs.cfg.Model.SupersededHistory(ctx, superseded)
+	if err != nil {
+		fs.eng.log.Warn("syncengine: superseded history", "err", err)
+		return
+	}
+	if len(history) == 0 {
+		return
+	}
+	if _, err := fs.cfg.Chunks.Promote(ctx, fs.cfg.FolderCtx, history); err != nil {
+		fs.eng.log.Warn("syncengine: promote history", "err", err)
+	}
 }
 
 // writerAuthored drops every manifest whose author lacks write access per the roster,
