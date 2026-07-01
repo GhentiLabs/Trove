@@ -30,6 +30,9 @@ func (fs *folderState) apply(ctx context.Context, batch []model.RemoteManifest, 
 	if err != nil {
 		return err
 	}
+	if err := fs.cfg.Model.PruneHistoryToFit(ctx); err != nil && !errors.Is(err, model.ErrQuotaExceeded) {
+		fs.eng.log.Warn("syncengine: prune history to fit quota", "folder", fs.cfg.FolderID, "err", err)
+	}
 	// Best-effort: a crash here leaves the superseded chunks as clones until their
 	// snapshot is forgotten and GC reclaims them; the apply does not re-run.
 	fs.promoteSuperseded(ctx, superseded)

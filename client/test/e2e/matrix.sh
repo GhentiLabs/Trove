@@ -51,6 +51,8 @@ gate history-gate &
 p10=$!
 gate sync-mode-gate &
 p11=$!
+gate quota-gate &
+p12=$!
 
 rc=0
 wait $p1 || rc=1
@@ -64,6 +66,7 @@ wait $p8 || rc=1
 wait $p9 || rc=1
 wait $p10 || rc=1
 wait $p11 || rc=1
+wait $p12 || rc=1
 
 if [ $rc -eq 0 ]; then
 	echo "e2e matrix: ALL CELLS PASS"

@@ -832,6 +832,86 @@ run_sync_mode_gate() {
 	return 1
 }
 
+# run_quota_gate exercises per-node quota + history pruning over real holepunch: an owner
+# founds a backup folder with a tight -quota and a reader joins, then the owner rewrites a
+# file many times so retained history would blow past the cap. The owner must forget old
+# snapshots to stay within the cap (status reports usage <= cap) while the reader still
+# converges the latest version bit-exact.
+run_quota_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTB="$STATE/B/share" group
+	mkdir -p "$SRC" "$DSTB"
+	head -c 1048576 /dev/urandom >"$SRC/f.bin"
+
+	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" -quota 3MB | awk '/group id:/{print $3}')
+	if [ -z "$group" ]; then log "quota-gate: found -quota failed"; kill $COORD_PID 2>/dev/null; return 2; fi
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DSTB" >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+
+	local r1="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/f.bin" "$DSTB/f.bin" 2>/dev/null; then r1="ok"; break; fi
+		sleep 1
+	done
+	if [ "$r1" != ok ]; then log "quota-gate: round 1 convergence FAILED"; report_gate_logs; kill $pa $pb $COORD_PID 2>/dev/null; return 1; fi
+
+	# Rewrite the 1MB file well past the 3MB cap; each settled edit cuts a snapshot, so
+	# retained history would reach ~6MB without pruning.
+	for j in $(seq 1 6); do
+		head -c 1048576 /dev/urandom >"$SRC/f.bin"
+		sleep 3
+	done
+
+	local r2="fail"
+	for j in $(seq 1 60); do
+		if cmp -s "$SRC/f.bin" "$DSTB/f.bin" 2>/dev/null; then r2="ok"; break; fi
+		sleep 1
+	done
+
+	# The owner's reported usage must be within the cap, proving old snapshots were pruned.
+	local within="fail"
+	for j in $(seq 1 20); do
+		local line used cap
+		line=$(ip netns exec clA trove-peer status -dir "$STATE/A" 2>/dev/null | grep 'storage:')
+		used=$(echo "$line" | sed -E 's/.*storage: ([0-9.]+)MB.*/\1/')
+		cap=$(echo "$line" | sed -E 's#.*/ ([0-9.]+)MB#\1#')
+		if [ -n "$used" ] && [ -n "$cap" ] && awk "BEGIN{exit !($used <= $cap)}"; then within="ok"; break; fi
+		sleep 1
+	done
+
+	kill $pa $pb $COORD_PID 2>/dev/null
+	wait $pa $pb 2>/dev/null
+
+	if [ "$r1" = ok ] && [ "$r2" = ok ] && [ "$within" = ok ]; then
+		log "quota-gate: PASS (backup folder under a 3MB cap; old snapshots pruned to stay within cap while the reader converged the latest version over holepunch)"
+		return 0
+	fi
+	log "quota-gate: FAIL (r1=$r1 r2=$r2 within=$within, last storage line: $line)"
+	report_gate_logs
+	return 1
+}
+
 main() {
 	if ! ip netns add _probe 2>/dev/null; then
 		log "this harness needs --privileged (CAP_NET_ADMIN + netns)"; exit 2
@@ -860,6 +940,8 @@ main() {
 		run_history_gate ;;
 	sync-mode-gate)
 		run_sync_mode_gate ;;
+	quota-gate)
+		run_quota_gate ;;
 	*)
 		log "unknown SCENARIO ${SCENARIO}"; exit 2 ;;
 	esac
