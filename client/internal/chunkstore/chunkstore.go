@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS blobs (
 CREATE TABLE IF NOT EXISTS objects (
 	object_id INTEGER PRIMARY KEY,
 	path      TEXT NOT NULL
-);`
+);
+CREATE INDEX IF NOT EXISTS chunks_by_object ON chunks(object_id) WHERE object_id IS NOT NULL;`
 
 // FolderContext carries the per-operation encryption decision for a folder.
 type FolderContext struct {
@@ -354,14 +355,9 @@ func (s *Store) Put(ctx context.Context, fc FolderContext, plaintext []byte) (ha
 		return id, s.touchLastSeen(ctx, id)
 	}
 
-	codec, packed := compression.Compress(plaintext)
-	stored := packed
-	if fc.Encrypted {
-		sealed, err := crypto.Seal(fc.MasterKey, id, packed)
-		if err != nil {
-			return id, err
-		}
-		stored = sealed
+	codec, stored, err := compressSeal(fc, id, plaintext)
+	if err != nil {
+		return id, err
 	}
 
 	blob, offset, err := s.append(ctx, stored)
@@ -444,6 +440,32 @@ func (s *Store) has(ctx context.Context, id hasher.ChunkID) (bool, error) {
 		return false, fmt.Errorf("chunkstore: has: %w", err)
 	}
 	return true, nil
+}
+
+func (s *Store) backingOf(ctx context.Context, id hasher.ChunkID) (Backing, bool, error) {
+	var b int
+	err := s.db.QueryRow(ctx, `SELECT backing FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&b)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("chunkstore: backing: %w", err)
+	}
+	return Backing(b), true, nil
+}
+
+// compressSeal compresses plaintext and, when the folder is encrypted, seals it,
+// returning the codec and the bytes to store in a blob.
+func compressSeal(fc FolderContext, id hasher.ChunkID, plaintext []byte) (compression.Codec, []byte, error) {
+	codec, packed := compression.Compress(plaintext)
+	if !fc.Encrypted {
+		return codec, packed, nil
+	}
+	sealed, err := crypto.Seal(fc.MasterKey, id, packed)
+	if err != nil {
+		return 0, nil, err
+	}
+	return codec, sealed, nil
 }
 
 // touchLastSeen marks a chunk as referenced now, so a concurrent or just-finished
@@ -586,6 +608,71 @@ func fsyncFile(path string) error {
 	return f.Close()
 }
 
+// Promote moves the given clone-backed chunks into deduplicated pack blobs (sealed
+// when the folder is encrypted), re-pointing each from its clone to a blob, then
+// frees any clone left with no referencing chunk. A chunk that is missing or not
+// clone-backed is skipped.
+func (s *Store) Promote(ctx context.Context, fc FolderContext, ids []hasher.ChunkID) (int, error) {
+	promoted := 0
+	for _, id := range ids {
+		plain, err := s.Get(ctx, fc, id)
+		switch {
+		case errors.Is(err, ErrChunkNotFound):
+			continue
+		case err != nil:
+			return promoted, err
+		}
+		done, err := s.promoteOne(ctx, fc, id, plain)
+		if err != nil {
+			return promoted, err
+		}
+		if done {
+			promoted++
+		}
+	}
+	if promoted > 0 {
+		if _, err := s.ReclaimObjects(ctx); err != nil {
+			return promoted, err
+		}
+	}
+	return promoted, nil
+}
+
+func (s *Store) promoteOne(ctx context.Context, fc FolderContext, id hasher.ChunkID, plaintext []byte) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch backing, exists, err := s.backingOf(ctx, id); {
+	case err != nil:
+		return false, err
+	case !exists, backing != BackingClone:
+		return false, nil
+	}
+
+	codec, stored, err := compressSeal(fc, id, plaintext)
+	if err != nil {
+		return false, err
+	}
+	blob, offset, err := s.append(ctx, stored)
+	if err != nil {
+		return false, err
+	}
+	if err := s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE chunks SET backing = ?, blob_id = ?, object_id = NULL, backing_offset = ?, length = ?, codec = ?, encrypted = ?, plaintext_length = ?, last_seen_ms = ?
+			 WHERE chunk_id = ? AND backing = ?`,
+			int(BackingPhysical), blob.id, offset, len(stored), int(codec), fc.Encrypted, len(plaintext), time.Now().UnixMilli(), id.Bytes(), int(BackingClone)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE blobs SET size = ? WHERE blob_id = ?`, offset+int64(len(stored)), blob.id)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("chunkstore: promote chunk: %w", err)
+	}
+	blob.size = offset + int64(len(stored))
+	return true, nil
+}
+
 // Get returns the verified plaintext for a chunk, regardless of backing.
 func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([]byte, error) {
 	var (
@@ -617,7 +704,12 @@ func (s *Store) Get(ctx context.Context, fc FolderContext, id hasher.ChunkID) ([
 		if !objectID.Valid {
 			return nil, fmt.Errorf("%w: clone chunk missing object", ErrCorruptIndex)
 		}
-		if err := s.db.QueryRow(ctx, `SELECT path FROM objects WHERE object_id = ?`, objectID.Int64).Scan(&path); err != nil {
+		switch err := s.db.QueryRow(ctx, `SELECT path FROM objects WHERE object_id = ?`, objectID.Int64).Scan(&path); {
+		case errors.Is(err, sql.ErrNoRows):
+			// A concurrent Promote re-pointed this chunk to a blob and reclaimed the
+			// object between the two reads. Re-read; the chunk now resolves physically.
+			return s.Get(ctx, fc, id)
+		case err != nil:
 			return nil, fmt.Errorf("chunkstore: object path: %w", err)
 		}
 	default:

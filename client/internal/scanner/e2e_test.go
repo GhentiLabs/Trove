@@ -3,6 +3,7 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,7 +33,7 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	}
 	fc := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
 
-	s, err := New(Options{Root: root, Chunks: cs, Model: ms, Watcher: watcher.NewFake()})
+	s, err := New(Options{Root: root, FolderCtx: fc, Chunks: cs, Model: ms, Watcher: watcher.NewFake(), KeepHistory: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -82,6 +83,11 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	if got := decrypt(t, cs, fc, oldRefs); got != v1 {
 		t.Fatalf("restored old a.txt = %q, want %q", got, v1)
 	}
+	// The edit superseded v1's chunk, so it was promoted out of its plaintext clone
+	// into a sealed history blob: reading it now needs the key.
+	if _, err := cs.Get(ctx, chunkstore.FolderContext{}, oldRefs[0].ID); !errors.Is(err, chunkstore.ErrNoKey) {
+		t.Fatalf("superseded chunk keyless Get = %v, want ErrNoKey (sealed history)", err)
+	}
 
 	// Out-of-band delete of readme -> rescan tombstones it.
 	if err := os.Remove(filepath.Join(root, "docs/readme.md")); err != nil {
@@ -92,6 +98,12 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	}
 	if !mustGet(t, ms, "docs/readme.md").Deleted {
 		t.Fatal("out-of-band delete not tombstoned")
+	}
+	// The delete superseded readme's chunk while snap1/snap2 still pin it, so it too
+	// was promoted into sealed history rather than left in its plaintext clone.
+	readmeChunk := hasher.Sum([]byte(readme))
+	if _, err := cs.Get(ctx, chunkstore.FolderContext{}, readmeChunk); !errors.Is(err, chunkstore.ErrNoKey) {
+		t.Fatalf("deleted file's snapshot-pinned chunk keyless Get = %v, want ErrNoKey (sealed history)", err)
 	}
 
 	// Forget snap1, then GC: a.txt v1 becomes unreachable and is reclaimed; the
@@ -106,14 +118,54 @@ func TestEndToEndEncryptedLifecycle(t *testing.T) {
 	if res.ChunksDeleted == 0 {
 		t.Fatal("GC reclaimed nothing after forgetting the only snapshot pinning v1")
 	}
-	if res.ObjectsReclaimed == 0 {
-		t.Fatal("GC did not reclaim the superseded clone object after forgetting snap1")
-	}
 	if got := decrypt(t, cs, fc, mustGet(t, ms, "a.txt").Manifest.Chunks); got != "alpha contents, a second and longer version" {
 		t.Fatalf("current a.txt corrupted by GC: %q", got)
 	}
 	if err := cs.Reassemble(ctx, fc, idsOf(oldRefs), &bytes.Buffer{}); err == nil {
 		t.Fatal("forgotten v1 chunks should have been reclaimed")
+	}
+}
+
+// TestScanPromoteSkipsChunkMovedToAnotherFile checks the batch-once-per-scan rule: a
+// chunk one file drops but another file in the same scan reintroduces is still current,
+// so it must not be promoted into history. Promoting per file (before the second file's
+// manifest commits) would wrongly seal it.
+func TestScanPromoteSkipsChunkMovedToAnotherFile(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cs, ms, closeAll := openStores(t, t.TempDir())
+	t.Cleanup(closeAll)
+
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(i*7 + 2)
+	}
+	fc := chunkstore.FolderContext{Encrypted: true, MasterKey: key}
+
+	s, err := New(Options{Root: root, FolderCtx: fc, Chunks: cs, Model: ms, Watcher: watcher.NewFake(), KeepHistory: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const shared = "the shared block of bytes"
+	writeFile(t, filepath.Join(root, "a.txt"), shared)
+	if err := s.Rescan(ctx); err != nil {
+		t.Fatalf("rescan 1: %v", err)
+	}
+	if _, err := ms.Cut(ctx); err != nil { // pins a.txt's chunk as history
+		t.Fatalf("cut: %v", err)
+	}
+
+	// One scan both supersedes a.txt's chunk and reintroduces it in b.txt.
+	writeFile(t, filepath.Join(root, "a.txt"), "a completely different replacement body")
+	writeFile(t, filepath.Join(root, "b.txt"), shared)
+	if err := s.Rescan(ctx); err != nil {
+		t.Fatalf("rescan 2: %v", err)
+	}
+
+	sharedChunk := hasher.Sum([]byte(shared))
+	if _, err := cs.Get(ctx, chunkstore.FolderContext{}, sharedChunk); err != nil {
+		t.Fatalf("chunk still current in b.txt must stay a plaintext clone; keyless Get = %v", err)
 	}
 }
 

@@ -3,7 +3,6 @@ package chunkstore
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"math/rand/v2"
 	"os"
@@ -17,19 +16,6 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 )
-
-// backingOf reports how a chunk is stored; used by tests to assert re-pointing.
-func (s *Store) backingOf(ctx context.Context, id hasher.ChunkID) (Backing, bool, error) {
-	var b int
-	err := s.db.QueryRow(ctx, `SELECT backing FROM chunks WHERE chunk_id = ?`, id.Bytes()).Scan(&b)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return 0, false, nil
-	case err != nil:
-		return 0, false, err
-	}
-	return Backing(b), true, nil
-}
 
 func idsOf(refs []manifest.ChunkRef) []hasher.ChunkID {
 	ids := make([]hasher.ChunkID, len(refs))
@@ -795,6 +781,95 @@ func TestIngestCloneSharedChunkReclaimsOldObject(t *testing.T) {
 	got, err := s.Get(ctx, FolderContext{}, refsB[0].ID)
 	if err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("Get after orphan reclaim: err=%v equal=%v", err, bytes.Equal(got, data))
+	}
+}
+
+// TestPromote moves clone-backed chunks into blobs: the promoted chunk serves
+// byte-exact from a blob, and once every chunk of a clone is promoted the clone is
+// freed.
+func TestPromote(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	data := genData(5<<20, 51)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	if len(refs) < 2 {
+		t.Fatalf("want a multi-chunk file, got %d", len(refs))
+	}
+
+	first := refs[0].ID
+	want, err := s.Get(ctx, FolderContext{}, first)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if n, err := s.Promote(ctx, FolderContext{}, []hasher.ChunkID{first}); err != nil || n != 1 {
+		t.Fatalf("Promote one = %d, %v; want 1, nil", n, err)
+	}
+	if b, _, _ := s.backingOf(ctx, first); b != BackingPhysical {
+		t.Fatalf("backing after promote = %v, want physical", b)
+	}
+	got, err := s.Get(ctx, FolderContext{}, first)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Get after promote: err=%v equal=%v", err, bytes.Equal(got, want))
+	}
+
+	// Promoting the whole set again skips the already-physical first chunk and promotes
+	// only the remaining clones, emptying the clone, which Promote then reclaims.
+	if n, err := s.Promote(ctx, FolderContext{}, idsOf(refs)); err != nil || n != len(refs)-1 {
+		t.Fatalf("Promote rest = %d, %v; want %d, nil", n, err, len(refs)-1)
+	}
+	if n, err := s.ReclaimObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("clone should already be freed; ReclaimObjects = %d, %v", n, err)
+	}
+	var out bytes.Buffer
+	if err := s.Reassemble(ctx, FolderContext{}, idsOf(refs), &out); err != nil || !bytes.Equal(out.Bytes(), data) {
+		t.Fatalf("not byte-exact after full promote: err=%v", err)
+	}
+}
+
+// TestPromoteSealsEncrypted checks that promoting a chunk in an encrypted folder
+// seals it: the plaintext clone becomes a sealed blob that needs the key to read.
+func TestPromoteSealsEncrypted(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newStore(t, 0)
+
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	fc := FolderContext{Encrypted: true, MasterKey: key}
+
+	data := genData(4000, 52)
+	path := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	refs, err := s.IngestClone(ctx, path)
+	if err != nil {
+		t.Fatalf("IngestClone: %v", err)
+	}
+	id := refs[0].ID
+
+	// The clone is plaintext, so a keyless read works before promotion.
+	if _, err := s.Get(ctx, FolderContext{}, id); err != nil {
+		t.Fatalf("keyless Get of clone: %v", err)
+	}
+	if _, err := s.Promote(ctx, fc, []hasher.ChunkID{id}); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if _, err := s.Get(ctx, FolderContext{}, id); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("keyless Get after promote = %v, want ErrNoKey", err)
+	}
+	got, err := s.Get(ctx, fc, id)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("keyed Get after promote: err=%v equal=%v", err, bytes.Equal(got, data))
 	}
 }
 

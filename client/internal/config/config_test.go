@@ -86,6 +86,38 @@ func TestFolderCRUD(t *testing.T) {
 	}
 }
 
+func TestFolderKeepHistory(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+
+	backup := Folder{ID: "backup", Root: "/b", KeepHistory: true}
+	sync := Folder{ID: "sync", Root: "/s", KeepHistory: false}
+	if err := s.AddFolder(ctx, backup); err != nil {
+		t.Fatalf("AddFolder backup: %v", err)
+	}
+	if err := s.AddFolder(ctx, sync); err != nil {
+		t.Fatalf("AddFolder sync: %v", err)
+	}
+
+	if got, err := s.GetFolder(ctx, "backup"); err != nil || !got.KeepHistory {
+		t.Fatalf("GetFolder(backup).KeepHistory = %v err=%v, want true", got.KeepHistory, err)
+	}
+	if got, err := s.GetFolder(ctx, "sync"); err != nil || got.KeepHistory {
+		t.Fatalf("GetFolder(sync).KeepHistory = %v err=%v, want false", got.KeepHistory, err)
+	}
+
+	list, err := s.ListFolders(ctx)
+	if err != nil {
+		t.Fatalf("ListFolders: %v", err)
+	}
+	for _, f := range list {
+		want := f.ID == "backup"
+		if f.KeepHistory != want {
+			t.Fatalf("ListFolders %q KeepHistory = %v, want %v", f.ID, f.KeepHistory, want)
+		}
+	}
+}
+
 func TestFolderKeys(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)

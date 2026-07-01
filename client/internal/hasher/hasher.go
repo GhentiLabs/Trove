@@ -55,6 +55,24 @@ func FromBytes(b []byte) (ChunkID, error) {
 	return id, nil
 }
 
+// SetMinus returns the ids in a that are not in b.
+func SetMinus(a, b []ChunkID) []ChunkID {
+	if len(a) == 0 {
+		return nil
+	}
+	exclude := make(map[ChunkID]struct{}, len(b))
+	for _, id := range b {
+		exclude[id] = struct{}{}
+	}
+	out := make([]ChunkID, 0, len(a))
+	for _, id := range a {
+		if _, ok := exclude[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // Hasher computes a ChunkID incrementally.
 type Hasher struct {
 	h *blake3.Hasher

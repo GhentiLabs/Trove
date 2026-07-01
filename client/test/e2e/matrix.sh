@@ -28,7 +28,7 @@ gate() {
 	return "${PIPESTATUS[0]}"
 }
 
-echo "running e2e matrix + offline/bidi/holder/recovery gates (in parallel)..."
+echo "running e2e matrix + offline/bidi/holder/recovery/history gates (in parallel)..."
 cell prc prc success &
 p1=$!
 cell prc sym fail &
@@ -47,6 +47,10 @@ gate member-recovery-gate &
 p8=$!
 gate unencrypted-recovery-gate &
 p9=$!
+gate history-gate &
+p10=$!
+gate sync-mode-gate &
+p11=$!
 
 rc=0
 wait $p1 || rc=1
@@ -58,6 +62,8 @@ wait $p6 || rc=1
 wait $p7 || rc=1
 wait $p8 || rc=1
 wait $p9 || rc=1
+wait $p10 || rc=1
+wait $p11 || rc=1
 
 if [ $rc -eq 0 ]; then
 	echo "e2e matrix: ALL CELLS PASS"

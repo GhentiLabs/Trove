@@ -755,7 +755,8 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 		if fc.Role != syncengine.RoleWriter {
 			continue
 		}
-		fctx, err := rt.folderContext(ctx, rt.byShare[fc.FolderID])
+		cf := rt.byShare[fc.FolderID]
+		fctx, err := rt.folderContext(ctx, cf)
 		if err != nil {
 			log.Warn("node: scanner folder key", "folder", fc.FolderID, "err", err)
 			continue
@@ -770,7 +771,8 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		sc, err := scanner.New(scanner.Options{
-			Root: fc.Root, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
+			Root: fc.Root, FolderCtx: fctx, Chunks: fc.Chunks, Model: fc.Model, Watcher: w, Logger: log,
+			KeepHistory: cf.KeepHistory,
 		})
 		if err != nil {
 			_ = w.Close()

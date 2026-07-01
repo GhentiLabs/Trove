@@ -685,6 +685,153 @@ run_recovery_gate() {
 	return 1
 }
 
+# run_history_gate exercises promote-on-supersede over real holepunch: an owner (A) founds an
+# encrypted BACKUP folder and a reader (B) converges it. M7 stores current data as a plaintext
+# clone even when encrypted, so the founding version is readable in cleartext in the owner's
+# store. The owner then edits the file; the startup snapshot still pins the old version, so the
+# edit promotes its superseded chunk into sealed history and reclaims the clone. After the edit
+# the old version must be gone from plaintext on disk (sealed), the new version must still be a
+# plaintext clone, and the reader must converge to the new version bit-exact.
+run_history_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTB="$STATE/B/share" STORE="$STATE/A/folders" group
+	mkdir -p "$SRC/sub" "$DSTB"
+	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	printf 'HISTORY-MARKER-VERSION-ONE\n' >"$SRC/sub/doc.txt"
+
+	ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" -encrypted >"$LOG/found" 2>&1
+	group=$(awk '/group id:/{print $3}' "$LOG/found")
+	if [ -z "$group" ]; then log "history-gate: found -encrypted failed"; cat "$LOG/found"; kill $COORD_PID 2>/dev/null; return 2; fi
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DSTB" -encrypted >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+
+	# Round 1: the reader converges the founding version bit-exact.
+	local r1="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/big.bin" "$DSTB/big.bin" 2>/dev/null && cmp -s "$SRC/sub/doc.txt" "$DSTB/sub/doc.txt" 2>/dev/null; then r1="ok"; break; fi
+		sleep 1
+	done
+	if [ "$r1" != ok ]; then log "history-gate: round 1 convergence FAILED"; report_gate_logs; kill $pa $pb $COORD_PID 2>/dev/null; return 1; fi
+
+	# The founding version is plaintext in the owner's store (a clone), as M7 stores current data.
+	local v1clone="fail"
+	grep -rqsF 'HISTORY-MARKER-VERSION-ONE' "$STORE" && v1clone="ok"
+
+	# The owner edits the file, superseding the founding version's chunk.
+	printf 'HISTORY-MARKER-VERSION-TWO\n' >"$SRC/sub/doc.txt"
+
+	# The reader converges to the new version.
+	local r2="fail"
+	for j in $(seq 1 60); do
+		if grep -qsF 'HISTORY-MARKER-VERSION-TWO' "$DSTB/sub/doc.txt" 2>/dev/null && cmp -s "$SRC/sub/doc.txt" "$DSTB/sub/doc.txt" 2>/dev/null; then r2="ok"; break; fi
+		sleep 1
+	done
+
+	# The superseded version was promoted into sealed history: its plaintext is gone from the
+	# owner's store, while the current version remains a plaintext clone.
+	local sealed="fail" current="fail"
+	for j in $(seq 1 30); do
+		if ! grep -rqsF 'HISTORY-MARKER-VERSION-ONE' "$STORE"; then sealed="ok"; break; fi
+		sleep 1
+	done
+	grep -rqsF 'HISTORY-MARKER-VERSION-TWO' "$STORE" && current="ok"
+
+	kill $pa $pb $COORD_PID 2>/dev/null
+	wait $pa $pb 2>/dev/null
+
+	if [ "$r1" = ok ] && [ "$v1clone" = ok ] && [ "$r2" = ok ] && [ "$sealed" = ok ] && [ "$current" = ok ]; then
+		log "history-gate: PASS (encrypted backup; an edit promoted the superseded version into sealed history — gone from plaintext on disk — while the current version stays a plaintext clone and the reader converged bit-exact)"
+		return 0
+	fi
+	log "history-gate: FAIL (r1=$r1 v1clone=$v1clone r2=$r2 sealed=$sealed current=$current)"
+	report_gate_logs
+	return 1
+}
+
+# run_sync_mode_gate exercises the founder-set sync mode over real holepunch: an owner founds a
+# folder with -sync (keep no history) and a reader joins with -sync, then they converge the
+# founding state and an edit. It proves the -sync flag plumbs through found/join/run and that a
+# sync-only folder still converges through edits; the no-history property itself is unit-tested.
+run_sync_mode_gate() {
+	teardown
+	rm -rf "$STATE" "$LOG"
+	mkdir -p "$STATE" "$LOG"
+
+	setup_base
+	setup_side A 192.168.10 100.64.0.10
+	setup_side B 192.168.20 100.64.0.20
+	apply_nat A 192.168.10 prc
+	apply_nat B 192.168.20 prc
+
+	if ! start_coordinator; then return 2; fi
+	local trove=$TROVE_URL j
+
+	local idB keyB
+	idB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/node id:/{print $3}')
+	keyB=$(ip netns exec clB trove-peer identity -dir "$STATE/B" | awk '/public key:/{print $3}')
+
+	local SRC="$STATE/A/share" DSTB="$STATE/B/share" group
+	mkdir -p "$SRC/sub" "$DSTB"
+	head -c 1048576 /dev/urandom >"$SRC/big.bin"
+	printf 'sync-only version one\n' >"$SRC/sub/doc.txt"
+
+	group=$(ip netns exec clA trove-peer found -dir "$STATE/A" -root "$SRC" -sync | awk '/group id:/{print $3}')
+	if [ -z "$group" ]; then log "sync-mode-gate: found -sync failed"; kill $COORD_PID 2>/dev/null; return 2; fi
+	ip netns exec clA trove-peer invite -dir "$STATE/A" -group "$group" -node "$idB" -key "$keyB" >"$LOG/setup" 2>&1
+	ip netns exec clB trove-peer join -dir "$STATE/B" -group "$group" -root "$DSTB" -sync >>"$LOG/setup" 2>&1
+
+	ip netns exec clA trove-peer run -dir "$STATE/A" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/A" 2>&1 &
+	local pa=$!
+	ip netns exec clB trove-peer run -dir "$STATE/B" -trove "$trove" -listen 0.0.0.0:22000 -debug >"$LOG/B" 2>&1 &
+	local pb=$!
+
+	local r1="fail"
+	for j in $(seq 1 90); do
+		if cmp -s "$SRC/big.bin" "$DSTB/big.bin" 2>/dev/null && cmp -s "$SRC/sub/doc.txt" "$DSTB/sub/doc.txt" 2>/dev/null; then r1="ok"; break; fi
+		sleep 1
+	done
+
+	# An edit converges on a sync-only folder just as on a backup one.
+	printf 'sync-only version two\n' >"$SRC/sub/doc.txt"
+	local r2="fail"
+	for j in $(seq 1 60); do
+		if grep -qsF 'sync-only version two' "$DSTB/sub/doc.txt" 2>/dev/null && cmp -s "$SRC/sub/doc.txt" "$DSTB/sub/doc.txt" 2>/dev/null; then r2="ok"; break; fi
+		sleep 1
+	done
+
+	kill $pa $pb $COORD_PID 2>/dev/null
+	wait $pa $pb 2>/dev/null
+
+	if [ "$r1" = ok ] && [ "$r2" = ok ]; then
+		log "sync-mode-gate: PASS (-sync founds and joins; sync-only folder converges through an edit over holepunch)"
+		return 0
+	fi
+	log "sync-mode-gate: FAIL (r1=$r1 r2=$r2)"
+	report_gate_logs
+	return 1
+}
+
 main() {
 	if ! ip netns add _probe 2>/dev/null; then
 		log "this harness needs --privileged (CAP_NET_ADMIN + netns)"; exit 2
@@ -709,6 +856,10 @@ main() {
 		run_recovery_gate enc ;;
 	unencrypted-recovery-gate)
 		run_recovery_gate plain ;;
+	history-gate)
+		run_history_gate ;;
+	sync-mode-gate)
+		run_sync_mode_gate ;;
 	*)
 		log "unknown SCENARIO ${SCENARIO}"; exit 2 ;;
 	esac

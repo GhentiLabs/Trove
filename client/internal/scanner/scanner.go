@@ -48,25 +48,32 @@ type request struct {
 // Scanner drives one folder's local state.
 type Scanner struct {
 	root    string
+	fc      chunkstore.FolderContext
 	chunks  *chunkstore.Store
 	model   *model.Store
 	watcher watcher.Watcher
 	log     *slog.Logger
 
-	debounce   time.Duration
-	quiesce    time.Duration
-	workers    int
-	nextRescan func() time.Duration
+	keepHistory bool
+	debounce    time.Duration
+	quiesce     time.Duration
+	workers     int
+	nextRescan  func() time.Duration
 }
 
 // Options configures New. Root, Chunks, Model, and Watcher are required; the rest
 // default.
 type Options struct {
-	Root    string
-	Chunks  *chunkstore.Store
-	Model   *model.Store
-	Watcher watcher.Watcher
-	Logger  *slog.Logger
+	Root      string
+	FolderCtx chunkstore.FolderContext
+	Chunks    *chunkstore.Store
+	Model     *model.Store
+	Watcher   watcher.Watcher
+	Logger    *slog.Logger
+	// KeepHistory retains snapshots of old versions (a backup folder). When false the
+	// folder is sync-only: no snapshots are cut, so superseded data is reclaimed and
+	// the folder stays ~1x.
+	KeepHistory bool
 
 	DebounceWindow  time.Duration
 	SnapshotQuiesce time.Duration
@@ -88,14 +95,16 @@ func New(opts Options) (*Scanner, error) {
 		return nil, errors.New("scanner: nil watcher")
 	}
 	s := &Scanner{
-		root:     opts.Root,
-		chunks:   opts.Chunks,
-		model:    opts.Model,
-		watcher:  opts.Watcher,
-		log:      opts.Logger,
-		debounce: opts.DebounceWindow,
-		quiesce:  opts.SnapshotQuiesce,
-		workers:  opts.Workers,
+		root:        opts.Root,
+		fc:          opts.FolderCtx,
+		chunks:      opts.Chunks,
+		model:       opts.Model,
+		watcher:     opts.Watcher,
+		log:         opts.Logger,
+		keepHistory: opts.KeepHistory,
+		debounce:    opts.DebounceWindow,
+		quiesce:     opts.SnapshotQuiesce,
+		workers:     opts.Workers,
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
@@ -146,11 +155,14 @@ func (s *Scanner) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// reconcile does a full rescan and snapshots the result. Cut is idempotent, so an
-// unchanged tree produces no new snapshot.
+// reconcile does a full rescan and, for a history-keeping folder, snapshots the
+// result. Cut is idempotent, so an unchanged tree produces no new snapshot.
 func (s *Scanner) reconcile(ctx context.Context) error {
 	if err := s.Rescan(ctx); err != nil {
 		return err
+	}
+	if !s.keepHistory {
+		return nil
 	}
 	if _, err := s.model.Cut(ctx); err != nil {
 		return err
@@ -170,6 +182,9 @@ func (s *Scanner) executorLoop(ctx context.Context, reqs <-chan request) {
 					s.log.Warn("scan failed", "err", err)
 				}
 			case reqSnapshot:
+				if !s.keepHistory {
+					continue
+				}
 				if _, err := s.model.Cut(ctx); err != nil {
 					s.log.Warn("snapshot failed", "err", err)
 				}

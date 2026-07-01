@@ -3,6 +3,7 @@ package syncengine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,6 +74,95 @@ func TestEncryptedSnapshotRootMatchesPlaintext(t *testing.T) {
 
 	if got, want := sealed.currentRoot(t), plain.currentRoot(t); got != want {
 		t.Fatalf("encrypted root %s != plaintext root %s", got, want)
+	}
+}
+
+// TestReplicaPromotesSupersededHistory checks the replica side of promote-on-
+// supersede: when a pulled edit supersedes a version the replica's snapshot still
+// keeps, that version's chunk is promoted out of its plaintext clone into sealed
+// history, while a keyed read still restores it.
+func TestReplicaPromotesSupersededHistory(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	replica := newPeer(t, replicaID)
+	key := testKey(0x5A)
+	encrypt(&owner, key)
+	encrypt(&replica, key)
+
+	const v1 = "the first version of the file contents"
+	writeFile(t, owner.root, "a.txt", []byte(v1))
+	owner.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSync(t, ctx, owner, replica)
+	waitConverged(t, owner, replica)
+
+	// The replica snapshots the first version, pinning it as history, and holds it
+	// as a plaintext clone (a keyless read works).
+	if _, err := replica.model.Cut(context.Background()); err != nil {
+		t.Fatalf("replica Cut: %v", err)
+	}
+	v1chunk := hasher.Sum([]byte(v1))
+	if _, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{}, v1chunk); err != nil {
+		t.Fatalf("replica keyless Get of v1 clone: %v", err)
+	}
+
+	// The owner edits; the replica pulls the new version and promotes the superseded
+	// v1 chunk into sealed history.
+	writeFile(t, owner.root, "a.txt", []byte("a second, completely different set of file contents"))
+	owner.scan(t)
+	waitConverged(t, owner, replica)
+
+	waitFor(t, convergeTimeout, "replica to promote v1 into sealed history", func() bool {
+		_, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{}, v1chunk)
+		return errors.Is(err, chunkstore.ErrNoKey)
+	})
+	got, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{Encrypted: true, MasterKey: key}, v1chunk)
+	if err != nil || string(got) != v1 {
+		t.Fatalf("keyed Get of promoted v1: err=%v", err)
+	}
+}
+
+// TestReplicaPromotesDeletedHistory checks the deletion path of promote-on-supersede:
+// a tombstone still carries the deleted file's chunks, so a pulled delete must promote
+// the snapshot-pinned chunks the deletion drops, not treat the version as unchanged.
+func TestReplicaPromotesDeletedHistory(t *testing.T) {
+	owner := newPeer(t, ownerID)
+	replica := newPeer(t, replicaID)
+	key := testKey(0x3C)
+	encrypt(&owner, key)
+	encrypt(&replica, key)
+
+	const v1 = "the only version this file will ever have before deletion"
+	writeFile(t, owner.root, "a.txt", []byte(v1))
+	owner.scan(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSync(t, ctx, owner, replica)
+	waitConverged(t, owner, replica)
+
+	if _, err := replica.model.Cut(context.Background()); err != nil {
+		t.Fatalf("replica Cut: %v", err)
+	}
+	v1chunk := hasher.Sum([]byte(v1))
+	if _, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{}, v1chunk); err != nil {
+		t.Fatalf("replica keyless Get of v1 clone: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(owner.root, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	owner.scan(t)
+	waitConverged(t, owner, replica)
+
+	waitFor(t, convergeTimeout, "replica to promote the deleted file's chunk into sealed history", func() bool {
+		_, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{}, v1chunk)
+		return errors.Is(err, chunkstore.ErrNoKey)
+	})
+	got, err := replica.chunks.Get(context.Background(), chunkstore.FolderContext{Encrypted: true, MasterKey: key}, v1chunk)
+	if err != nil || string(got) != v1 {
+		t.Fatalf("keyed Get of promoted deleted chunk: err=%v", err)
 	}
 }
 

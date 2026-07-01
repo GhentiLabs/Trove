@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
 
@@ -39,10 +40,17 @@ func (s *Scanner) detectDeletions(ctx context.Context) error {
 			s.log.Warn("rescan lstat", "path", path, "err", statErr)
 		}
 	}
+	var superseded []hasher.ChunkID
 	for _, path := range missing {
-		if _, err := s.model.DeleteManifest(ctx, path); err != nil && !errors.Is(err, model.ErrManifestNotFound) {
-			s.log.Warn("rescan tombstone", "path", path, "err", err)
+		old := s.priorChunks(ctx, path) // read before the tombstone clears the manifest
+		if _, err := s.model.DeleteManifest(ctx, path); err != nil {
+			if !errors.Is(err, model.ErrManifestNotFound) {
+				s.log.Warn("rescan tombstone", "path", path, "err", err)
+			}
+			continue
 		}
+		superseded = append(superseded, old...)
 	}
+	s.promoteSuperseded(ctx, superseded)
 	return ctx.Err()
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/GhentiLabs/Trove/client/internal/hasher"
 	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 )
@@ -17,13 +18,16 @@ import (
 // syncStagingDir is the sync engine's staging directory, excluded from ingestion.
 const syncStagingDir = ".trove-tmp"
 
-// scanResult is one path's outcome from a worker.
+// scanResult is one path's outcome from a worker. oldChunks holds the chunk ids of
+// the path's prior version, so the committer can promote any that this change
+// supersedes out of their clone into deduplicated history.
 type scanResult struct {
-	rel     string
-	m       manifest.Manifest
-	md      model.Metadata
-	deleted bool
-	skip    bool
+	rel       string
+	m         manifest.Manifest
+	md        model.Metadata
+	oldChunks []hasher.ChunkID
+	deleted   bool
+	skip      bool
 }
 
 // ScanAll walks the whole folder and ingests every changed path. It does not
@@ -63,11 +67,12 @@ func (s *Scanner) ingest(ctx context.Context, paths iter.Seq[string]) error {
 		})
 	}
 
+	var superseded []hasher.ChunkID
 	committed := make(chan struct{})
 	go func() {
 		defer close(committed)
 		for res := range resCh {
-			s.commit(ctx, res)
+			superseded = append(superseded, s.commit(ctx, res)...)
 		}
 	}()
 
@@ -86,6 +91,10 @@ func (s *Scanner) ingest(ctx context.Context, paths iter.Seq[string]) error {
 	workers.Wait()
 	close(resCh)
 	<-committed
+	// Promote once for the whole scan, after every manifest is committed: a chunk
+	// that merely moved between two files in this scan is still current and is not
+	// promoted, and the per-chunk work does not stall the commit pipeline.
+	s.promoteSuperseded(ctx, superseded)
 	return ctx.Err()
 }
 
@@ -119,7 +128,7 @@ func (s *Scanner) process(ctx context.Context, rel string) scanResult {
 	fi, err := os.Lstat(abs)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return scanResult{rel: rel, deleted: true}
+		return scanResult{rel: rel, deleted: true, oldChunks: s.priorChunks(ctx, rel)}
 	case err != nil:
 		s.log.Warn("lstat", "path", rel, "err", err)
 		return scanResult{skip: true}
@@ -150,7 +159,25 @@ func (s *Scanner) process(ctx context.Context, rel string) scanResult {
 		}
 		m.SymlinkTarget = target
 	}
-	return scanResult{rel: rel, m: m, md: model.Metadata{Mtime: fi.ModTime(), Size: fi.Size(), Inode: inode(fi)}}
+	return scanResult{rel: rel, m: m, md: model.Metadata{Mtime: fi.ModTime(), Size: fi.Size(), Inode: inode(fi)}, oldChunks: s.priorChunks(ctx, rel)}
+}
+
+// priorChunks returns the chunk ids of the path's current manifest, or nil if the
+// path is new. Used to find which chunks a change supersedes; skipped entirely for
+// a sync-only folder, which keeps no history to promote.
+func (s *Scanner) priorChunks(ctx context.Context, rel string) []hasher.ChunkID {
+	if !s.keepHistory {
+		return nil
+	}
+	rec, err := s.model.GetManifest(ctx, rel)
+	switch {
+	case errors.Is(err, model.ErrManifestNotFound):
+		return nil
+	case err != nil:
+		s.log.Warn("prior manifest", "path", rel, "err", err)
+		return nil
+	}
+	return chunkIDs(rec.Manifest.Chunks)
 }
 
 // chunkFile stores abs as a clone and returns its ordered chunk references.
@@ -158,19 +185,57 @@ func (s *Scanner) chunkFile(ctx context.Context, abs string) ([]manifest.ChunkRe
 	return s.chunks.IngestClone(ctx, abs)
 }
 
-func (s *Scanner) commit(ctx context.Context, res scanResult) {
+// commit applies one path's outcome and returns the chunk ids this change drops
+// from the path's prior version (none for a new path or a skip), for the caller to
+// promote in one batch after the scan.
+func (s *Scanner) commit(ctx context.Context, res scanResult) []hasher.ChunkID {
 	switch {
 	case res.skip:
-		return
+		return nil
 	case res.deleted:
-		if _, err := s.model.DeleteManifest(ctx, res.rel); err != nil && !errors.Is(err, model.ErrManifestNotFound) {
-			s.log.Warn("tombstone", "path", res.rel, "err", err)
+		if _, err := s.model.DeleteManifest(ctx, res.rel); err != nil {
+			if !errors.Is(err, model.ErrManifestNotFound) {
+				s.log.Warn("tombstone", "path", res.rel, "err", err)
+			}
+			return nil
 		}
+		return res.oldChunks
 	default:
 		if _, err := s.model.PutManifest(ctx, res.m, res.md); err != nil {
 			s.log.Warn("put manifest", "path", res.rel, "err", err)
+			return nil
 		}
+		return hasher.SetMinus(res.oldChunks, chunkIDs(res.m.Chunks))
 	}
+}
+
+// promoteSuperseded moves the superseded chunks a retained snapshot still keeps out
+// of their clone into deduplicated history. Chunks still in a current file, or kept
+// by no snapshot, are left alone. A sync-only folder keeps no history, so nothing
+// is promoted.
+func (s *Scanner) promoteSuperseded(ctx context.Context, superseded []hasher.ChunkID) {
+	if !s.keepHistory || len(superseded) == 0 {
+		return
+	}
+	history, err := s.model.SupersededHistory(ctx, superseded)
+	if err != nil {
+		s.log.Warn("superseded history", "err", err)
+		return
+	}
+	if len(history) == 0 {
+		return
+	}
+	if _, err := s.chunks.Promote(ctx, s.fc, history); err != nil {
+		s.log.Warn("promote history", "err", err)
+	}
+}
+
+func chunkIDs(refs []manifest.ChunkRef) []hasher.ChunkID {
+	ids := make([]hasher.ChunkID, len(refs))
+	for i, r := range refs {
+		ids[i] = r.ID
+	}
+	return ids
 }
 
 func classify(m fs.FileMode) (manifest.Kind, bool) {
