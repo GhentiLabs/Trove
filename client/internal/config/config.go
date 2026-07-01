@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS folders (
 	holder_verifier BLOB,
 	recovery_secret BLOB,
 	keep_history    INTEGER NOT NULL DEFAULT 1,
+	quota_bytes     INTEGER NOT NULL DEFAULT 0,
 	CHECK (holder = 0 OR encrypted = 1)
 );`
 
@@ -85,6 +86,8 @@ type Folder struct {
 	// folder is sync-only: no snapshots, so superseded data is reclaimed and the
 	// folder stays at ~1x disk.
 	KeepHistory bool
+	// QuotaBytes caps the storage this node lends the folder; 0 means unlimited.
+	QuotaBytes int64
 }
 
 // Store is the config database handle.
@@ -169,8 +172,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 			return fmt.Errorf("config: check folder: %w", err)
 		}
 		_, err = tx.Exec(ctx,
-			`INSERT INTO folders (id, root, encrypted, created_ms, share_id, holder, keep_history) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID, f.Holder, f.KeepHistory)
+			`INSERT INTO folders (id, root, encrypted, created_ms, share_id, holder, keep_history, quota_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			f.ID, f.Root, f.Encrypted, time.Now().UnixMilli(), f.ShareID, f.Holder, f.KeepHistory, f.QuotaBytes)
 		if err != nil {
 			return fmt.Errorf("config: add folder: %w", err)
 		}
@@ -181,8 +184,8 @@ func (s *Store) AddFolder(ctx context.Context, f Folder) error {
 // GetFolder returns the folder with the given id.
 func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 	var f Folder
-	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id, holder, keep_history FROM folders WHERE id = ?`, id).
-		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder, &f.KeepHistory)
+	err := s.db.QueryRow(ctx, `SELECT id, root, encrypted, share_id, holder, keep_history, quota_bytes FROM folders WHERE id = ?`, id).
+		Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder, &f.KeepHistory, &f.QuotaBytes)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Folder{}, ErrFolderNotFound
@@ -194,7 +197,7 @@ func (s *Store) GetFolder(ctx context.Context, id string) (Folder, error) {
 
 // ListFolders returns all registered folders ordered by id.
 func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id, holder, keep_history FROM folders ORDER BY id`)
+	rows, err := s.db.Query(ctx, `SELECT id, root, encrypted, share_id, holder, keep_history, quota_bytes FROM folders ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("config: list folders: %w", err)
 	}
@@ -203,7 +206,7 @@ func (s *Store) ListFolders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
 	for rows.Next() {
 		var f Folder
-		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder, &f.KeepHistory); err != nil {
+		if err := rows.Scan(&f.ID, &f.Root, &f.Encrypted, &f.ShareID, &f.Holder, &f.KeepHistory, &f.QuotaBytes); err != nil {
 			return nil, fmt.Errorf("config: scan folder: %w", err)
 		}
 		out = append(out, f)

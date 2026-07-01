@@ -115,7 +115,7 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 			return nil, fmt.Errorf("node: open model db %q: %w", dir, err)
 		}
 		rt.closers = append(rt.closers, mdb.Close)
-		ms, err := model.Open(model.Options{DB: mdb, NodeID: s.opts.NodeID})
+		ms, err := model.Open(model.Options{DB: mdb, NodeID: s.opts.NodeID, QuotaBytes: f.QuotaBytes})
 		if err != nil {
 			return nil, fmt.Errorf("node: open model %q: %w", f.ShareID, err)
 		}

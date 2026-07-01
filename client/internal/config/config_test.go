@@ -118,6 +118,39 @@ func TestFolderKeepHistory(t *testing.T) {
 	}
 }
 
+func TestFolderQuotaBytes(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+
+	if err := s.AddFolder(ctx, Folder{ID: "capped", Root: "/c", QuotaBytes: 10 << 30}); err != nil {
+		t.Fatalf("AddFolder capped: %v", err)
+	}
+	if err := s.AddFolder(ctx, Folder{ID: "open", Root: "/o"}); err != nil {
+		t.Fatalf("AddFolder open: %v", err)
+	}
+
+	if got, err := s.GetFolder(ctx, "capped"); err != nil || got.QuotaBytes != 10<<30 {
+		t.Fatalf("GetFolder(capped).QuotaBytes = %d err=%v, want %d", got.QuotaBytes, err, int64(10<<30))
+	}
+	if got, err := s.GetFolder(ctx, "open"); err != nil || got.QuotaBytes != 0 {
+		t.Fatalf("GetFolder(open).QuotaBytes = %d err=%v, want 0", got.QuotaBytes, err)
+	}
+
+	list, err := s.ListFolders(ctx)
+	if err != nil {
+		t.Fatalf("ListFolders: %v", err)
+	}
+	for _, f := range list {
+		want := int64(0)
+		if f.ID == "capped" {
+			want = 10 << 30
+		}
+		if f.QuotaBytes != want {
+			t.Fatalf("ListFolders %q QuotaBytes = %d, want %d", f.ID, f.QuotaBytes, want)
+		}
+	}
+}
+
 func TestFolderKeys(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
