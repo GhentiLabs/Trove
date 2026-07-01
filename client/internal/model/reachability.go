@@ -90,11 +90,16 @@ func (s *Store) SupersededHistory(ctx context.Context, candidates []hasher.Chunk
 // distinct chunks referenced by the current live manifests. Deduplicated content
 // is counted once.
 func (s *Store) LogicalBytes(ctx context.Context) (int64, error) {
+	return s.logicalBytesFor(ctx, `SELECT manifest_id FROM manifests WHERE deleted = 0`)
+}
+
+// logicalBytesFor sums the distinct plaintext chunk lengths the selected manifests reference.
+func (s *Store) logicalBytesFor(ctx context.Context, manifestIDs string) (int64, error) {
 	var total int64
 	err := s.db.QueryRow(ctx,
 		`SELECT COALESCE(SUM(length), 0) FROM (
 			SELECT length FROM manifest_chunks
-			WHERE manifest_id IN (SELECT manifest_id FROM manifests WHERE deleted = 0)
+			WHERE manifest_id IN (`+manifestIDs+`)
 			GROUP BY chunk_id
 		)`).Scan(&total)
 	if err != nil {

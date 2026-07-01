@@ -91,6 +91,9 @@ func (s *Scanner) ingest(ctx context.Context, paths iter.Seq[string]) error {
 	workers.Wait()
 	close(resCh)
 	<-committed
+	if err := s.model.PruneHistoryToFit(ctx); err != nil && !errors.Is(err, model.ErrQuotaExceeded) {
+		s.log.Warn("prune history to fit quota", "err", err)
+	}
 	// Promote once for the whole scan, after every manifest is committed: a chunk
 	// that merely moved between two files in this scan is still current and is not
 	// promoted, and the per-chunk work does not stall the commit pipeline.

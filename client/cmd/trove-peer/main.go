@@ -10,9 +10,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -141,17 +144,70 @@ func cmdIdentity(args []string) error {
 	return nil
 }
 
+// parseSize parses a byte count with an optional KB/MB/GB/TB suffix (1000-based); a bare
+// number is bytes and "" or "0" is unlimited.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	unit := int64(1)
+	if len(s) >= 2 {
+		switch strings.ToLower(s[len(s)-2:]) {
+		case "kb":
+			unit = 1e3
+		case "mb":
+			unit = 1e6
+		case "gb":
+			unit = 1e9
+		case "tb":
+			unit = 1e12
+		}
+		if unit != 1 {
+			s = strings.TrimSpace(s[:len(s)-2])
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid size %q: want a whole number optionally suffixed KB/MB/GB/TB", s)
+	}
+	if n > math.MaxInt64/unit {
+		return 0, fmt.Errorf("size %q overflows", s)
+	}
+	return n * unit, nil
+}
+
+func formatSize(n int64) string {
+	switch {
+	case n >= 1e12:
+		return fmt.Sprintf("%.1fTB", float64(n)/1e12)
+	case n >= 1e9:
+		return fmt.Sprintf("%.1fGB", float64(n)/1e9)
+	case n >= 1e6:
+		return fmt.Sprintf("%.1fMB", float64(n)/1e6)
+	case n >= 1e3:
+		return fmt.Sprintf("%.1fKB", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
+}
+
 func cmdFound(args []string) error {
 	fs := flag.NewFlagSet("found", flag.ContinueOnError)
 	dir := fs.String("dir", ".trove", "state directory")
 	root := fs.String("root", "", "local folder root to share")
 	encrypted := fs.Bool("encrypted", false, "encrypt the folder at rest and on untrusted holders")
 	syncOnly := fs.Bool("sync", false, "sync-only: keep no version history, stay at ~1x disk (default keeps history)")
+	quota := fs.String("quota", "", "max storage this node lends the folder, e.g. 10GB or 500MB (default unlimited)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *root == "" {
 		return errors.New("found: -root is required")
+	}
+	quotaBytes, err := parseSize(*quota)
+	if err != nil {
+		return fmt.Errorf("found: -quota: %w", err)
 	}
 	p, err := openPeer(*dir)
 	if err != nil {
@@ -163,7 +219,7 @@ func cmdFound(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted, KeepHistory: !*syncOnly}); err != nil {
+	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted, KeepHistory: !*syncOnly, QuotaBytes: quotaBytes}); err != nil {
 		return err
 	}
 	fmt.Println("group id:", group)
@@ -230,6 +286,7 @@ func cmdJoin(args []string) error {
 	encrypted := fs.Bool("encrypted", false, "the folder is encrypted; await the key over the session")
 	holderFlag := fs.Bool("holder", false, "join as a holder: store ciphertext only, no root or key")
 	syncOnly := fs.Bool("sync", false, "sync-only: this node keeps no version history for the folder, staying at ~1x disk")
+	quota := fs.String("quota", "", "max storage this node lends the folder, e.g. 10GB or 500MB (default unlimited)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -238,6 +295,10 @@ func cmdJoin(args []string) error {
 	}
 	if !*holderFlag && *root == "" {
 		return errors.New("join: -root is required")
+	}
+	quotaBytes, err := parseSize(*quota)
+	if err != nil {
+		return fmt.Errorf("join: -quota: %w", err)
 	}
 	if _, ok := membership.Founder(*group); !ok {
 		return fmt.Errorf("join: %q is not a valid group id", *group)
@@ -251,7 +312,7 @@ func cmdJoin(args []string) error {
 	if err := p.members.Join(ctx, *group); err != nil {
 		return err
 	}
-	folder := config.Folder{ID: *group, Root: *root, ShareID: *group, Encrypted: *encrypted || *holderFlag, Holder: *holderFlag, KeepHistory: !*syncOnly}
+	folder := config.Folder{ID: *group, Root: *root, ShareID: *group, Encrypted: *encrypted || *holderFlag, Holder: *holderFlag, KeepHistory: !*syncOnly, QuotaBytes: quotaBytes}
 	switch err := p.cfg.AddFolder(ctx, folder); {
 	case err == nil, errors.Is(err, config.ErrFolderExists):
 	default:
@@ -351,14 +412,14 @@ func cmdStatus(args []string) error {
 			role = "owner"
 		}
 		fmt.Printf("\nfolder %s (%s)\n  root: %s\n", f.ShareID, role, f.Root)
-		if err := printFolderReceipts(ctx, *dir, f.ID, nodeID); err != nil {
+		if err := printFolderReceipts(ctx, *dir, f.ID, nodeID, f.QuotaBytes); err != nil {
 			fmt.Printf("  receipts: unavailable (%v)\n", err)
 		}
 	}
 	return nil
 }
 
-func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string) error {
+func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string, quota int64) error {
 	path := filepath.Join(dir, "folders", folderID, "model.db")
 	if _, err := os.Stat(path); err != nil {
 		fmt.Println("  not yet synced")
@@ -373,6 +434,15 @@ func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string) erro
 	if err != nil {
 		return err
 	}
+	used, err := ms.ReachableLogicalBytes(ctx)
+	if err != nil {
+		return err
+	}
+	limit := "unlimited"
+	if quota > 0 {
+		limit = formatSize(quota)
+	}
+	fmt.Printf("  storage: %s / %s\n", formatSize(used), limit)
 	receipts, err := ms.Receipts(ctx, model.LocalSync)
 	if err != nil {
 		return err

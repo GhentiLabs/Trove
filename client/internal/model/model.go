@@ -133,8 +133,9 @@ type querier interface {
 
 // Store is the sync-state database handle.
 type Store struct {
-	db   *storage.DB
-	node string
+	db    *storage.DB
+	node  string
+	quota int64 // reachable-logical-bytes cap for the folder; 0 = unlimited
 
 	// applyMu serializes a remote apply against local origination, so a concurrent scan
 	// cannot change a path's version between the resolve and the commit.
@@ -168,6 +169,8 @@ type Options struct {
 	// NodeID is this node's identity. It is persisted on first open and verified
 	// on every subsequent open.
 	NodeID string
+	// QuotaBytes caps the reachable logical bytes for the folder; 0 means unlimited.
+	QuotaBytes int64
 }
 
 // Open ensures the schema, checks the version, and binds the database to NodeID.
@@ -178,7 +181,7 @@ func Open(opts Options) (*Store, error) {
 	if opts.NodeID == "" {
 		return nil, errors.New("model: empty node id")
 	}
-	s := &Store{db: opts.DB, node: opts.NodeID}
+	s := &Store{db: opts.DB, node: opts.NodeID, quota: opts.QuotaBytes}
 	if err := s.init(context.Background()); err != nil {
 		return nil, err
 	}
