@@ -326,9 +326,22 @@ The engine is designed N-aware and conflict-aware throughout, but **execution sh
 3. **Delete-vs-edit is edit-wins in place** (the edit stays at the real path, the delete is dropped) rather than resurrect-as-conflict-copy — the simpler deterministic rule that still never loses data.
 4. **The conflict timestamp is wall-clock + node_id** (HLC deferred until measured skew shows wrong-winner picks); a `sent_ms` field on `FolderSummary` measures inter-node skew to drive that decision.
 
-**M6 — Trust + encryption modes.** Trusted/untrusted per peer, convergent vs random keys, wire-form selection, key management + recovery key. *Accept:* an untrusted peer stores only ciphertext and can serve it back; a trusted peer reads plaintext; lost-key path documented.
+**M6 — Trust + encryption modes.** ✅ *Built (#9, #10, #11).* Trusted/untrusted tiers, convergent keys, wire-form selection, key delivery, recovery. *Accept (met):* a holder stores and serves back only sealed ciphertext under blinded ids and never receives the folder key; a trusted member reads plaintext; the lost-key path is a recovery code printed at `found`, proven end to end by the e2e `holder-gate` and both `recovery-gate` cells (encrypted and plaintext).
 
-**M7 — Policy & operations.** Modes (history/backup/one-way drop+re-pull), retention/pruning, quota enforcement, local control API. *Accept:* retention prunes + GC reclaims; quota rejects over-cap; restore from an old snapshot is bit-exact.
+*Deviations from this blueprint (deliberate, reviewed):*
+1. **Trust is a membership tier, not a per-peer flag.** Untrusted storage is the `holder` role on the M4 folder-as-group roster (`invite -holder`), not a per-peer trusted/untrusted toggle; the trust flag drives the same encryption-mode and wire-form decisions §4 and §7.4 describe.
+2. **The holder tier was productionized beyond the sketch:** a content-addressed catalog with a tiny pointer blob as the atomic commit, stateless batched-HAS reconciliation (no durable per-holder bookkeeping), parallel chunk push over QUIC streams, a live mirror that re-pushes on change through a coalescing single-flight, and writer-driven garbage collection of superseded blobs. See `docs/m6-holder-productionization-design.md`.
+3. **Recovery is verifier-proven and works from any node.** A holder authorizes a read-only restore to anyone proving knowledge of the folder key via its verifier (Model B), so recovery does not require a trusted peer online; `trove-peer restore` is the explicit command. Unencrypted folders gained a recovery secret (delivered writer-to-member) so they are recoverable the same way.
+4. **Recovery codes are the whole key-management surface**: base32 of the master key (or recovery secret) printed at `found`, re-entered at `restore`. No separate key-escrow mechanism shipped.
+
+**M7 — Policy & operations.** ✅ *Built (#13, #14, #16).* Storage modes, retention, quota enforcement. *Accept (met):* retention prunes and GC reclaims (snapshot forget → sweep → blob/clone reclaim); quota is enforced by oldest-first history pruning with a typed `ErrQuotaExceeded` when current data alone exceeds the cap; restore from an old snapshot is bit-exact; the e2e `history-gate`, `sync-mode-gate`, and `quota-gate` cells prove each over real holepunch.
+
+*Deviations from this blueprint (deliberate, reviewed):*
+1. **1× storage is reflink/CoW clones, not virtual backing.** Current data is stored as copy-on-write clones of the working files (`clonefile`/`FICLONE`, with a physical-copy fallback), which survive in-place overwrites without a `Promote`-before-write; the §1.4 virtual-pointer machinery was pruned as unused. See `docs/m7-storage-optimization-design.md`.
+2. **History is packed first-party at the moment of change** (promote-on-supersede): superseded chunks a retained snapshot still pins are lifted from the clone into deduped pack blobs during ingest/apply, not by a deferred compaction pass. A consequence: clones (current data) are plaintext at rest even in encrypted folders; history packs, transit, and holder blobs stay sealed.
+3. **Modes are `KeepHistory` backup vs sync-only**, chosen by the data owner at `found`/`join` (`-sync`), replacing §9's four-mode list; one-way drop+re-pull did not ship as a mode.
+4. **Quota is per node** — a cap on what this node lends (`QuotaBytes` per folder, `PruneHistoryToFit` in the model), not a group-wide policy.
+5. **The local control API shipped separately, as the start of M8**: the daemon serves a control socket (`<state-dir>/control.sock`) that the CLI drives, so folder mutations (found/join/invite/quota/remove) take effect on the running daemon without a restart.
 
 **M8 — Surface & hardening.** Web UI (P2P-pure), Linux support, parallel-transfer tuning, then the deterministic simulation harness (§13.4). I think i may also build out a rust UI for this. Lets talk and see where we are at here 
 

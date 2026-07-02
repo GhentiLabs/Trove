@@ -18,6 +18,7 @@ import (
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
+	"github.com/GhentiLabs/Trove/client/internal/gc"
 	"github.com/GhentiLabs/Trove/client/internal/holder"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/model"
@@ -40,6 +41,9 @@ type syncRuntime struct {
 	holders map[string]*holder.Store
 	byShare map[string]config.Folder
 	closers []func() error
+	// reload asynchronously rebuilds the sync stack; set by the service so a
+	// delivered folder key starts the folder's scanner without a restart.
+	reload func()
 }
 
 // effectiveRole returns nodeID's role in groupID, treating the founder as a writer
@@ -79,7 +83,11 @@ func (s *Service) buildSyncRuntime(ctx context.Context) (*syncRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &syncRuntime{self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, log: s.log, byShare: map[string]config.Folder{}, holders: map[string]*holder.Store{}}
+	rt := &syncRuntime{
+		self: s.opts.NodeID, members: s.members, cfg: s.opts.Config, log: s.log,
+		byShare: map[string]config.Folder{}, holders: map[string]*holder.Store{},
+		reload: func() { s.triggerReload(ctx) },
+	}
 	ok := false
 	defer func() {
 		if !ok {
@@ -666,6 +674,9 @@ func (rt *syncRuntime) receiveFolderKey(ctx context.Context, log *slog.Logger, p
 	switch err := rt.cfg.DeliverFolderKey(ctx, cf.ID, key, int(fk.GetKeyGeneration())); {
 	case err == nil:
 		log.Info("node: folder key received; reattaching", "folder", cf.ShareID, "peer", peerID)
+		if rt.reload != nil {
+			rt.reload()
+		}
 		return errReattachAfterKey
 	case errors.Is(err, config.ErrKeyExists):
 		return nil
@@ -746,6 +757,42 @@ func (rt *syncRuntime) sweepTombstones(ctx context.Context, log *slog.Logger) {
 	}
 }
 
+const chunkSweepInterval = time.Hour
+
+// runGCSweeper periodically reclaims each synced folder's unreachable, past-grace
+// chunks until ctx ends. Holder folders are excluded: their blobs are collected
+// writer-driven via holder.Collect.
+func (rt *syncRuntime) runGCSweeper(ctx context.Context, log *slog.Logger) {
+	if len(rt.folders) == 0 {
+		return
+	}
+	t := time.NewTicker(chunkSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rt.sweepChunks(ctx, log, time.Now())
+		}
+	}
+}
+
+// sweepChunks runs one mark-and-sweep over each folder with now as the mark point.
+func (rt *syncRuntime) sweepChunks(ctx context.Context, log *slog.Logger, now time.Time) {
+	for _, fc := range rt.folders {
+		res, err := gc.Sweep(ctx, fc.Model, fc.Chunks, gc.DefaultGraceAge, now)
+		if err != nil {
+			log.Warn("node: chunk gc", "folder", fc.FolderID, "err", err)
+			continue
+		}
+		if res != (gc.Result{}) {
+			log.Info("node: chunk gc reclaimed", "folder", fc.FolderID,
+				"chunks", res.ChunksDeleted, "blobs", res.BlobsReclaimed, "objects", res.ObjectsReclaimed)
+		}
+	}
+}
+
 // runScanners maintains each owned folder's model from disk until ctx ends. A folder
 // this node only reads is never scanned, so it never originates.
 func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
@@ -762,7 +809,7 @@ func (rt *syncRuntime) runScanners(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		if fctx.Encrypted && fctx.MasterKey == zeroKey {
-			log.Info("node: scanner awaiting folder key; restart after it is delivered", "folder", fc.FolderID)
+			log.Info("node: scanner awaiting folder key", "folder", fc.FolderID)
 			continue
 		}
 		w, err := watcher.New(fc.Root)
