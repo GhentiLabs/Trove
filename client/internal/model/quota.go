@@ -19,14 +19,15 @@ func (s *Store) ReachableLogicalBytes(ctx context.Context) (int64, error) {
 // so it returns ErrQuotaExceeded when current data alone exceeds the quota. A no-op when
 // the quota is unlimited (<= 0) or the data already fits.
 func (s *Store) PruneHistoryToFit(ctx context.Context) error {
-	if s.quota <= 0 {
+	quota := s.quota.Load()
+	if quota <= 0 {
 		return nil
 	}
 	used, err := s.ReachableLogicalBytes(ctx)
 	if err != nil {
 		return err
 	}
-	if used <= s.quota {
+	if used <= quota {
 		return nil
 	}
 	snaps, err := s.ListSnapshots(ctx)
@@ -42,7 +43,7 @@ func (s *Store) PruneHistoryToFit(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if used <= s.quota {
+		if used <= quota {
 			return nil
 		}
 	}

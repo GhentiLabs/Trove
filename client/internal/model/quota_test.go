@@ -25,7 +25,7 @@ func TestReachableLogicalBytes(t *testing.T) {
 
 func TestPruneHistoryToFitNoop(t *testing.T) {
 	s := newStore(t)
-	s.quota = 100
+	s.SetQuota(100)
 	ctx := context.Background()
 
 	mustPut(t, s, regular("a.txt", "0123456789"), Metadata{Size: 10})
@@ -42,7 +42,7 @@ func TestPruneHistoryToFitNoop(t *testing.T) {
 
 func TestPruneHistoryToFitPrunesOldest(t *testing.T) {
 	s := newStore(t)
-	s.quota = 15
+	s.SetQuota(15)
 	ctx := context.Background()
 
 	mustPut(t, s, regular("a.txt", "AAAAAAAAAA"), Metadata{Size: 10})
@@ -68,7 +68,7 @@ func TestPruneHistoryToFitPrunesOldest(t *testing.T) {
 
 func TestPruneHistoryToFitRejectsAndKeepsCurrent(t *testing.T) {
 	s := newStore(t)
-	s.quota = 15
+	s.SetQuota(15)
 	ctx := context.Background()
 
 	mustPut(t, s, regular("a.txt", "AAAAAAAAAA"), Metadata{Size: 10})
@@ -123,7 +123,7 @@ func TestPruneHistoryToFitToleratesRecurringRoot(t *testing.T) {
 		t.Fatalf("want 3 snapshots including a recurring root, got %d", len(snaps))
 	}
 
-	s.quota = 5
+	s.SetQuota(5)
 	if err := s.PruneHistoryToFit(ctx); !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("PruneHistoryToFit err = %v, want ErrQuotaExceeded", err)
 	}

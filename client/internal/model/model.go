@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/storage"
@@ -135,7 +136,7 @@ type querier interface {
 type Store struct {
 	db    *storage.DB
 	node  string
-	quota int64 // reachable-logical-bytes cap for the folder; 0 = unlimited
+	quota atomic.Int64 // reachable-logical-bytes cap for the folder; 0 = unlimited
 
 	// applyMu serializes a remote apply against local origination, so a concurrent scan
 	// cannot change a path's version between the resolve and the commit.
@@ -181,12 +182,17 @@ func Open(opts Options) (*Store, error) {
 	if opts.NodeID == "" {
 		return nil, errors.New("model: empty node id")
 	}
-	s := &Store{db: opts.DB, node: opts.NodeID, quota: opts.QuotaBytes}
+	s := &Store{db: opts.DB, node: opts.NodeID}
+	s.quota.Store(opts.QuotaBytes)
 	if err := s.init(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
+
+// SetQuota changes the folder's storage cap; 0 means unlimited. It takes effect on
+// the next prune.
+func (s *Store) SetQuota(v int64) { s.quota.Store(v) }
 
 func (s *Store) init(ctx context.Context) error {
 	return s.db.WithTx(ctx, func(tx *storage.Tx) error {

@@ -252,6 +252,17 @@ func (m *Manager) ActiveCount() int {
 	return len(m.sessions)
 }
 
+// Sessions returns the active sessions.
+func (m *Manager) Sessions() []*session.Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*session.Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		out = append(out, s)
+	}
+	return out
+}
+
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

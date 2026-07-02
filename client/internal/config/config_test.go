@@ -151,6 +151,24 @@ func TestFolderQuotaBytes(t *testing.T) {
 	}
 }
 
+func TestSetFolderQuota(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)
+
+	if err := s.AddFolder(ctx, Folder{ID: "f", Root: "/f", QuotaBytes: 100}); err != nil {
+		t.Fatalf("AddFolder: %v", err)
+	}
+	if err := s.SetFolderQuota(ctx, "f", 5<<30); err != nil {
+		t.Fatalf("SetFolderQuota: %v", err)
+	}
+	if got, err := s.GetFolder(ctx, "f"); err != nil || got.QuotaBytes != 5<<30 {
+		t.Fatalf("QuotaBytes = %d err=%v, want %d", got.QuotaBytes, err, int64(5<<30))
+	}
+	if err := s.SetFolderQuota(ctx, "missing", 1); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("SetFolderQuota(missing) err = %v, want ErrFolderNotFound", err)
+	}
+}
+
 func TestFolderKeys(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, openDB(t, filepath.Join(t.TempDir(), "c.db")), testNode)

@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/control"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
 	"github.com/GhentiLabs/Trove/client/internal/discovery"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
@@ -76,6 +79,16 @@ type Service struct {
 
 	sigMu sync.Mutex
 	sig   *discovery.Signaler
+
+	rtMu   sync.Mutex
+	rt     *syncRuntime
+	mgr    *peermgr.Manager
+	reload chan reloadRequest
+
+	// cfgMu serializes control-plane folder mutations, so an invariant checked
+	// against config (the holder/sync mix) cannot be broken by a concurrent
+	// mutation between its check and its commit.
+	cfgMu sync.Mutex
 }
 
 // New binds the transport and builds the discovery client. Call Run to start.
@@ -100,36 +113,37 @@ func New(opts Options) (*Service, error) {
 		client:   client,
 		cache:    discovery.NewCache(),
 		stunAddr: client.ServerAddr(),
+		reload:   make(chan reloadRequest),
 	}, nil
 }
 
 // Run starts discovery, advertising, and the connection manager until ctx is cancelled.
+// The folder-set-scoped stack runs in cycles: requestReload tears the current cycle
+// down and builds the next from config, so folder changes take effect live.
 func (s *Service) Run(ctx context.Context) error {
 	defer s.close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	local, err := s.localConfig(ctx)
-	if err != nil {
-		return err
-	}
-
-	var syncRT *syncRuntime
+	// The control socket binds first: it is the single-instance lock, so it must
+	// be held before anything opens shared state or external connections.
+	var ctrl *http.Server
+	var ctrlLn net.Listener
+	var sockPath string
 	if s.opts.StateDir != "" {
+		var err error
+		ctrlLn, sockPath, err = s.listenControl()
+		if err != nil {
+			return err
+		}
+		ctrl = &http.Server{Handler: control.New(controlBackend{s}, s.log).Handler()}
 		closeMembers, err := s.openMembership()
 		if err != nil {
+			_ = ctrlLn.Close()
+			_ = os.Remove(sockPath)
 			return err
 		}
 		defer func() { _ = closeMembers() }()
-		syncRT, err = s.buildSyncRuntime(ctx)
-		if err != nil {
-			return err
-		}
-		defer syncRT.close()
-		syncRT.repairFolders(ctx, s.log)
-	}
-
-	peers, err := s.peerIDs(ctx)
-	if err != nil {
-		return err
 	}
 
 	// Connect the signaler before the manager starts so the first holepunch round
@@ -149,6 +163,73 @@ func (s *Service) Run(ctx context.Context) error {
 			mdns.Close()
 		}
 	}()
+
+	s.log.Info("node: started", "node_id", s.opts.NodeID, "listen", s.tr.LocalAddr().String())
+
+	var wg sync.WaitGroup
+	if ctrl != nil {
+		wg.Go(func() { _ = ctrl.Serve(ctrlLn) })
+		wg.Go(func() {
+			<-ctx.Done()
+			sctx, cancel := context.WithTimeout(context.Background(), controlShutdownTimeout)
+			defer cancel()
+			// Close hard on timeout so a handler blocked on a dying run loop
+			// cannot strand its client.
+			if err := ctrl.Shutdown(sctx); err != nil {
+				_ = ctrl.Close()
+			}
+			_ = os.Remove(sockPath)
+		})
+	}
+	wg.Go(func() { s.announceLoop(ctx) })
+	wg.Go(func() { s.stunKeepaliveLoop(ctx) })
+	wg.Go(func() { s.browseLoop(ctx) })
+	wg.Go(func() { s.signalLoop(ctx, &wg) })
+	if s.gossip != nil {
+		wg.Go(func() { s.gossipLoop(ctx) })
+	}
+
+	var runErr error
+	for runErr == nil {
+		runErr = s.runSyncCycle(ctx)
+	}
+	cancel()
+	wg.Wait()
+	return runErr
+}
+
+// runSyncCycle builds the folder-set-scoped stack, runs it until ctx ends or a
+// reload is requested, then tears it down in order: cancel sessions and loops,
+// wait for them, close the per-folder stores. Returns nil only on reload.
+func (s *Service) runSyncCycle(ctx context.Context) error {
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var syncRT *syncRuntime
+	if s.opts.StateDir != "" {
+		var err error
+		syncRT, err = s.buildSyncRuntime(cctx)
+		if err != nil {
+			return err
+		}
+		syncRT.repairFolders(cctx, s.log)
+	}
+	closeRT := func() {
+		if syncRT != nil {
+			syncRT.close()
+		}
+	}
+
+	local, err := s.localConfig(cctx)
+	if err != nil {
+		closeRT()
+		return err
+	}
+	peers, err := s.peerIDs(cctx)
+	if err != nil {
+		closeRT()
+		return err
+	}
 
 	ladder := peermgr.NewLadder(peermgr.LadderConfig{
 		Self:       s.opts.NodeID,
@@ -175,26 +256,85 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	mgr, err := peermgr.New(mgrOpts)
 	if err != nil {
+		closeRT()
 		return err
 	}
-
-	s.log.Info("node: started", "node_id", s.opts.NodeID, "listen", s.tr.LocalAddr().String(), "peers", len(peers))
+	s.setRuntime(syncRT, mgr)
+	s.log.Info("node: sync cycle started", "peers", len(peers))
 
 	var wg sync.WaitGroup
-	wg.Go(func() { s.announceLoop(ctx) })
-	wg.Go(func() { s.stunKeepaliveLoop(ctx) })
-	wg.Go(func() { s.browseLoop(ctx) })
-	wg.Go(func() { s.signalLoop(ctx, &wg) })
-	wg.Go(func() { _ = mgr.Run(ctx) })
+	wg.Go(func() { _ = mgr.Run(cctx) })
 	if syncRT != nil {
-		wg.Go(func() { syncRT.runScanners(ctx, s.log) })
-		wg.Go(func() { syncRT.runTombstoneSweeper(ctx, s.log) })
+		wg.Go(func() { syncRT.runScanners(cctx, s.log) })
+		wg.Go(func() { syncRT.runTombstoneSweeper(cctx, s.log) })
+		wg.Go(func() { syncRT.runGCSweeper(cctx, s.log) })
 	}
-	if s.gossip != nil {
-		wg.Go(func() { s.gossipLoop(ctx) })
+
+	var req reloadRequest
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+	case req = <-s.reload:
+		s.log.Info("node: reloading folder config")
 	}
+	s.setRuntime(nil, nil)
+	cancel()
 	wg.Wait()
-	return ctx.Err()
+	closeRT()
+	if req.done != nil {
+		close(req.done)
+	}
+	return err
+}
+
+// reloadRequest asks the run loop to rebuild the sync stack; done closes when the
+// old stack is fully torn down (per-folder stores closed).
+type reloadRequest struct{ done chan struct{} }
+
+// requestReload rebuilds the sync stack from config. It returns once the previous
+// stack is torn down; the caller observes the new stack through Status.
+func (s *Service) requestReload(ctx context.Context) error {
+	req := reloadRequest{done: make(chan struct{})}
+	select {
+	case s.reload <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-req.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// triggerReload requests a rebuild without waiting for it, for callers inside
+// the sync stack where a synchronous wait would deadlock the teardown. An
+// aborted send is fine: ctx ending means a teardown (and rebuild from fresh
+// config) is already underway.
+func (s *Service) triggerReload(ctx context.Context) {
+	go func() {
+		select {
+		case s.reload <- reloadRequest{}:
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func (s *Service) setRuntime(rt *syncRuntime, mgr *peermgr.Manager) {
+	s.rtMu.Lock()
+	s.rt, s.mgr = rt, mgr
+	s.rtMu.Unlock()
+}
+
+// withRuntime runs fn with the current cycle's runtime (nil while rebuilding or
+// when StateDir is empty), holding the lock so a teardown cannot close the
+// per-folder stores mid-query. fn must not call requestReload: the cycle needs
+// this lock to clear the runtime before it acks.
+func (s *Service) withRuntime(fn func(rt *syncRuntime, mgr *peermgr.Manager) error) error {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	return fn(s.rt, s.mgr)
 }
 
 func (s *Service) announceLoop(ctx context.Context) {

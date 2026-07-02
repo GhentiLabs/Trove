@@ -8,11 +8,16 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/chunkstore"
 	"github.com/GhentiLabs/Trove/client/internal/config"
 	"github.com/GhentiLabs/Trove/client/internal/crypto"
+	"github.com/GhentiLabs/Trove/client/internal/gc"
+	"github.com/GhentiLabs/Trove/client/internal/hasher"
+	"github.com/GhentiLabs/Trove/client/internal/manifest"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
+	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/storage"
 	"github.com/GhentiLabs/Trove/client/internal/syncengine"
 	"github.com/GhentiLabs/Trove/client/internal/wire/wirepb"
@@ -432,5 +437,110 @@ func TestReceiveRecoverySecret(t *testing.T) {
 	}
 	if _, err := cfg2.FolderSecret(ctx, group2); !errors.Is(err, config.ErrNoSecret) {
 		t.Fatalf("secret stored from a non-writer; want ErrNoSecret")
+	}
+}
+
+func newFolderStores(t *testing.T) (*model.Store, *chunkstore.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	cdb, err := storage.Open(storage.Options{Path: filepath.Join(dir, "chunk.db"), MaxOpenConns: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cdb.Close() })
+	cs, err := chunkstore.Open(chunkstore.Options{DB: cdb, BlobDir: filepath.Join(dir, "blobs")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	mdb, err := storage.Open(storage.Options{Path: filepath.Join(dir, "model.db"), MaxOpenConns: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mdb.Close() })
+	ms, err := model.Open(model.Options{DB: mdb, NodeID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms, cs
+}
+
+func putVersion(t *testing.T, ms *model.Store, cs *chunkstore.Store, path, content string) {
+	t.Helper()
+	ctx := context.Background()
+	id, err := cs.Put(ctx, chunkstore.FolderContext{}, []byte(content))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	m := manifest.Manifest{Kind: manifest.KindRegular, Path: path, Mode: 0o644, Chunks: []manifest.ChunkRef{{ID: id, Length: int64(len(content))}}}
+	if _, err := ms.PutManifest(ctx, m, model.Metadata{Size: int64(len(content))}); err != nil {
+		t.Fatalf("PutManifest: %v", err)
+	}
+}
+
+func hasContent(t *testing.T, cs *chunkstore.Store, content string) bool {
+	t.Helper()
+	ok, err := cs.Has(context.Background(), hasher.Sum([]byte(content)))
+	if err != nil {
+		t.Fatalf("Has: %v", err)
+	}
+	return ok
+}
+
+func gcRuntime(t *testing.T) (*syncRuntime, *model.Store, *chunkstore.Store) {
+	t.Helper()
+	ms, cs := newFolderStores(t)
+	rt := &syncRuntime{folders: []syncengine.FolderConfig{{FolderID: "g1", Role: syncengine.RoleReader, Model: ms, Chunks: cs}}}
+	return rt, ms, cs
+}
+
+func TestSweepChunksReclaimsUnreachable(t *testing.T) {
+	ctx := context.Background()
+	rt, ms, cs := gcRuntime(t)
+	log := slog.New(slog.DiscardHandler)
+
+	putVersion(t, ms, cs, "a.txt", "version one")
+	s1, err := ms.Cut(ctx)
+	if err != nil {
+		t.Fatalf("Cut: %v", err)
+	}
+	putVersion(t, ms, cs, "a.txt", "version two")
+	if _, err := ms.Cut(ctx); err != nil {
+		t.Fatalf("Cut: %v", err)
+	}
+	if err := ms.Forget(ctx, s1); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	rt.sweepChunks(ctx, log, time.Now().Add(2*gc.DefaultGraceAge))
+	if hasContent(t, cs, "version one") {
+		t.Fatal("unreachable past-grace chunk not reclaimed")
+	}
+	if !hasContent(t, cs, "version two") {
+		t.Fatal("reachable chunk wrongly reclaimed")
+	}
+}
+
+func TestSweepChunksSkipsWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	rt, ms, cs := gcRuntime(t)
+	log := slog.New(slog.DiscardHandler)
+
+	putVersion(t, ms, cs, "a.txt", "version one")
+	s1, err := ms.Cut(ctx)
+	if err != nil {
+		t.Fatalf("Cut: %v", err)
+	}
+	putVersion(t, ms, cs, "a.txt", "version two")
+	if _, err := ms.Cut(ctx); err != nil {
+		t.Fatalf("Cut: %v", err)
+	}
+	if err := ms.Forget(ctx, s1); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	rt.sweepChunks(ctx, log, time.Now())
+	if !hasContent(t, cs, "version one") {
+		t.Fatal("within-grace chunk was reclaimed")
 	}
 }

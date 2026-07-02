@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GhentiLabs/Trove/client/internal/config"
+	"github.com/GhentiLabs/Trove/client/internal/control"
 	"github.com/GhentiLabs/Trove/client/internal/membership"
 	"github.com/GhentiLabs/Trove/client/internal/model"
 	"github.com/GhentiLabs/Trove/client/internal/node"
@@ -37,6 +38,13 @@ commands:
   run        run the peer: sync and membership gossip (-trove)
   restore    recover a folder from any source (-group -code -from -root)
   status     show each folder's role, root, and last-synced receipts
+  peers      show the running daemon's live peer connections
+  quota      change a folder's storage cap (-group -quota)
+  remove     stop syncing a folder and drop it from config (-group [-purge])
+
+found, invite, join, status, quota, and remove talk to the running daemon when
+one owns the state dir, so changes take effect without a restart; otherwise
+they work on the on-disk state directly.
 `
 
 func main() {
@@ -67,6 +75,12 @@ func run(args []string) error {
 		return cmdRestore(rest)
 	case "status":
 		return cmdStatus(rest)
+	case "peers":
+		return cmdPeers(rest)
+	case "quota":
+		return cmdQuota(rest)
+	case "remove":
+		return cmdRemove(rest)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", cmd)
@@ -81,6 +95,25 @@ type peer struct {
 	cfg     *config.Store
 	members *membership.Store
 	close   func()
+}
+
+// daemonClient connects to the daemon owning dir's control socket. ok is false
+// when no daemon is running (or the socket is stale); callers then fall back to
+// the direct on-disk stores. A socket that exists but does not answer gets a
+// stderr warning, since a busy daemon will not see a direct change until it
+// reloads or restarts.
+func daemonClient(dir string) (*control.Client, bool) {
+	if _, err := os.Stat(control.SocketPath(dir)); err != nil {
+		return nil, false
+	}
+	c := control.Dial(dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := c.Identity(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "trove-peer: a control socket exists but the daemon did not answer; working on the on-disk state directly (a running daemon will not see this until it reloads)")
+		return nil, false
+	}
+	return c, true
 }
 
 func loadIdentity(dir string) (ed25519.PrivateKey, tls.Certificate, string, error) {
@@ -209,12 +242,26 @@ func cmdFound(args []string) error {
 	if err != nil {
 		return fmt.Errorf("found: -quota: %w", err)
 	}
+	ctx := context.Background()
+	if c, ok := daemonClient(*dir); ok {
+		// The daemon resolves paths in its own working directory, so pin the
+		// root before it crosses the socket.
+		abs, err := filepath.Abs(*root)
+		if err != nil {
+			return err
+		}
+		resp, err := c.Found(ctx, control.FoundRequest{Root: abs, Encrypted: *encrypted, KeepHistory: !*syncOnly, QuotaBytes: quotaBytes})
+		if err != nil {
+			return err
+		}
+		printFounded(resp.GroupID, resp.RecoveryCode)
+		return nil
+	}
 	p, err := openPeer(*dir)
 	if err != nil {
 		return err
 	}
 	defer p.close()
-	ctx := context.Background()
 	group, err := p.members.Found(ctx)
 	if err != nil {
 		return err
@@ -222,7 +269,6 @@ func cmdFound(args []string) error {
 	if err := p.cfg.AddFolder(ctx, config.Folder{ID: group, Root: *root, ShareID: group, Encrypted: *encrypted, KeepHistory: !*syncOnly, QuotaBytes: quotaBytes}); err != nil {
 		return err
 	}
-	fmt.Println("group id:", group)
 	var secret [config.MasterKeyLen]byte
 	if *encrypted {
 		secret, err = p.cfg.GenerateFolderKey(ctx, group)
@@ -232,10 +278,15 @@ func cmdFound(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("recovery code:", config.EncodeRecoveryCode(secret))
+	printFounded(group, config.EncodeRecoveryCode(secret))
+	return nil
+}
+
+func printFounded(group, recoveryCode string) {
+	fmt.Println("group id:", group)
+	fmt.Println("recovery code:", recoveryCode)
 	fmt.Println("store the recovery code safely; it is the only way to recover this folder without a member online")
 	fmt.Println("share this id with members; collect their `identity` output to invite them")
-	return nil
 }
 
 func cmdInvite(args []string) error {
@@ -265,6 +316,13 @@ func cmdInvite(args []string) error {
 		role, tier = membership.RoleWriter, "writer"
 	case *holderFlag:
 		role, tier = membership.RoleHolder, "holder"
+	}
+	if c, ok := daemonClient(*dir); ok {
+		if err := c.Invite(context.Background(), *group, control.InviteRequest{NodeID: *nodeID, PublicKey: *keyHex, Role: tier}); err != nil {
+			return err
+		}
+		fmt.Printf("admitted %s as a %s of %s\n", *nodeID, tier, *group)
+		return nil
 	}
 	p, err := openPeer(*dir)
 	if err != nil {
@@ -303,12 +361,28 @@ func cmdJoin(args []string) error {
 	if _, ok := membership.Founder(*group); !ok {
 		return fmt.Errorf("join: %q is not a valid group id", *group)
 	}
+	ctx := context.Background()
+	if c, ok := daemonClient(*dir); ok {
+		rootArg := *root
+		if rootArg != "" {
+			abs, err := filepath.Abs(rootArg)
+			if err != nil {
+				return err
+			}
+			rootArg = abs
+		}
+		req := control.JoinRequest{GroupID: *group, Root: rootArg, Encrypted: *encrypted, Holder: *holderFlag, KeepHistory: !*syncOnly, QuotaBytes: quotaBytes}
+		if err := c.Join(ctx, req); err != nil {
+			return err
+		}
+		printJoined(*group, *holderFlag, true)
+		return nil
+	}
 	p, err := openPeer(*dir)
 	if err != nil {
 		return err
 	}
 	defer p.close()
-	ctx := context.Background()
 	if err := p.members.Join(ctx, *group); err != nil {
 		return err
 	}
@@ -318,11 +392,19 @@ func cmdJoin(args []string) error {
 	default:
 		return err
 	}
-	if *holderFlag {
+	printJoined(*group, *holderFlag, false)
+	return nil
+}
+
+func printJoined(group string, holder, live bool) {
+	if holder {
 		fmt.Println("joined as a holder: this node stores ciphertext only and never receives the key")
 	}
-	fmt.Printf("joined %s; run `trove-peer run -trove ...` to sync\n", *group)
-	return nil
+	if live {
+		fmt.Printf("joined %s; the running daemon is syncing it\n", group)
+		return
+	}
+	fmt.Printf("joined %s; run `trove-peer run -trove ...` to sync\n", group)
 }
 
 func cmdRestore(args []string) error {
@@ -384,36 +466,72 @@ func cmdStatus(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_, _, nodeID, err := loadIdentity(*dir)
+	if c, ok := daemonClient(*dir); ok {
+		return printLiveStatus(context.Background(), c)
+	}
+	p, err := openPeer(*dir)
 	if err != nil {
 		return err
 	}
-	db, err := storage.Open(storage.Options{Path: filepath.Join(*dir, "config.db"), MaxOpenConns: 1})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
-	cfg, err := config.Open(config.Options{DB: db, NodeID: nodeID})
-	if err != nil {
-		return err
-	}
+	defer p.close()
 	ctx := context.Background()
-	folders, err := cfg.ListFolders(ctx)
+	folders, err := p.cfg.ListFolders(ctx)
 	if err != nil {
 		return err
 	}
-	fmt.Println("node id:", nodeID)
+	fmt.Println("node id:", p.nodeID)
 	for _, f := range folders {
 		if f.ShareID == "" {
 			continue
 		}
-		role := "reader"
-		if founder, ok := membership.Founder(f.ShareID); ok && founder == nodeID {
-			role = "owner"
-		}
-		fmt.Printf("\nfolder %s (%s)\n  root: %s\n", f.ShareID, role, f.Root)
-		if err := printFolderReceipts(ctx, *dir, f.ID, nodeID, f.QuotaBytes); err != nil {
+		fmt.Printf("\nfolder %s (%s)\n  root: %s\n", f.ShareID, folderRoleName(ctx, p, f), f.Root)
+		if err := printFolderReceipts(ctx, *dir, f.ID, p.nodeID, f.QuotaBytes); err != nil {
 			fmt.Printf("  receipts: unavailable (%v)\n", err)
+		}
+	}
+	return nil
+}
+
+// folderRoleName mirrors the daemon's role derivation for the offline status path.
+func folderRoleName(ctx context.Context, p *peer, f config.Folder) string {
+	if f.Holder {
+		return "holder"
+	}
+	if founder, ok := membership.Founder(f.ShareID); ok && founder == p.nodeID {
+		return "owner"
+	}
+	if role, ok, err := p.members.RoleOf(ctx, f.ShareID, p.nodeID); err == nil && ok && role == membership.RoleWriter {
+		return "writer"
+	}
+	return "reader"
+}
+
+// printLiveStatus renders the running daemon's view in the same shape as the
+// direct on-disk path below, which the e2e harness parses.
+func printLiveStatus(ctx context.Context, c *control.Client) error {
+	st, err := c.Status(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println("node id:", st.NodeID)
+	for _, f := range st.Folders {
+		fmt.Printf("\nfolder %s (%s)\n  root: %s\n", f.ID, f.Role, f.Root)
+		if !f.Synced {
+			fmt.Println("  not yet synced")
+			continue
+		}
+		limit := "unlimited"
+		if f.QuotaBytes > 0 {
+			limit = formatSize(f.QuotaBytes)
+		}
+		fmt.Printf("  storage: %s / %s\n", formatSize(f.UsedBytes), limit)
+		if len(f.Receipts) == 0 {
+			fmt.Println("  not yet synced")
+			continue
+		}
+		for _, r := range f.Receipts {
+			fmt.Printf("  peer %s  seq=%d  last synced %s\n",
+				r.PeerID, r.HighWater, r.SyncedAt.Format(time.RFC3339))
 		}
 	}
 	return nil
@@ -456,6 +574,121 @@ func printFolderReceipts(ctx context.Context, dir, folderID, nodeID string, quot
 			r.PeerID, r.HighWater, r.SyncedAt.Format(time.RFC3339))
 	}
 	return nil
+}
+
+func cmdPeers(args []string) error {
+	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
+	dir := fs.String("dir", ".trove", "state directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, ok := daemonClient(*dir)
+	if !ok {
+		return errors.New("peers: no daemon is running on this state dir")
+	}
+	peers, err := c.Peers(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(peers.Active) == 0 {
+		fmt.Println("no connected peers")
+		return nil
+	}
+	for _, p := range peers.Active {
+		fmt.Printf("peer %s  folders: %s\n", p.NodeID, strings.Join(p.Folders, ", "))
+	}
+	return nil
+}
+
+func cmdQuota(args []string) error {
+	fs := flag.NewFlagSet("quota", flag.ContinueOnError)
+	dir := fs.String("dir", ".trove", "state directory")
+	group := fs.String("group", "", "group id of the folder")
+	quota := fs.String("quota", "", "new cap, e.g. 10GB or 500MB; 0 or empty is unlimited")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *group == "" {
+		return errors.New("quota: -group is required")
+	}
+	quotaBytes, err := parseSize(*quota)
+	if err != nil {
+		return fmt.Errorf("quota: -quota: %w", err)
+	}
+	ctx := context.Background()
+	if c, ok := daemonClient(*dir); ok {
+		f, err := c.SetQuota(ctx, *group, quotaBytes)
+		if err != nil {
+			return err
+		}
+		printQuotaSet(*group, quotaBytes)
+		if f.QuotaWarning != "" {
+			fmt.Println("warning:", f.QuotaWarning)
+		}
+		return nil
+	}
+	p, err := openPeer(*dir)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	if err := p.cfg.SetFolderQuota(ctx, *group, quotaBytes); err != nil {
+		return err
+	}
+	printQuotaSet(*group, quotaBytes)
+	return nil
+}
+
+func printQuotaSet(group string, quota int64) {
+	limit := "unlimited"
+	if quota > 0 {
+		limit = formatSize(quota)
+	}
+	fmt.Printf("quota for %s set to %s\n", group, limit)
+}
+
+func cmdRemove(args []string) error {
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+	dir := fs.String("dir", ".trove", "state directory")
+	group := fs.String("group", "", "group id of the folder to remove")
+	purge := fs.Bool("purge", false, "also delete the folder's local state (history and chunk stores); working files are never touched")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *group == "" {
+		return errors.New("remove: -group is required")
+	}
+	ctx := context.Background()
+	if c, ok := daemonClient(*dir); ok {
+		if err := c.Remove(ctx, *group, *purge); err != nil {
+			return err
+		}
+		printRemoved(*group, *purge)
+		return nil
+	}
+	p, err := openPeer(*dir)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	if err := p.cfg.RemoveFolder(ctx, *group); err != nil {
+		return err
+	}
+	if *purge {
+		if err := os.RemoveAll(filepath.Join(*dir, "folders", *group)); err != nil {
+			return fmt.Errorf("remove: purge folder state: %w", err)
+		}
+	}
+	printRemoved(*group, *purge)
+	return nil
+}
+
+func printRemoved(group string, purge bool) {
+	fmt.Printf("removed %s; working files were left in place\n", group)
+	if !purge {
+		fmt.Println("its local history remains under the state dir; re-run with -purge to delete it")
+	}
+	fmt.Println("this node remains on the group's roster; other members still count it a member")
 }
 
 func cmdRun(args []string) error {

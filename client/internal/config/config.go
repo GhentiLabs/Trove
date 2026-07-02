@@ -242,6 +242,20 @@ func (s *Store) SetFolderShareID(ctx context.Context, id, shareID string) error 
 	})
 }
 
+// SetFolderQuota changes a folder's storage cap; 0 means unlimited.
+func (s *Store) SetFolderQuota(ctx context.Context, id string, quota int64) error {
+	return s.db.WithTx(ctx, func(tx *storage.Tx) error {
+		res, err := tx.Exec(ctx, `UPDATE folders SET quota_bytes = ? WHERE id = ?`, quota, id)
+		if err != nil {
+			return fmt.Errorf("config: set quota: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrFolderNotFound
+		}
+		return nil
+	})
+}
+
 // SetHolderVerifier records the non-secret folder verifier a holder learned from a trusted
 // member's advertisement, so a later restore can be proven against it without the key.
 func (s *Store) SetHolderVerifier(ctx context.Context, id string, verifier []byte) error {
